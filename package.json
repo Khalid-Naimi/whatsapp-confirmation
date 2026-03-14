@@ -1,0 +1,13 @@
+{
+  "name": "woocommerce-whatsapp-confirmation",
+  "version": "1.0.0",
+  "description": "Backend service for WooCommerce WhatsApp order confirmations via Wasender.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

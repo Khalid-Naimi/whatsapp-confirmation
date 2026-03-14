@@ -1,0 +1,44 @@
+# WooCommerce WhatsApp Confirmation Service
+
+Backend-only Node.js service that:
+
+- receives WooCommerce order webhooks
+- sends order confirmation messages through Wasender
+- receives WhatsApp replies through Wasender webhooks
+- updates WooCommerce order status to `processing` or `cancelled`
+
+## Endpoints
+
+- `POST /webhooks/woocommerce`
+- `POST /webhooks/wasender`
+- `GET /health`
+
+## Quick start
+
+1. Copy `.env.example` to `.env` and fill in your credentials.
+2. Run `npm start`.
+3. Expose the server over HTTPS.
+4. Configure:
+   - WooCommerce webhook to `POST /webhooks/woocommerce`
+   - Wasender webhook to `POST /webhooks/wasender`
+
+## Environment variables
+
+- `PORT`: HTTP port
+- `DATA_FILE`: JSON storage file path
+- `WOOCOMMERCE_BASE_URL`: WooCommerce store URL
+- `WOOCOMMERCE_CONSUMER_KEY`: WooCommerce REST consumer key
+- `WOOCOMMERCE_CONSUMER_SECRET`: WooCommerce REST consumer secret
+- `WOOCOMMERCE_WEBHOOK_SECRET`: secret used to verify WooCommerce webhook signatures
+- `WASENDER_BASE_URL`: Wasender API base URL
+- `WASENDER_API_TOKEN`: Wasender API token
+- `WASENDER_WEBHOOK_SECRET`: shared secret for Wasender webhook validation
+- `WASENDER_SIGNATURE_HEADER`: request header containing the Wasender signature
+- `CONFIRMATION_MESSAGE_TEMPLATE`: outbound message template
+- `INVALID_REPLY_MESSAGE`: invalid-reply follow-up message
+
+## Notes
+
+- Persistence is file-backed JSON for easy local setup.
+- In production, consider replacing `JsonStore` with a real database.
+- Wasender webhook verification is implemented as configurable HMAC validation because their deployments can vary by header naming and digest encoding.
