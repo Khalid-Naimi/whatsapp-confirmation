@@ -1,4 +1,4 @@
-import { formatOrderTotal, interpolateTemplate, normalizePhone } from '../utils/format.js';
+import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems } from '../utils/format.js';
 
 export class ConfirmationService {
   constructor({ store, wasenderClient, wooClient, messages, logger = console }) {
@@ -14,7 +14,7 @@ export class ConfirmationService {
       return { status: 200, body: { ok: true, duplicate: true } };
     }
 
-    const normalizedOrder = normalizeWooOrder(payload);
+    const normalizedOrder = normalizeWooOrder(payload, this.messages);
     const existing = this.store.getOrder(normalizedOrder.orderId);
     if (existing?.confirmationState === 'pending_confirmation' || existing?.confirmationState === 'confirmed' || existing?.confirmationState === 'cancelled') {
       this.store.recordEvent('woocommerce', eventKey, payload, 'duplicate_order');
@@ -32,9 +32,13 @@ export class ConfirmationService {
     }
 
     const message = interpolateTemplate(this.messages.confirmationTemplate, {
-      customerName: normalizedOrder.customerName || 'Customer',
+      customerName: normalizedOrder.customerName || 'l3ziz(a)',
       orderId: normalizedOrder.orderId,
-      orderTotal: formatOrderTotal(normalizedOrder)
+      orderTotal: formatOrderTotal(normalizedOrder),
+      orderItemsSummary: normalizedOrder.orderItemsSummary,
+      deliveryCity: normalizedOrder.deliveryCity,
+      deliveryEta: normalizedOrder.deliveryEta,
+      storeName: normalizedOrder.storeName || ''
     });
 
     try {
@@ -179,9 +183,14 @@ export class ConfirmationService {
   }
 }
 
-function normalizeWooOrder(payload) {
+function normalizeWooOrder(payload, messages) {
   const billing = payload.billing || {};
   const shipping = payload.shipping || {};
+  const shippingCity = String(shipping.city || '').trim();
+  const billingCity = String(billing.city || '').trim();
+  const resolvedCity = shippingCity || billingCity;
+  const deliveryCity = resolvedCity || messages.defaultCityLabel;
+  const lineItems = Array.isArray(payload.line_items) ? payload.line_items : [];
 
   return {
     orderId: String(payload.id),
@@ -189,9 +198,19 @@ function normalizeWooOrder(payload) {
     customerName: [billing.first_name, billing.last_name].filter(Boolean).join(' ').trim(),
     total: payload.total,
     currency: payload.currency,
+    deliveryCity,
+    deliveryEta: resolveDeliveryEta(resolvedCity, messages),
+    lineItems,
+    orderItemsSummary: summarizeOrderItems(lineItems),
     wooStatus: payload.status || 'pending',
     rawOrder: payload
   };
+}
+
+function resolveDeliveryEta(city, messages) {
+  return city === 'Casablanca'
+    ? messages.deliveryEtaCasablanca
+    : messages.deliveryEtaOtherCities;
 }
 
 function normalizeWasenderInbound(payload) {

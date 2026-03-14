@@ -40,8 +40,11 @@ function createTestContext() {
     wasenderClient,
     wooClient,
     messages: {
-      confirmationTemplate: 'Hello {{customerName}}, reply 1 to confirm order #{{orderId}} or 2 to cancel.',
-      invalidReply: 'Please reply only with 1 or 2.'
+      confirmationTemplate: 'Salam {{customerName}}, twsselna b talab dyalk.\nNumiro dyal talab: {{orderId}}\nTalab dyalk: {{orderItemsSummary}}\nTaman l-kolli: {{orderTotal}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nLkhlas 3nd l-istilam.\nIla mtaf9 m3a had chi kaml, rdd b 1. Ila ma bqitich bghiti talab, rdd b 2.',
+      invalidReply: 'Afak rdd ghir b 1 bash t2akked talab, wela b 2 ila ma bqitihch.',
+      deliveryEtaCasablanca: '24h',
+      deliveryEtaOtherCities: '2 to 3 business days',
+      defaultCityLabel: 'Maghrib'
     },
     logger: {
       error() {},
@@ -134,7 +137,14 @@ test('new WooCommerce order sends one confirmation message', async () => {
       first_name: 'Khalid',
       last_name: 'Naimi',
       phone: '212612345678'
-    }
+    },
+    shipping: {
+      city: 'Casablanca'
+    },
+    line_items: [
+      { name: 'Gel Nettoyant', quantity: 2 },
+      { name: 'Creme', quantity: 1 }
+    ]
   };
 
   const result = await dispatch(app, {
@@ -150,6 +160,9 @@ test('new WooCommerce order sends one confirmation message', async () => {
   assert.equal(result.statusCode, 202);
   assert.equal(wasenderCalls.length, 1);
   assert.equal(store.getOrder('101').confirmationState, 'pending_confirmation');
+  assert.match(wasenderCalls[0].message, /Gel Nettoyant x2, Creme x1/);
+  assert.match(wasenderCalls[0].message, /Lmdina: Casablanca/);
+  assert.match(wasenderCalls[0].message, /Tawsil: 24h/);
 });
 
 test('duplicate WooCommerce webhook does not send twice', async () => {
@@ -163,7 +176,11 @@ test('duplicate WooCommerce webhook does not send twice', async () => {
       first_name: 'Sara',
       last_name: 'A',
       phone: '212600000001'
-    }
+    },
+    shipping: {
+      city: 'Rabat'
+    },
+    line_items: [{ name: 'Produit', quantity: 1 }]
   };
 
   const headers = {
@@ -189,7 +206,11 @@ test('reply 1 confirms and updates WooCommerce to processing', async () => {
       first_name: 'Lina',
       last_name: 'B',
       phone: '212600000002'
-    }
+    },
+    shipping: {
+      city: 'Casablanca'
+    },
+    line_items: [{ name: 'Savon', quantity: 1 }]
   };
 
   await dispatch(app, {
@@ -228,7 +249,11 @@ test('reply 2 cancels the order', async () => {
       first_name: 'Omar',
       last_name: 'C',
       phone: '212600000003'
-    }
+    },
+    shipping: {
+      city: 'Marrakech'
+    },
+    line_items: [{ name: 'Pack', quantity: 3 }]
   };
 
   await dispatch(app, {
@@ -266,7 +291,11 @@ test('invalid reply keeps order pending and sends clarification once', async () 
       first_name: 'Aya',
       last_name: 'D',
       phone: '212600000004'
-    }
+    },
+    shipping: {
+      city: 'Rabat'
+    },
+    line_items: [{ name: 'Huile', quantity: 1 }]
   };
 
   await dispatch(app, {
@@ -292,6 +321,7 @@ test('invalid reply keeps order pending and sends clarification once', async () 
   assert.equal(wasenderCalls.length, 2);
   assert.equal(store.getOrder('105').confirmationState, 'pending_confirmation');
   assert.equal(store.getOrder('105').clarificationSent, true);
+  assert.equal(wasenderCalls[1].message, 'Afak rdd ghir b 1 bash t2akked talab, wela b 2 ila ma bqitihch.');
 });
 
 test('bad signatures are rejected', async () => {
@@ -315,4 +345,93 @@ test('bad signatures are rejected', async () => {
 
   assert.equal(wooResult.statusCode, 401);
   assert.equal(wasenderResult.statusCode, 401);
+});
+
+test('non-Casablanca city uses 2 to 3 business days', async () => {
+  const { app, wasenderCalls } = createTestContext();
+  const payload = {
+    id: 107,
+    status: 'pending',
+    total: '120.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Nora',
+      last_name: 'E',
+      phone: '212600000006',
+      city: 'Agadir'
+    },
+    line_items: [{ name: 'Masque', quantity: 2 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-7'
+    },
+    payload
+  });
+
+  assert.match(wasenderCalls[0].message, /Tawsil: 2 to 3 business days/);
+});
+
+test('city match is exact so Casa does not get 24h', async () => {
+  const { app, wasenderCalls } = createTestContext();
+  const payload = {
+    id: 108,
+    status: 'pending',
+    total: '130.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Yassine',
+      last_name: 'F',
+      phone: '212600000007'
+    },
+    shipping: {
+      city: 'Casa'
+    },
+    line_items: [{ name: 'Spray', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-8'
+    },
+    payload
+  });
+
+  assert.match(wasenderCalls[0].message, /Tawsil: 2 to 3 business days/);
+});
+
+test('missing city uses fallback label and non-Casablanca eta', async () => {
+  const { app, wasenderCalls } = createTestContext();
+  const payload = {
+    id: 109,
+    status: 'pending',
+    total: '140.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Salma',
+      last_name: 'G',
+      phone: '212600000008'
+    },
+    line_items: [{ name: 'Brosse', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-9'
+    },
+    payload
+  });
+
+  assert.match(wasenderCalls[0].message, /Lmdina: Maghrib/);
+  assert.match(wasenderCalls[0].message, /Tawsil: 2 to 3 business days/);
 });

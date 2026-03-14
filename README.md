@@ -34,6 +34,9 @@ Backend-only Node.js service that:
 - `WASENDER_API_TOKEN`: Wasender API token
 - `WASENDER_WEBHOOK_SECRET`: shared secret for Wasender webhook validation
 - `WASENDER_SIGNATURE_HEADER`: request header containing the Wasender signature
+- `DELIVERY_ETA_CASABLANCA`: ETA used when city is exactly `Casablanca`
+- `DELIVERY_ETA_OTHER_CITIES`: ETA used for every other city or missing city
+- `DEFAULT_DELIVERY_CITY_LABEL`: fallback city label when no city is available
 - `CONFIRMATION_MESSAGE_TEMPLATE`: outbound message template
 - `INVALID_REPLY_MESSAGE`: invalid-reply follow-up message
 

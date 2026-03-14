@@ -53,9 +53,12 @@ export function loadConfig() {
     },
     messages: {
       confirmationTemplate: process.env.CONFIRMATION_MESSAGE_TEMPLATE ||
-        'Hello {{customerName}}, we received your order #{{orderId}} totaling {{orderTotal}}. Reply with 1 to confirm or 2 to cancel.',
+        'Salam {{customerName}}, twsselna b talab dyalk.\nNumiro dyal talab: {{orderId}}\nTalab dyalk: {{orderItemsSummary}}\nTaman l-kolli: {{orderTotal}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nLkhlas 3nd l-istilam.\nIla mtaf9 m3a had chi kaml, rdd b 1. Ila ma bqitich bghiti talab, rdd b 2.',
       invalidReply: process.env.INVALID_REPLY_MESSAGE ||
-        'Please reply only with 1 to confirm your order or 2 to cancel it.'
+        'Afak rdd ghir b 1 bash t2akked talab, wela b 2 ila ma bqitihch.',
+      deliveryEtaCasablanca: process.env.DELIVERY_ETA_CASABLANCA || '24h',
+      deliveryEtaOtherCities: process.env.DELIVERY_ETA_OTHER_CITIES || '2 to 3 business days',
+      defaultCityLabel: process.env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'
     }
   };
 }

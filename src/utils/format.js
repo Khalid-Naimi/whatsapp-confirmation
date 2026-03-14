@@ -24,3 +24,19 @@ export function formatOrderTotal(order) {
   const currency = order.currency ?? '';
   return currency ? `${total} ${currency}`.trim() : String(total);
 }
+
+export function summarizeOrderItems(lineItems = []) {
+  const summary = lineItems
+    .map((item) => {
+      const name = String(item?.name || '').trim();
+      const quantity = Number(item?.quantity || 0);
+      if (!name) {
+        return '';
+      }
+      return quantity > 0 ? `${name} x${quantity}` : name;
+    })
+    .filter(Boolean)
+    .join(', ');
+
+  return summary || 'Talab ma baynch';
+}
