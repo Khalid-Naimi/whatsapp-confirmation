@@ -13,9 +13,17 @@ export function createApp({ config, confirmationService, logger = console }) {
       }
 
       const rawBody = await readBody(req);
-      const body = rawBody ? JSON.parse(rawBody) : {};
 
       if (req.url === '/webhooks/woocommerce') {
+        if (isWooPing(req, rawBody)) {
+          return sendJson(res, 200, { ok: true, ping: true });
+        }
+
+        const body = parseJsonBody(rawBody);
+        if (body === null) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid JSON body' });
+        }
+
         const signature = req.headers['x-wc-webhook-signature'];
         const valid = verifyWooSignature(rawBody, signature, config.woo.webhookSecret);
         if (!valid) {
@@ -28,6 +36,11 @@ export function createApp({ config, confirmationService, logger = console }) {
       }
 
       if (req.url === '/webhooks/wasender') {
+        const body = parseJsonBody(rawBody);
+        if (body === null) {
+          return sendJson(res, 400, { ok: false, error: 'Invalid JSON body' });
+        }
+
         const signature = req.headers[config.wasender.signatureHeader];
         const valid = verifyGenericHmacSignature(rawBody, signature, config.wasender.webhookSecret);
         if (!valid) {
@@ -66,6 +79,31 @@ function readBody(req) {
 function sendJson(res, statusCode, body) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+function parseJsonBody(rawBody) {
+  if (!rawBody) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+}
+
+function isWooPing(req, rawBody) {
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  if (!rawBody) {
+    return true;
+  }
+
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    return rawBody.includes('webhook_id=');
+  }
+
+  return /^webhook_id=\d+/u.test(rawBody);
 }
 
 function hashEvent(input) {
