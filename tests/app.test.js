@@ -300,7 +300,7 @@ test('reply 2 cancels the order', async () => {
   assert.equal(wasenderCalls[1].message, 'La commande dyalk t annulat.');
 });
 
-test('invalid reply keeps order pending and sends clarification once', async () => {
+test('invalid reply sends clarification twice then goes manual', async () => {
   const { app, wasenderCalls, store } = createTestContext();
   const orderPayload = {
     id: 105,
@@ -346,11 +346,57 @@ test('invalid reply keeps order pending and sends clarification once', async () 
     payload: replyPayload
   });
 
-  assert.equal(wasenderCalls.length, 2);
+  const secondReplyPayload = {
+    data: {
+      messages: {
+        key: {
+          remoteJid: '212600000004@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'safi'
+      }
+    }
+  };
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: secondReplyPayload
+  });
+
+  const thirdReplyPayload = {
+    data: {
+      messages: {
+        key: {
+          remoteJid: '212600000004@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'wach'
+      }
+    }
+  };
+  const thirdResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: thirdReplyPayload
+  });
+
+  assert.equal(wasenderCalls.length, 3);
   assert.equal(store.getOrder('105').confirmationState, 'pending_confirmation');
-  assert.equal(store.getOrder('105').clarificationSent, true);
+  assert.equal(store.getOrder('105').invalidReplyCount, 2);
+  assert.equal(store.getOrder('105').manualFollowupRequired, true);
+  assert.equal(thirdResult.body.reason, 'manual_followup_required');
   assert.equal(
     wasenderCalls[1].message,
+    '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533'
+  );
+  assert.equal(
+    wasenderCalls[2].message,
     '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533'
   );
 });

@@ -50,7 +50,8 @@ export class ConfirmationService {
       this.store.upsertOrder({
         ...normalizedOrder,
         confirmationState: 'pending_confirmation',
-        clarificationSent: false,
+        invalidReplyCount: 0,
+        manualFollowupRequired: false,
         wasenderMessageId: extractMessageId(sendResult)
       });
       this.store.appendMessage({
@@ -111,7 +112,8 @@ export class ConfirmationService {
 
     const reply = inbound.text.trim();
     if (reply !== '1' && reply !== '2') {
-      if (!pendingOrder.clarificationSent) {
+      const invalidReplyCount = Number(pendingOrder.invalidReplyCount || 0);
+      if (invalidReplyCount < 2) {
         try {
           const clarification = await this.wasenderClient.sendMessage({
             to: pendingOrder.phone,
@@ -127,7 +129,8 @@ export class ConfirmationService {
           });
           this.store.upsertOrder({
             ...pendingOrder,
-            clarificationSent: true,
+            invalidReplyCount: invalidReplyCount + 1,
+            manualFollowupRequired: false,
             confirmationState: 'pending_confirmation'
           });
         } catch (error) {
@@ -137,6 +140,15 @@ export class ConfirmationService {
             lastError: error.message
           });
         }
+      } else {
+        this.store.upsertOrder({
+          ...pendingOrder,
+          invalidReplyCount,
+          manualFollowupRequired: true,
+          confirmationState: 'pending_confirmation'
+        });
+        this.store.recordEvent('wasender', eventKey, payload, 'manual_followup_required');
+        return { status: 202, body: { ok: false, reason: 'manual_followup_required' } };
       }
 
       this.store.recordEvent('wasender', eventKey, payload, 'invalid_reply');
