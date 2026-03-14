@@ -40,8 +40,8 @@ function createTestContext() {
     wasenderClient,
     wooClient,
     messages: {
-      confirmationTemplate: 'Salam {{customerName}}, twsselna b talab dyalk.\nNumiro dyal talab: {{orderId}}\nTalab dyalk: {{orderItemsSummary}}\nTaman l-kolli: {{orderTotal}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nLkhlas 3nd l-istilam.\nIla mtaf9 m3a had chi kaml, rdd b 1. Ila ma bqitich bghiti talab, rdd b 2.',
-      invalidReply: 'Afak rdd ghir b 1 bash t2akked talab, wela b 2 ila ma bqitihch.',
+      confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
+      invalidReply: '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       deliveryEtaCasablanca: '24h',
       deliveryEtaOtherCities: '2 to 3 business days',
       defaultCityLabel: 'Maghrib'
@@ -160,9 +160,12 @@ test('new WooCommerce order sends one confirmation message', async () => {
   assert.equal(result.statusCode, 202);
   assert.equal(wasenderCalls.length, 1);
   assert.equal(store.getOrder('101').confirmationState, 'pending_confirmation');
+  assert.match(wasenderCalls[0].message, /Salam Khalid Naimi, twsselna b la commande dyalk\./);
+  assert.match(wasenderCalls[0].message, /Numero dyal La commande: 101/);
   assert.match(wasenderCalls[0].message, /Gel Nettoyant x2, Creme x1/);
   assert.match(wasenderCalls[0].message, /Lmdina: Casablanca/);
   assert.match(wasenderCalls[0].message, /Tawsil: 24h/);
+  assert.match(wasenderCalls[0].message, /Ila 3endek chi question, seft la question dyalk l had numero: \+212 708-357533/);
 });
 
 test('duplicate WooCommerce webhook does not send twice', async () => {
@@ -321,7 +324,10 @@ test('invalid reply keeps order pending and sends clarification once', async () 
   assert.equal(wasenderCalls.length, 2);
   assert.equal(store.getOrder('105').confirmationState, 'pending_confirmation');
   assert.equal(store.getOrder('105').clarificationSent, true);
-  assert.equal(wasenderCalls[1].message, 'Afak rdd ghir b 1 bash t2akked talab, wela b 2 ila ma bqitihch.');
+  assert.equal(
+    wasenderCalls[1].message,
+    '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533'
+  );
 });
 
 test('bad signatures are rejected', async () => {

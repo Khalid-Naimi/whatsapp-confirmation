@@ -20,7 +20,7 @@ function readEnvFile(filePath = '.env') {
       }
 
       const key = trimmed.slice(0, separatorIndex).trim();
-      const value = trimmed.slice(separatorIndex + 1).trim();
+      const value = decodeEnvValue(trimmed.slice(separatorIndex + 1).trim());
       if (!process.env[key]) {
         process.env[key] = value;
       }
@@ -31,6 +31,13 @@ function readEnvFile(filePath = '.env') {
 }
 
 readEnvFile();
+
+function decodeEnvValue(value) {
+  return value
+    .replace(/\\n/gu, '\n')
+    .replace(/\\r/gu, '\r')
+    .replace(/\\"/gu, '"');
+}
 
 export function loadConfig() {
   const cwd = process.cwd();
@@ -53,9 +60,9 @@ export function loadConfig() {
     },
     messages: {
       confirmationTemplate: process.env.CONFIRMATION_MESSAGE_TEMPLATE ||
-        'Salam {{customerName}}, twsselna b talab dyalk.\nNumiro dyal talab: {{orderId}}\nTalab dyalk: {{orderItemsSummary}}\nTaman l-kolli: {{orderTotal}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nLkhlas 3nd l-istilam.\nIla mtaf9 m3a had chi kaml, rdd b 1. Ila ma bqitich bghiti talab, rdd b 2.',
+        'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       invalidReply: process.env.INVALID_REPLY_MESSAGE ||
-        'Afak rdd ghir b 1 bash t2akked talab, wela b 2 ila ma bqitihch.',
+        '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       deliveryEtaCasablanca: process.env.DELIVERY_ETA_CASABLANCA || '24h',
       deliveryEtaOtherCities: process.env.DELIVERY_ETA_OTHER_CITIES || '2 to 3 business days',
       defaultCityLabel: process.env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'
