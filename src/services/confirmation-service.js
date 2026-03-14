@@ -100,7 +100,7 @@ export class ConfirmationService {
     });
 
     if (!pendingOrder) {
-      this.store.recordEvent('wasender', eventKey, payload, 'unmatched_reply');
+      this.store.recordEvent('wasender', eventKey, payload, 'manual_followup_required');
       return { status: 202, body: { ok: false, reason: 'unmatched_reply' } };
     }
 
@@ -152,6 +152,21 @@ export class ConfirmationService {
     try {
       await this.wooClient.updateOrderStatus(pendingOrder.orderId, nextWooStatus);
       await this.safeAddOrderNote(pendingOrder.orderId, note);
+      const followUpMessage = reply === '1'
+        ? this.messages.confirmedReply
+        : this.messages.cancelledReply;
+      const followUpResult = await this.wasenderClient.sendMessage({
+        to: pendingOrder.phone,
+        message: followUpMessage
+      });
+      this.store.appendMessage({
+        source: 'outbound',
+        orderId: pendingOrder.orderId,
+        phone: pendingOrder.phone,
+        kind: reply === '1' ? 'confirmation_success' : 'cancellation_success',
+        payload: followUpResult,
+        text: followUpMessage
+      });
 
       this.store.upsertOrder({
         ...pendingOrder,
@@ -186,9 +201,10 @@ export class ConfirmationService {
 function normalizeWooOrder(payload, messages) {
   const billing = payload.billing || {};
   const shipping = payload.shipping || {};
+  const billingState = String(billing.state || payload.billing_state || '').trim();
   const shippingCity = String(shipping.city || '').trim();
   const billingCity = String(billing.city || '').trim();
-  const resolvedCity = shippingCity || billingCity;
+  const resolvedCity = billingState || shippingCity || billingCity;
   const deliveryCity = resolvedCity || messages.defaultCityLabel;
   const lineItems = Array.isArray(payload.line_items) ? payload.line_items : [];
 
@@ -214,7 +230,22 @@ function resolveDeliveryEta(city, messages) {
 }
 
 function normalizeWasenderInbound(payload) {
+  const messages = extractWasenderMessages(payload);
+  const primaryMessage = messages[0] || {};
+  const messageKey = primaryMessage.key || {};
+  const messageNode = primaryMessage.message || {};
+
+  if (messageKey.fromMe || primaryMessage.fromMe) {
+    return {
+      phone: '',
+      text: ''
+    };
+  }
+
   const candidatePhone =
+    messageKey.cleanedSenderPn ||
+    messageKey.senderPn ||
+    normalizeRemoteJid(messageKey.remoteJid) ||
     payload.from ||
     payload.sender ||
     payload.senderPhone ||
@@ -225,6 +256,9 @@ function normalizeWasenderInbound(payload) {
     payload.message?.from;
 
   const candidateText =
+    primaryMessage.messageBody ||
+    messageNode.conversation ||
+    messageNode.extendedTextMessage?.text ||
     payload.text ||
     payload.message ||
     payload.body ||
@@ -236,6 +270,25 @@ function normalizeWasenderInbound(payload) {
     phone: normalizePhone(candidatePhone),
     text: typeof candidateText === 'string' ? candidateText : ''
   };
+}
+
+function extractWasenderMessages(payload) {
+  const candidate = payload.data?.messages;
+  if (Array.isArray(candidate)) {
+    return candidate;
+  }
+  if (candidate && typeof candidate === 'object') {
+    return [candidate];
+  }
+  return [];
+}
+
+function normalizeRemoteJid(remoteJid) {
+  if (!remoteJid || typeof remoteJid !== 'string') {
+    return '';
+  }
+
+  return remoteJid.split('@')[0];
 }
 
 function extractMessageId(sendResult) {

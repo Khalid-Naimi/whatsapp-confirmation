@@ -63,8 +63,12 @@ export function loadConfig() {
         'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       invalidReply: process.env.INVALID_REPLY_MESSAGE ||
         '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
+      confirmedReply: process.env.CONFIRMED_REPLY_MESSAGE ||
+        'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
+      cancelledReply: process.env.CANCELLED_REPLY_MESSAGE ||
+        'La commande dyalk t annulat.',
       deliveryEtaCasablanca: process.env.DELIVERY_ETA_CASABLANCA || '24h',
-      deliveryEtaOtherCities: process.env.DELIVERY_ETA_OTHER_CITIES || '2 to 3 business days',
+      deliveryEtaOtherCities: process.env.DELIVERY_ETA_OTHER_CITIES || '2 a 3 jours ouvrables',
       defaultCityLabel: process.env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'
     }
   };
