@@ -192,7 +192,7 @@ test('duplicate WooCommerce webhook does not send twice', async () => {
   assert.equal(wasenderCalls.length, 1);
 });
 
-test('reply 1 confirms and updates WooCommerce to processing', async () => {
+test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
   const { app, wooStatusCalls, store, wasenderCalls } = createTestContext();
   const orderPayload = {
     id: 103,
@@ -239,7 +239,7 @@ test('reply 1 confirms and updates WooCommerce to processing', async () => {
   });
 
   assert.equal(result.statusCode, 202);
-  assert.deepEqual(wooStatusCalls[0], { orderId: '103', status: 'processing' });
+  assert.deepEqual(wooStatusCalls[0], { orderId: '103', status: 'on-hold' });
   assert.equal(store.getOrder('103').confirmationState, 'confirmed');
   assert.equal(
     wasenderCalls[1].message,

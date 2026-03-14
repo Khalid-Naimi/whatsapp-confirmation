@@ -5,7 +5,7 @@ Backend-only Node.js service that:
 - receives WooCommerce order webhooks
 - sends order confirmation messages through Wasender
 - receives WhatsApp replies through Wasender webhooks
-- updates WooCommerce order status to `processing` or `cancelled`
+- updates WooCommerce order status to `on-hold` or `cancelled`
 
 ## Endpoints
 

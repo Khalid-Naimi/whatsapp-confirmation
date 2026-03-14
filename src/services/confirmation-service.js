@@ -144,7 +144,7 @@ export class ConfirmationService {
     }
 
     const nextState = reply === '1' ? 'confirmed' : 'cancelled';
-    const nextWooStatus = reply === '1' ? 'processing' : 'cancelled';
+    const nextWooStatus = reply === '1' ? 'on-hold' : 'cancelled';
     const note = reply === '1'
       ? 'Customer confirmed order via WhatsApp.'
       : 'Customer cancelled order via WhatsApp.';
