@@ -40,7 +40,7 @@ function createTestContext() {
     wasenderClient,
     wooClient,
     messages: {
-      confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
+      confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       invalidReply: '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       confirmedReply: 'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
       cancelledReply: 'La commande dyalk t annulat.',
@@ -135,6 +135,7 @@ test('new WooCommerce order sends one confirmation message', async () => {
       first_name: 'Khalid',
       last_name: 'Naimi',
       phone: '212612345678',
+      address_1: '12 Rue Atlas',
       state: 'Casablanca'
     },
     line_items: [
@@ -159,6 +160,7 @@ test('new WooCommerce order sends one confirmation message', async () => {
   assert.match(wasenderCalls[0].message, /Salam Khalid Naimi, twsselna b la commande dyalk\./);
   assert.match(wasenderCalls[0].message, /Numero dyal La commande: 101/);
   assert.match(wasenderCalls[0].message, /Gel Nettoyant x2, Creme x1/);
+  assert.match(wasenderCalls[0].message, /Ladresse: 12 Rue Atlas/);
   assert.match(wasenderCalls[0].message, /Lmdina: Casablanca/);
   assert.match(wasenderCalls[0].message, /Tawsil: 24h/);
   assert.match(wasenderCalls[0].message, /Ila 3endek chi question, seft la question dyalk l had numero: \+212 708-357533/);
@@ -508,6 +510,7 @@ test('missing city uses fallback label and non-Casablanca eta', async () => {
   });
 
   assert.match(wasenderCalls[0].message, /Lmdina: Maghrib/);
+  assert.match(wasenderCalls[0].message, /Ladresse: Ma kaynach/);
   assert.match(wasenderCalls[0].message, /Tawsil: 2 a 3 jours ouvrables/);
 });
 

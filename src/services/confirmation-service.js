@@ -36,6 +36,7 @@ export class ConfirmationService {
       orderId: normalizedOrder.orderId,
       orderTotal: formatOrderTotal(normalizedOrder),
       orderItemsSummary: normalizedOrder.orderItemsSummary,
+      deliveryAddress: normalizedOrder.deliveryAddress,
       deliveryCity: normalizedOrder.deliveryCity,
       deliveryEta: normalizedOrder.deliveryEta,
       storeName: normalizedOrder.storeName || ''
@@ -214,6 +215,7 @@ function normalizeWooOrder(payload, messages) {
   const billing = payload.billing || {};
   const shipping = payload.shipping || {};
   const billingState = String(billing.state || payload.billing_state || '').trim();
+  const deliveryAddress = String(billing.address_1 || payload.billing_address_1 || '').trim() || 'Ma kaynach';
   const shippingCity = String(shipping.city || '').trim();
   const billingCity = String(billing.city || '').trim();
   const resolvedCity = billingState || shippingCity || billingCity;
@@ -226,6 +228,7 @@ function normalizeWooOrder(payload, messages) {
     customerName: [billing.first_name, billing.last_name].filter(Boolean).join(' ').trim(),
     total: payload.total,
     currency: payload.currency,
+    deliveryAddress,
     deliveryCity,
     deliveryEta: resolveDeliveryEta(resolvedCity, messages),
     lineItems,
