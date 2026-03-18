@@ -56,7 +56,7 @@ export class ConfirmationService {
     }
 
     const inbound = normalizeWasenderInbound(payload);
-    if (!inbound.phone || !inbound.text) {
+    if (!inbound.phone || (!inbound.text && inbound.type !== 'audio')) {
       this.store.recordEvent('wasender', eventKey, payload, 'ignored_non_message');
       return { status: 202, body: { ok: true, ignored: true } };
     }
@@ -66,7 +66,7 @@ export class ConfirmationService {
       source: 'inbound',
       orderId: pendingOrder?.orderId || null,
       phone: inbound.phone,
-      kind: 'customer_reply',
+      kind: inbound.type === 'audio' ? 'customer_audio_reply' : 'customer_reply',
       payload,
       text: inbound.text
     });
@@ -81,7 +81,7 @@ export class ConfirmationService {
       this.logger.warn(`Multiple pending orders found for ${inbound.phone}; using latest order ${pendingOrder.orderId}.`);
     }
 
-    const reply = inbound.text.trim();
+    const reply = inbound.type === 'audio' ? '' : inbound.text.trim();
     if (reply !== '1' && reply !== '2') {
       const invalidReplyCount = Number(pendingOrder.invalidReplyCount || 0);
       if (invalidReplyCount < 2) {
@@ -500,9 +500,12 @@ function normalizeWasenderInbound(payload) {
     payload.data?.body ||
     payload.message?.text;
 
+  const messageType = detectWasenderMessageType(primaryMessage, messageNode);
+
   return {
     phone: normalizePhone(candidatePhone),
-    text: typeof candidateText === 'string' ? candidateText : ''
+    text: typeof candidateText === 'string' ? candidateText : '',
+    type: messageType
   };
 }
 
@@ -523,6 +526,18 @@ function normalizeRemoteJid(remoteJid) {
   }
 
   return remoteJid.split('@')[0];
+}
+
+function detectWasenderMessageType(primaryMessage, messageNode) {
+  if (
+    primaryMessage.audio ||
+    messageNode.audioMessage ||
+    messageNode.ptt
+  ) {
+    return 'audio';
+  }
+
+  return 'text';
 }
 
 function extractMessageId(sendResult) {

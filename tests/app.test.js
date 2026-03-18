@@ -624,6 +624,101 @@ test('message without pending order is flagged as manual and gets no reply', asy
   assert.equal(db.events.at(-1).status, 'manual_followup_required');
 });
 
+test('audio reply with pending order is treated like invalid input', async () => {
+  const { app, wasenderCalls, store } = createTestContext();
+  const orderPayload = {
+    id: 110,
+    status: 'pending',
+    total: '150.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Audio',
+      last_name: 'Pending',
+      phone: '0612345680',
+      state: 'Casablanca',
+      address_1: '10 Rue Audio'
+    },
+    line_items: [{ name: 'Produit Audio', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-audio-1'
+    },
+    payload: orderPayload
+  });
+
+  const audioPayload = {
+    data: {
+      messages: {
+        key: {
+          cleanedSenderPn: '212612345680',
+          fromMe: false
+        },
+        message: {
+          audioMessage: {
+            mimetype: 'audio/ogg'
+          }
+        }
+      }
+    }
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: audioPayload
+  });
+
+  assert.equal(result.statusCode, 202);
+  assert.equal(result.body.reason, 'invalid_reply');
+  assert.equal(wasenderCalls.length, 2);
+  assert.equal(
+    wasenderCalls[1].message,
+    '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533'
+  );
+  assert.equal(store.getOrder('110').invalidReplyCount, 1);
+});
+
+test('audio reply without pending order is manual and gets no reply', async () => {
+  const { app, store, wasenderCalls } = createTestContext();
+  const audioPayload = {
+    data: {
+      messages: {
+        key: {
+          cleanedSenderPn: '212600000011',
+          fromMe: false
+        },
+        message: {
+          audioMessage: {
+            mimetype: 'audio/ogg'
+          }
+        }
+      }
+    }
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: audioPayload
+  });
+
+  assert.equal(result.statusCode, 202);
+  assert.equal(wasenderCalls.length, 0);
+  const db = store.read();
+  assert.equal(db.events.at(-1).status, 'manual_followup_required');
+});
+
 test('bot-originated Wasender events are ignored', async () => {
   const { app, wasenderCalls } = createTestContext();
   const replyPayload = {
