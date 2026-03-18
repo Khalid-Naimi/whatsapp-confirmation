@@ -3,16 +3,38 @@ export function normalizePhone(phone) {
     return '';
   }
 
-  const cleaned = String(phone).replace(/[^\d+]/gu, '');
-  if (!cleaned) {
+  const raw = String(phone).trim();
+  if (!raw) {
     return '';
   }
 
-  if (cleaned.startsWith('+')) {
-    return cleaned;
+  const hasLeadingPlus = raw.startsWith('+');
+  let digits = raw.replace(/\D/gu, '');
+  if (!digits) {
+    return '';
   }
 
-  return `+${cleaned}`;
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+
+  if (hasLeadingPlus && digits.startsWith('212')) {
+    return digits.length === 12 ? `+${digits}` : '';
+  }
+
+  if (digits.startsWith('212')) {
+    return digits.length === 12 ? `+${digits}` : '';
+  }
+
+  if (digits.startsWith('0')) {
+    digits = digits.slice(1);
+  }
+
+  if (digits.length === 9) {
+    return `+212${digits}`;
+  }
+
+  return '';
 }
 
 export function interpolateTemplate(template, values) {

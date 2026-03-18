@@ -7,6 +7,7 @@ import { createHmac } from 'node:crypto';
 import { createApp } from '../src/app.js';
 import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
+import { normalizePhone } from '../src/utils/format.js';
 
 function createTestContext() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'woo-confirmation-'));
@@ -816,4 +817,14 @@ test('task endpoint runs followups with valid secret', async () => {
 
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.summary.backfilled, 1);
+});
+
+test('normalizePhone converts Moroccan customer inputs to +212 format', () => {
+  assert.equal(normalizePhone('06 12 34 56 78'), '+212612345678');
+  assert.equal(normalizePhone('06-12-34-56-78'), '+212612345678');
+  assert.equal(normalizePhone('+212 6 12 34 56 78'), '+212612345678');
+  assert.equal(normalizePhone('212612345678'), '+212612345678');
+  assert.equal(normalizePhone('00212612345678'), '+212612345678');
+  assert.equal(normalizePhone('612345678'), '+212612345678');
+  assert.equal(normalizePhone('123'), '');
 });
