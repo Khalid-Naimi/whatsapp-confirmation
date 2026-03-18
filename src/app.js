@@ -57,6 +57,16 @@ export function createApp({ config, confirmationService, logger = console }) {
         return sendJson(res, result.status, result.body);
       }
 
+      if (req.url === '/tasks/order-followups') {
+        const providedSecret = req.headers['x-task-secret'];
+        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
+          return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        }
+
+        const result = await confirmationService.runOrderFollowups();
+        return sendJson(res, 200, { ok: true, summary: result });
+      }
+
       return sendJson(res, 404, { ok: false, error: 'Not found' });
     } catch (error) {
       logger.error(error);
