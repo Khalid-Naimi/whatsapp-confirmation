@@ -109,6 +109,13 @@ export class JsonStore {
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
   }
 
+  findLatestOrderByPhone(phone) {
+    const db = this.read();
+    return db.orders
+      .filter((order) => order.phone === phone)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
+  }
+
   listPendingOrdersByPhone(phone) {
     const db = this.read();
     return db.orders.filter((order) => order.phone === phone && order.confirmationState === 'pending_confirmation');

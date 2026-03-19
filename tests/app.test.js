@@ -326,6 +326,9 @@ test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
   );
   const lastMetaUpdate = wooOrderUpdates.at(-1).fields.meta_data;
   assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_state'), 'confirmed');
+  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_decision'), 'confirmed');
+  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_woo_sync_status'), 'synced');
+  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_customer_reply_sent'), 'yes');
 });
 
 test('reply 2 cancels the order', async () => {
@@ -381,6 +384,71 @@ test('reply 2 cancels the order', async () => {
   assert.equal(wasenderCalls[1].message, 'La commande dyalk t annulat.');
   const lastMetaUpdate = wooOrderUpdates.at(-1).fields.meta_data;
   assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_state'), 'cancelled');
+  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_decision'), 'cancelled');
+  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_woo_sync_status'), 'synced');
+  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_customer_reply_sent'), 'yes');
+});
+
+test('replayed final reply does not send duplicate customer follow-up', async () => {
+  const { app, wasenderCalls } = createTestContext();
+  const orderPayload = {
+    id: 111,
+    status: 'pending',
+    total: '120.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Replay',
+      last_name: 'One',
+      phone: '212600000012',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Replay', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-11'
+    },
+    payload: orderPayload
+  });
+
+  const replyPayload = {
+    data: {
+      messages: {
+        key: {
+          cleanedSenderPn: '212600000012',
+          fromMe: false
+        },
+        messageBody: '1'
+      }
+    }
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: replyPayload
+  });
+
+  const replayResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'replay-final-1'
+    },
+    payload: replyPayload
+  });
+
+  assert.equal(replayResult.statusCode, 200);
+  assert.equal(wasenderCalls.length, 2);
+  assert.equal(replayResult.body.duplicate, true);
 });
 
 test('invalid reply sends clarification twice then goes manual', async () => {
@@ -912,6 +980,85 @@ test('task endpoint runs followups with valid secret', async () => {
 
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.summary.backfilled, 1);
+});
+
+test('valid reply keeps decision final and retries Woo sync silently after failure', async () => {
+  const { app, store, wasenderCalls, listedOrders, wooStatusCalls, confirmationService } = createTestContext();
+  const orderPayload = {
+    id: 402,
+    status: 'pending',
+    total: '260.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Retry',
+      last_name: 'Sync',
+      phone: '0644444445',
+      state: 'Casablanca',
+      address_1: '4 Rue Retry'
+    },
+    line_items: [{ name: 'Produit Retry', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-402'
+    },
+    payload: orderPayload
+  });
+
+  let failOnce = true;
+  const originalUpdateOrderStatus = confirmationService.wooClient.updateOrderStatus.bind(confirmationService.wooClient);
+  confirmationService.wooClient.updateOrderStatus = async (orderId, status) => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('temporary woo failure');
+    }
+    return originalUpdateOrderStatus(orderId, status);
+  };
+
+  const replyPayload = {
+    data: {
+      messages: {
+        key: {
+          cleanedSenderPn: '212644444445',
+          fromMe: false
+        },
+        messageBody: '1'
+      }
+    }
+  };
+
+  const replyResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: replyPayload
+  });
+
+  assert.equal(replyResult.statusCode, 202);
+  assert.equal(store.getOrder('402').confirmationState, 'confirmed');
+  assert.equal(store.getOrder('402').wooSyncStatus, 'pending_retry');
+  assert.equal(store.getOrder('402').customerReplySent, 'yes');
+  assert.equal(wasenderCalls.length, 2);
+
+  listedOrders.push({
+    ...store.getOrder('402').rawOrder,
+    id: 402,
+    status: 'processing'
+  });
+
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
+
+  assert.equal(summary.errors, 0);
+  assert.deepEqual(wooStatusCalls.at(-1), { orderId: '402', status: 'on-hold' });
+  assert.equal(store.getOrder('402').wooSyncStatus, 'synced');
+  assert.equal(store.getOrder('402').confirmationState, 'confirmed');
+  assert.equal(wasenderCalls.length, 2);
 });
 
 test('normalizePhone converts Moroccan customer inputs to +212 format', () => {

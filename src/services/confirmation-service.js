@@ -7,11 +7,21 @@ const WORKFLOW_META_KEYS = {
   lastReminderAt: 'rhymat_whatsapp_last_reminder_at',
   cancelledAt: 'rhymat_whatsapp_cancelled_at'
 };
+const DECISION_META_KEYS = {
+  decision: 'rhymat_whatsapp_decision',
+  decisionAt: 'rhymat_whatsapp_decision_at',
+  wooSyncStatus: 'rhymat_whatsapp_woo_sync_status',
+  wooSyncAttempts: 'rhymat_whatsapp_woo_sync_attempts',
+  lastSyncError: 'rhymat_whatsapp_last_sync_error',
+  customerReplySent: 'rhymat_whatsapp_customer_reply_sent'
+};
 
 const PROCESSING_STATUS = 'processing';
+const RECONCILIATION_STATUSES = ['processing', 'on-hold', 'cancelled'];
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
 const AUTO_CANCEL_MS = 72 * 60 * 60 * 1000;
+const MAX_WOO_SYNC_ATTEMPTS = 6;
 
 export class ConfirmationService {
   constructor({ store, wasenderClient, wooClient, messages, logger = console }) {
@@ -62,9 +72,10 @@ export class ConfirmationService {
     }
 
     const pendingOrder = this.store.findLatestPendingOrderByPhone(inbound.phone);
+    const latestOrder = pendingOrder || this.store.findLatestOrderByPhone(inbound.phone);
     this.store.appendMessage({
       source: 'inbound',
-      orderId: pendingOrder?.orderId || null,
+      orderId: latestOrder?.orderId || null,
       phone: inbound.phone,
       kind: inbound.type === 'audio' ? 'customer_audio_reply' : 'customer_reply',
       payload,
@@ -72,6 +83,10 @@ export class ConfirmationService {
     });
 
     if (!pendingOrder) {
+      if (latestOrder && isSameFinalDecision(latestOrder, inbound)) {
+        this.store.recordEvent('wasender', eventKey, payload, 'duplicate_final_reply');
+        return { status: 200, body: { ok: true, duplicate: true } };
+      }
       this.store.recordEvent('wasender', eventKey, payload, 'manual_followup_required');
       return { status: 202, body: { ok: false, reason: 'unmatched_reply' } };
     }
@@ -131,47 +146,110 @@ export class ConfirmationService {
     const note = reply === '1'
       ? 'Customer confirmed order via WhatsApp.'
       : 'Customer cancelled order via WhatsApp.';
+    const followUpMessage = reply === '1'
+      ? this.messages.confirmedReply
+      : this.messages.cancelledReply;
+    const nowIso = new Date().toISOString();
+    const workflow = getWorkflowMeta(pendingOrder.rawOrder || {});
+    const decisionMeta = getDecisionMeta(pendingOrder.rawOrder || {});
+    const existingDecision = pendingOrder.decision || decisionMeta.decision;
+    const customerReplySent = pendingOrder.customerReplySent || decisionMeta.customerReplySent;
+
+    if (existingDecision === nextState) {
+      const reconciliation = await this.reconcileWooDecision({
+        order: {
+          ...pendingOrder,
+          rawOrder: pendingOrder.rawOrder || {}
+        },
+        targetState: nextState,
+        targetWooStatus: nextWooStatus,
+        note,
+        nowIso
+      });
+      this.store.recordEvent('wasender', eventKey, payload, reconciliation.success ? 'duplicate_final_reply' : reconciliation.syncStatus);
+      return { status: 200, body: { ok: true, duplicate: true } };
+    }
+
+    let nextOrderState = this.store.upsertOrder({
+      ...pendingOrder,
+      confirmationState: nextState,
+      finalReply: reply,
+      decision: nextState,
+      decisionAt: nowIso,
+      wooSyncStatus: 'pending_retry',
+      wooSyncAttempts: Number(pendingOrder.wooSyncAttempts || decisionMeta.wooSyncAttempts || 0),
+      lastSyncError: '',
+      customerReplySent: customerReplySent || 'no'
+    });
 
     try {
-      const statusUpdatedOrder = await this.wooClient.updateOrderStatus(pendingOrder.orderId, nextWooStatus);
-      const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
-        pendingOrder.orderId,
-        buildWorkflowMetaUpdate(statusUpdatedOrder || pendingOrder.rawOrder || {}, {
+      const decisionOrder = await this.persistDecisionMeta({
+        orderPayload: pendingOrder.rawOrder || {},
+        orderId: pendingOrder.orderId,
+        state: nextState,
+        nowIso,
+        customerReplySent: customerReplySent || 'no',
+        wooSyncStatus: 'pending_retry',
+        wooSyncAttempts: nextOrderState.wooSyncAttempts || 0,
+        lastSyncError: ''
+      });
+      nextOrderState = this.store.upsertOrder({
+        ...nextOrderState,
+        rawOrder: decisionOrder || nextOrderState.rawOrder
+      });
+    } catch (error) {
+      this.logger.warn(`Unable to persist decision meta for order ${pendingOrder.orderId}: ${error.message}`);
+    }
+
+    if ((nextOrderState.customerReplySent || 'no') !== 'yes') {
+      nextOrderState = this.store.upsertOrder({
+        ...nextOrderState,
+        customerReplySent: 'yes'
+      });
+      try {
+        const updatedOrder = await this.persistDecisionMeta({
+          orderPayload: nextOrderState.rawOrder || pendingOrder.rawOrder || {},
+          orderId: pendingOrder.orderId,
           state: nextState,
-          cancelledAt: reply === '2' ? new Date().toISOString() : ''
-        })
-      );
-      await this.safeAddOrderNote(pendingOrder.orderId, note);
-      const followUpMessage = reply === '1'
-        ? this.messages.confirmedReply
-        : this.messages.cancelledReply;
+          nowIso,
+          customerReplySent: 'yes',
+          wooSyncStatus: nextOrderState.wooSyncStatus || 'pending_retry',
+          wooSyncAttempts: nextOrderState.wooSyncAttempts || 0,
+          lastSyncError: nextOrderState.lastSyncError || ''
+        });
+        nextOrderState = this.store.upsertOrder({
+          ...nextOrderState,
+          rawOrder: updatedOrder || nextOrderState.rawOrder
+        });
+      } catch (error) {
+        this.logger.warn(`Unable to mark customer reply as sent for order ${pendingOrder.orderId}: ${error.message}`);
+      }
+
       await this.safeSendTrackedMessage({
         phone: pendingOrder.phone,
         orderId: pendingOrder.orderId,
         kind: reply === '1' ? 'confirmation_success' : 'cancellation_success',
         message: followUpMessage
       });
-
-      this.store.upsertOrder({
-        ...pendingOrder,
-        rawOrder: metaUpdatedOrder || statusUpdatedOrder || pendingOrder.rawOrder,
-        confirmationState: nextState,
-        wooStatus: nextWooStatus,
-        finalReply: reply
-      });
-      this.store.recordEvent('wasender', eventKey, payload, nextState);
-
-      return { status: 202, body: { ok: true, state: nextState } };
-    } catch (error) {
-      this.store.upsertOrder({
-        ...pendingOrder,
-        lastError: error.message,
-        confirmationState: 'status_update_failed'
-      });
-      this.store.recordEvent('wasender', eventKey, payload, 'status_update_failed');
-      this.logger.error(error);
-      return { status: 502, body: { ok: false, reason: 'status_update_failed' } };
     }
+
+    const reconciliation = await this.reconcileWooDecision({
+      order: nextOrderState,
+      targetState: nextState,
+      targetWooStatus: nextWooStatus,
+      note,
+      nowIso
+    });
+    this.store.recordEvent('wasender', eventKey, payload, reconciliation.success ? nextState : reconciliation.syncStatus);
+
+    return {
+      status: 202,
+      body: {
+        ok: true,
+        state: nextState,
+        wooSyncStatus: reconciliation.syncStatus
+      }
+    };
   }
 
   async runOrderFollowups({ now = new Date(), backfillOnly = false } = {}) {
@@ -183,24 +261,54 @@ export class ConfirmationService {
       errors: 0
     };
 
-    let page = 1;
-    const perPage = 100;
+    const orders = await this.listOrdersForStatuses(RECONCILIATION_STATUSES);
 
-    while (true) {
-      const orders = await this.wooClient.listOrders({
-        status: PROCESSING_STATUS,
-        perPage,
-        page
-      });
-
-      if (!orders.length) {
-        break;
-      }
-
-      for (const order of orders) {
+    for (const order of orders) {
         const workflow = getWorkflowMeta(order);
+        const decisionMeta = getDecisionMeta(order);
+        const localOrder = this.store.getOrder(String(order.id));
 
         try {
+          const effectiveDecision = decisionMeta.decision || localOrder?.decision || '';
+          if (effectiveDecision) {
+            const targetWooStatus = effectiveDecision === 'confirmed' ? 'on-hold' : 'cancelled';
+            const currentSyncStatus = decisionMeta.wooSyncStatus || localOrder?.wooSyncStatus || '';
+            if (currentSyncStatus === 'manual') {
+              summary.skipped += 1;
+              continue;
+            }
+
+            if (order.status !== targetWooStatus || currentSyncStatus === 'pending_retry') {
+              const reconciliation = await this.reconcileWooDecision({
+                order: {
+                  ...localOrder,
+                  ...normalizeWooOrder(order, this.messages),
+                  rawOrder: order
+                },
+                targetState: effectiveDecision,
+                targetWooStatus,
+                note: effectiveDecision === 'confirmed'
+                  ? 'Customer confirmed order via WhatsApp.'
+                  : 'Customer cancelled order via WhatsApp.',
+                nowIso: decisionMeta.decisionAt || localOrder?.decisionAt || now.toISOString()
+              });
+              if (reconciliation.success) {
+                summary.skipped += 1;
+              } else {
+                summary.errors += 1;
+              }
+              continue;
+            }
+
+            summary.skipped += 1;
+            continue;
+          }
+
+          if (order.status !== PROCESSING_STATUS) {
+            summary.skipped += 1;
+            continue;
+          }
+
           if (!workflow.confirmationSentAt) {
             const result = await this.sendInitialConfirmation(order, {
               note: 'WhatsApp confirmation backfill sent.',
@@ -257,12 +365,6 @@ export class ConfirmationService {
         }
       }
 
-      if (orders.length < perPage) {
-        break;
-      }
-      page += 1;
-    }
-
     return summary;
   }
 
@@ -287,13 +389,23 @@ export class ConfirmationService {
 
       const updatedOrder = await this.wooClient.updateOrderMeta(
         normalizedOrder.orderId,
-        buildWorkflowMetaUpdate(orderPayload, {
-          state: 'pending',
-          confirmationSentAt: now.toISOString(),
-          reminderCount: 0,
-          lastReminderAt: '',
-          cancelledAt: ''
-        })
+        mergeMetaUpdates(
+          buildWorkflowMetaUpdate(orderPayload, {
+            state: 'pending',
+            confirmationSentAt: now.toISOString(),
+            reminderCount: 0,
+            lastReminderAt: '',
+            cancelledAt: ''
+          }),
+          buildDecisionMetaUpdate(orderPayload, {
+            decision: '',
+            decisionAt: '',
+            wooSyncStatus: '',
+            wooSyncAttempts: 0,
+            lastSyncError: '',
+            customerReplySent: 'no'
+          })
+        )
       );
 
       this.store.upsertOrder({
@@ -413,6 +525,144 @@ export class ConfirmationService {
     } catch (error) {
       this.logger.warn(`Unable to send WhatsApp follow-up for order ${orderId}: ${error.message}`);
       return null;
+    }
+  }
+
+  async listOrdersForStatuses(statuses) {
+    const allOrders = [];
+    const seenOrderIds = new Set();
+
+    for (const status of statuses) {
+      let page = 1;
+      const perPage = 100;
+
+      while (true) {
+        const orders = await this.wooClient.listOrders({
+          status,
+          perPage,
+          page
+        });
+
+        if (!orders.length) {
+          break;
+        }
+
+        for (const order of orders) {
+          if (seenOrderIds.has(String(order.id))) {
+            continue;
+          }
+          seenOrderIds.add(String(order.id));
+          allOrders.push(order);
+        }
+
+        if (orders.length < perPage) {
+          break;
+        }
+        page += 1;
+      }
+    }
+
+    return allOrders;
+  }
+
+  async persistDecisionMeta({
+    orderPayload,
+    orderId,
+    state,
+    nowIso,
+    customerReplySent,
+    wooSyncStatus,
+    wooSyncAttempts,
+    lastSyncError
+  }) {
+    return this.wooClient.updateOrderMeta(
+      orderId,
+      mergeMetaUpdates(
+        buildWorkflowMetaUpdate(orderPayload, {
+          state,
+          cancelledAt: state === 'cancelled' ? nowIso : ''
+        }),
+        buildDecisionMetaUpdate(orderPayload, {
+          decision: state,
+          decisionAt: nowIso,
+          wooSyncStatus,
+          wooSyncAttempts,
+          lastSyncError,
+          customerReplySent
+        })
+      )
+    );
+  }
+
+  async reconcileWooDecision({ order, targetState, targetWooStatus, note, nowIso }) {
+    const currentAttempts = Number(order.wooSyncAttempts || getDecisionMeta(order.rawOrder || {}).wooSyncAttempts || 0);
+    const attemptNumber = currentAttempts + 1;
+    let rawOrder = order.rawOrder || {};
+
+    try {
+      const statusUpdatedOrder = await this.wooClient.updateOrderStatus(order.orderId, targetWooStatus);
+      rawOrder = statusUpdatedOrder || rawOrder;
+      const metaUpdatedOrder = await this.persistDecisionMeta({
+        orderPayload: rawOrder,
+        orderId: order.orderId,
+        state: targetState,
+        nowIso,
+        customerReplySent: order.customerReplySent || 'no',
+        wooSyncStatus: 'synced',
+        wooSyncAttempts: attemptNumber,
+        lastSyncError: ''
+      });
+      rawOrder = metaUpdatedOrder || rawOrder;
+      await this.safeAddOrderNote(order.orderId, note);
+      this.store.upsertOrder({
+        ...order,
+        rawOrder,
+        confirmationState: targetState,
+        wooStatus: targetWooStatus,
+        decision: targetState,
+        decisionAt: nowIso,
+        wooSyncStatus: 'synced',
+        wooSyncAttempts: attemptNumber,
+        lastSyncError: ''
+      });
+      return { success: true, syncStatus: 'synced', rawOrder };
+    } catch (error) {
+      const syncStatus = attemptNumber >= MAX_WOO_SYNC_ATTEMPTS ? 'manual' : 'pending_retry';
+      this.store.upsertOrder({
+        ...order,
+        confirmationState: targetState,
+        decision: targetState,
+        decisionAt: order.decisionAt || nowIso,
+        wooSyncStatus: syncStatus,
+        wooSyncAttempts: attemptNumber,
+        lastSyncError: error.message
+      });
+      try {
+        const metaUpdatedOrder = await this.persistDecisionMeta({
+          orderPayload: rawOrder,
+          orderId: order.orderId,
+          state: targetState,
+          nowIso: order.decisionAt || nowIso,
+          customerReplySent: order.customerReplySent || 'no',
+          wooSyncStatus: syncStatus,
+          wooSyncAttempts: attemptNumber,
+          lastSyncError: error.message
+        });
+        this.store.upsertOrder({
+          ...order,
+          rawOrder: metaUpdatedOrder || rawOrder,
+          confirmationState: targetState,
+          decision: targetState,
+          decisionAt: order.decisionAt || nowIso,
+          wooSyncStatus: syncStatus,
+          wooSyncAttempts: attemptNumber,
+          lastSyncError: error.message
+        });
+      } catch (metaError) {
+        this.logger.warn(`Unable to persist Woo sync failure for order ${order.orderId}: ${metaError.message}`);
+      }
+      this.logger.error(error);
+      return { success: false, syncStatus, error };
     }
   }
 }
@@ -560,6 +810,23 @@ function getWorkflowMeta(order) {
   };
 }
 
+function getDecisionMeta(order) {
+  const metaValue = (key) => {
+    const metaData = Array.isArray(order?.meta_data) ? order.meta_data : [];
+    const metaItem = metaData.find((item) => item.key === key);
+    return metaItem?.value ?? '';
+  };
+
+  return {
+    decision: String(metaValue(DECISION_META_KEYS.decision) || ''),
+    decisionAt: String(metaValue(DECISION_META_KEYS.decisionAt) || ''),
+    wooSyncStatus: String(metaValue(DECISION_META_KEYS.wooSyncStatus) || ''),
+    wooSyncAttempts: Number(metaValue(DECISION_META_KEYS.wooSyncAttempts) || 0),
+    lastSyncError: String(metaValue(DECISION_META_KEYS.lastSyncError) || ''),
+    customerReplySent: String(metaValue(DECISION_META_KEYS.customerReplySent) || '')
+  };
+}
+
 function buildWorkflowMetaUpdate(order, values) {
   const existingMeta = Array.isArray(order?.meta_data) ? order.meta_data : [];
 
@@ -577,4 +844,49 @@ function buildWorkflowMetaUpdate(order, values) {
         ? { id: existing.id, key, value }
         : { key, value };
     });
+}
+
+function buildDecisionMetaUpdate(order, values) {
+  const existingMeta = Array.isArray(order?.meta_data) ? order.meta_data : [];
+
+  return Object.entries({
+    [DECISION_META_KEYS.decision]: values.decision,
+    [DECISION_META_KEYS.decisionAt]: values.decisionAt,
+    [DECISION_META_KEYS.wooSyncStatus]: values.wooSyncStatus,
+    [DECISION_META_KEYS.wooSyncAttempts]: values.wooSyncAttempts,
+    [DECISION_META_KEYS.lastSyncError]: values.lastSyncError,
+    [DECISION_META_KEYS.customerReplySent]: values.customerReplySent
+  })
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => {
+      const existing = existingMeta.find((item) => item.key === key);
+      return existing?.id
+        ? { id: existing.id, key, value }
+        : { key, value };
+    });
+}
+
+function mergeMetaUpdates(...metaSets) {
+  const merged = new Map();
+  for (const metaSet of metaSets) {
+    for (const item of metaSet) {
+      merged.set(item.key, item);
+    }
+  }
+  return [...merged.values()];
+}
+
+function isSameFinalDecision(order, inbound) {
+  if (inbound.type !== 'text') {
+    return false;
+  }
+
+  const reply = inbound.text.trim();
+  if (reply !== '1' && reply !== '2') {
+    return false;
+  }
+
+  const decisionMeta = getDecisionMeta(order.rawOrder || {});
+  const decision = order.decision || decisionMeta.decision || '';
+  return (reply === '1' && decision === 'confirmed') || (reply === '2' && decision === 'cancelled');
 }
