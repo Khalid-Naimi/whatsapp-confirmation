@@ -18,6 +18,7 @@ const DECISION_META_KEYS = {
 
 const PROCESSING_STATUS = 'processing';
 const RECONCILIATION_STATUSES = ['processing', 'on-hold', 'cancelled'];
+const REPLY_RECOVERY_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled'];
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
 const AUTO_CANCEL_MS = 72 * 60 * 60 * 1000;
@@ -71,8 +72,9 @@ export class ConfirmationService {
       return { status: 202, body: { ok: true, ignored: true } };
     }
 
-    const pendingOrder = this.store.findLatestPendingOrderByPhone(inbound.phone);
-    const latestOrder = pendingOrder || this.store.findLatestOrderByPhone(inbound.phone);
+    const replyContext = await this.resolveReplyContext(inbound.phone);
+    const pendingOrder = replyContext.pendingOrder;
+    const latestOrder = replyContext.latestOrder;
     this.store.appendMessage({
       source: 'inbound',
       orderId: latestOrder?.orderId || null,
@@ -240,7 +242,12 @@ export class ConfirmationService {
       note,
       nowIso
     });
-    this.store.recordEvent('wasender', eventKey, payload, reconciliation.success ? nextState : reconciliation.syncStatus);
+    const eventStatus = replyContext.matchedViaWooFallback
+      ? 'matched_via_woo_fallback'
+      : reconciliation.success
+        ? nextState
+        : reconciliation.syncStatus;
+    this.store.recordEvent('wasender', eventKey, payload, eventStatus);
 
     return {
       status: 202,
@@ -366,6 +373,41 @@ export class ConfirmationService {
       }
 
     return summary;
+  }
+
+  async resolveReplyContext(phone) {
+    const localPendingOrder = this.store.findLatestPendingOrderByPhone(phone);
+    const localLatestOrder = localPendingOrder || this.store.findLatestOrderByPhone(phone);
+    if (localPendingOrder) {
+      return {
+        pendingOrder: localPendingOrder,
+        latestOrder: localLatestOrder,
+        matchedViaWooFallback: false
+      };
+    }
+
+    const recoveredOrder = await this.findPendingWooOrderByPhone(phone);
+    if (!recoveredOrder) {
+      return {
+        pendingOrder: null,
+        latestOrder: localLatestOrder,
+        matchedViaWooFallback: false
+      };
+    }
+
+    const storedRecoveredOrder = this.store.upsertOrder({
+      ...normalizeWooOrder(recoveredOrder, this.messages),
+      rawOrder: recoveredOrder,
+      confirmationState: 'pending_confirmation',
+      invalidReplyCount: 0,
+      manualFollowupRequired: false
+    });
+
+    return {
+      pendingOrder: storedRecoveredOrder,
+      latestOrder: storedRecoveredOrder,
+      matchedViaWooFallback: true
+    };
   }
 
   async sendInitialConfirmation(orderPayload, { note, now = new Date() } = {}) {
@@ -529,6 +571,10 @@ export class ConfirmationService {
   }
 
   async listOrdersForStatuses(statuses) {
+    if (typeof this.wooClient.listOrdersByStatuses === 'function') {
+      return this.wooClient.listOrdersByStatuses(statuses);
+    }
+
     const allOrders = [];
     const seenOrderIds = new Set();
 
@@ -563,6 +609,23 @@ export class ConfirmationService {
     }
 
     return allOrders;
+  }
+
+  async findPendingWooOrderByPhone(phone) {
+    const candidateOrders = await this.listOrdersForStatuses(REPLY_RECOVERY_STATUSES);
+
+    return candidateOrders
+      .filter((order) => {
+        const workflow = getWorkflowMeta(order);
+        const decisionMeta = getDecisionMeta(order);
+        const normalizedOrder = normalizeWooOrder(order, this.messages);
+
+        return normalizedOrder.phone === phone
+          && workflow.state === 'pending'
+          && Boolean(workflow.confirmationSentAt)
+          && !decisionMeta.decision;
+      })
+      .sort(compareOrdersByRecency)[0] || null;
   }
 
   async persistDecisionMeta({
@@ -792,6 +855,28 @@ function detectWasenderMessageType(primaryMessage, messageNode) {
 
 function extractMessageId(sendResult) {
   return sendResult?.id || sendResult?.messageId || sendResult?.data?.id || null;
+}
+
+function compareOrdersByRecency(left, right) {
+  return getOrderDateValue(right) - getOrderDateValue(left);
+}
+
+function getOrderDateValue(order) {
+  const candidateValues = [
+    order?.date_created_gmt,
+    order?.date_created,
+    order?.date_modified_gmt,
+    order?.date_modified
+  ];
+
+  for (const value of candidateValues) {
+    const timestamp = Date.parse(String(value || ''));
+    if (!Number.isNaN(timestamp)) {
+      return timestamp;
+    }
+  }
+
+  return Number(order?.id) || 0;
 }
 
 function getWorkflowMeta(order) {

@@ -28,6 +28,38 @@ function createTestContext() {
   };
 
   const wooClient = {
+    async listOrdersByStatuses(statuses, { perPage = 100 } = {}) {
+      const allOrders = [];
+      const seenOrderIds = new Set();
+
+      for (const status of statuses) {
+        let page = 1;
+
+        while (true) {
+          const orders = await this.listOrders({ status, perPage, page });
+          if (!orders.length) {
+            break;
+          }
+
+          for (const order of orders) {
+            const orderId = String(order.id);
+            if (seenOrderIds.has(orderId)) {
+              continue;
+            }
+
+            seenOrderIds.add(orderId);
+            allOrders.push(order);
+          }
+
+          if (orders.length < perPage) {
+            break;
+          }
+          page += 1;
+        }
+      }
+
+      return allOrders;
+    },
     async listOrders({ status, perPage = 100, page = 1 }) {
       const filtered = listedOrders.filter((order) => !status || order.status === status);
       const start = (page - 1) * perPage;
@@ -40,6 +72,8 @@ function createTestContext() {
       const nextOrder = mergeOrder(existing, fields);
       if (index >= 0) {
         listedOrders[index] = nextOrder;
+      } else {
+        listedOrders.push(nextOrder);
       }
       return nextOrder;
     },
@@ -690,6 +724,141 @@ test('message without pending order is flagged as manual and gets no reply', asy
   assert.equal(wasenderCalls.length, 0);
   const db = store.read();
   assert.equal(db.events.at(-1).status, 'manual_followup_required');
+});
+
+test('reply recovers pending order from Woo after local cache loss and blocks follow-up reminders', async () => {
+  const initialContext = createTestContext();
+  const orderPayload = {
+    id: 112,
+    status: 'pending',
+    total: '125.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Recover',
+      last_name: 'Cache',
+      phone: '0612345681',
+      state: 'Casablanca',
+      address_1: '12 Rue Recover'
+    },
+    line_items: [{ name: 'Produit Recover', quantity: 1 }],
+    date_created_gmt: '2026-03-18T08:00:00'
+  };
+
+  initialContext.listedOrders.push(structuredClone(orderPayload));
+
+  await dispatch(initialContext.app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-recover-1'
+    },
+    payload: orderPayload
+  });
+
+  const restartedContext = createTestContext();
+  restartedContext.listedOrders.push(...structuredClone(initialContext.listedOrders));
+
+  const replyResult = await dispatch(restartedContext.app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '212612345681',
+            fromMe: false
+          },
+          messageBody: '1'
+        }
+      }
+    }
+  });
+
+  assert.equal(replyResult.statusCode, 202);
+  assert.equal(restartedContext.store.getOrder('112').confirmationState, 'confirmed');
+  assert.equal(restartedContext.store.read().events.at(-1).status, 'matched_via_woo_fallback');
+  assert.deepEqual(restartedContext.wooStatusCalls[0], { orderId: '112', status: 'on-hold' });
+  assert.equal(restartedContext.wasenderCalls.length, 1);
+
+  const summary = await restartedContext.confirmationService.runOrderFollowups({
+    now: new Date('2026-03-20T10:00:00.000Z')
+  });
+
+  assert.equal(summary.remindersSent, 0);
+  assert.equal(restartedContext.wasenderCalls.length, 1);
+});
+
+test('Woo fallback picks the newest pending order for the same phone', async () => {
+  const { app, store, listedOrders, wooStatusCalls } = createTestContext();
+
+  listedOrders.push(
+    {
+      id: 501,
+      status: 'processing',
+      total: '100.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Older',
+        last_name: 'Pending',
+        phone: '0612345682',
+        state: 'Casablanca'
+      },
+      line_items: [{ name: 'Produit Old', quantity: 1 }],
+      date_created_gmt: '2026-03-18T08:00:00',
+      meta_data: [
+        { key: 'rhymat_whatsapp_state', value: 'pending' },
+        { key: 'rhymat_whatsapp_confirmation_sent_at', value: '2026-03-18T08:30:00.000Z' },
+        { key: 'rhymat_whatsapp_reminder_count', value: 0 }
+      ]
+    },
+    {
+      id: 502,
+      status: 'processing',
+      total: '110.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Newer',
+        last_name: 'Pending',
+        phone: '0612345682',
+        state: 'Casablanca'
+      },
+      line_items: [{ name: 'Produit New', quantity: 1 }],
+      date_created_gmt: '2026-03-19T08:00:00',
+      meta_data: [
+        { key: 'rhymat_whatsapp_state', value: 'pending' },
+        { key: 'rhymat_whatsapp_confirmation_sent_at', value: '2026-03-19T08:30:00.000Z' },
+        { key: 'rhymat_whatsapp_reminder_count', value: 0 }
+      ]
+    }
+  );
+
+  const replyResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '212612345682',
+            fromMe: false
+          },
+          messageBody: '2'
+        }
+      }
+    }
+  });
+
+  assert.equal(replyResult.statusCode, 202);
+  assert.deepEqual(wooStatusCalls[0], { orderId: '502', status: 'cancelled' });
+  assert.equal(store.getOrder('502').confirmationState, 'cancelled');
+  assert.equal(store.getOrder('501'), null);
 });
 
 test('audio reply with pending order is treated like invalid input', async () => {

@@ -9,6 +9,44 @@ export class WooCommerceClient {
     this.fetch = fetchImpl;
   }
 
+  async listOrdersByStatuses(statuses, { perPage = 100 } = {}) {
+    const allOrders = [];
+    const seenOrderIds = new Set();
+
+    for (const status of statuses) {
+      let page = 1;
+
+      while (true) {
+        const orders = await this.listOrders({
+          status,
+          perPage,
+          page
+        });
+
+        if (!orders.length) {
+          break;
+        }
+
+        for (const order of orders) {
+          const orderId = String(order.id);
+          if (seenOrderIds.has(orderId)) {
+            continue;
+          }
+
+          seenOrderIds.add(orderId);
+          allOrders.push(order);
+        }
+
+        if (orders.length < perPage) {
+          break;
+        }
+        page += 1;
+      }
+    }
+
+    return allOrders;
+  }
+
   async listOrders({ status, perPage = 100, page = 1 }) {
     const params = new URLSearchParams();
     if (status) {
