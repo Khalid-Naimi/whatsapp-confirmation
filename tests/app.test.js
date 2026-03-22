@@ -1230,6 +1230,88 @@ test('valid reply keeps decision final and retries Woo sync silently after failu
   assert.equal(wasenderCalls.length, 2);
 });
 
+test('manual cancelled status stops confirmed order workflow instead of restoring on-hold', async () => {
+  const { confirmationService, store, listedOrders, wooStatusCalls } = createTestContext();
+  listedOrders.push({
+    id: 501,
+    status: 'cancelled',
+    total: '300.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Manual',
+      last_name: 'Cancel',
+      phone: '0650000001',
+      state: 'Casablanca',
+      address_1: '1 Rue Manual'
+    },
+    line_items: [{ name: 'Produit Manual', quantity: 1 }],
+    meta_data: [
+      { key: 'rhymat_whatsapp_decision', value: 'confirmed' },
+      { key: 'rhymat_whatsapp_decision_at', value: '2026-03-22T08:00:00.000Z' },
+      { key: 'rhymat_whatsapp_woo_sync_status', value: 'synced' },
+      { key: 'rhymat_whatsapp_customer_reply_sent', value: 'yes' }
+    ]
+  });
+
+  store.upsertOrder({
+    orderId: '501',
+    phone: '+212650000001',
+    confirmationState: 'confirmed',
+    decision: 'confirmed',
+    decisionAt: '2026-03-22T08:00:00.000Z',
+    wooSyncStatus: 'synced',
+    rawOrder: listedOrders[0]
+  });
+
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-22T10:00:00.000Z') });
+
+  assert.equal(summary.errors, 0);
+  assert.equal(wooStatusCalls.length, 0);
+  assert.equal(store.getOrder('501').confirmationState, 'manual');
+  assert.equal(store.getOrder('501').wooSyncStatus, 'manual');
+  assert.equal(store.getOrder('501').manualOverride, 'yes');
+  assert.equal(store.getOrder('501').manualOverrideStatus, 'cancelled');
+});
+
+test('manual non-processing status stops pending reminder workflow', async () => {
+  const { confirmationService, store, listedOrders, wasenderCalls, wooStatusCalls } = createTestContext();
+  listedOrders.push({
+    id: 502,
+    status: 'completed',
+    total: '310.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Manual',
+      last_name: 'Pending',
+      phone: '0650000002',
+      state: 'Rabat',
+      address_1: '2 Rue Manual'
+    },
+    line_items: [{ name: 'Produit Pending', quantity: 1 }],
+    meta_data: [
+      { key: 'rhymat_whatsapp_state', value: 'pending' },
+      { key: 'rhymat_whatsapp_confirmation_sent_at', value: '2026-03-21T08:00:00.000Z' },
+      { key: 'rhymat_whatsapp_reminder_count', value: 0 }
+    ]
+  });
+
+  store.upsertOrder({
+    orderId: '502',
+    phone: '+212650000002',
+    confirmationState: 'pending_confirmation',
+    rawOrder: listedOrders[0]
+  });
+
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-22T10:00:00.000Z') });
+
+  assert.equal(summary.errors, 0);
+  assert.equal(wooStatusCalls.length, 0);
+  assert.equal(wasenderCalls.length, 0);
+  assert.equal(store.getOrder('502').confirmationState, 'manual');
+  assert.equal(store.getOrder('502').wooSyncStatus, 'manual');
+  assert.equal(store.getOrder('502').manualOverrideStatus, 'completed');
+});
+
 test('normalizePhone converts Moroccan customer inputs to +212 format', () => {
   assert.equal(normalizePhone('06 12 34 56 78'), '+212612345678');
   assert.equal(normalizePhone('06-12-34-56-78'), '+212612345678');

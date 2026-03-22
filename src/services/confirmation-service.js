@@ -13,11 +13,14 @@ const DECISION_META_KEYS = {
   wooSyncStatus: 'rhymat_whatsapp_woo_sync_status',
   wooSyncAttempts: 'rhymat_whatsapp_woo_sync_attempts',
   lastSyncError: 'rhymat_whatsapp_last_sync_error',
-  customerReplySent: 'rhymat_whatsapp_customer_reply_sent'
+  customerReplySent: 'rhymat_whatsapp_customer_reply_sent',
+  manualOverride: 'rhymat_whatsapp_manual_override',
+  manualOverrideAt: 'rhymat_whatsapp_manual_override_at',
+  manualOverrideStatus: 'rhymat_whatsapp_manual_override_status'
 };
 
 const PROCESSING_STATUS = 'processing';
-const RECONCILIATION_STATUSES = ['processing', 'on-hold', 'cancelled'];
+const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled', 'completed', 'failed', 'refunded'];
 const REPLY_RECOVERY_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled'];
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
@@ -277,6 +280,12 @@ export class ConfirmationService {
 
         try {
           const effectiveDecision = decisionMeta.decision || localOrder?.decision || '';
+          const manualOverride = decisionMeta.manualOverride || localOrder?.manualOverride || '';
+          if (manualOverride === 'yes') {
+            summary.skipped += 1;
+            continue;
+          }
+
           if (effectiveDecision) {
             const targetWooStatus = effectiveDecision === 'confirmed' ? 'on-hold' : 'cancelled';
             const currentSyncStatus = decisionMeta.wooSyncStatus || localOrder?.wooSyncStatus || '';
@@ -285,7 +294,22 @@ export class ConfirmationService {
               continue;
             }
 
-            if (order.status !== targetWooStatus || currentSyncStatus === 'pending_retry') {
+            if (order.status !== targetWooStatus && currentSyncStatus !== 'pending_retry') {
+              await this.markManualOverride({
+                order: {
+                  ...localOrder,
+                  ...normalizeWooOrder(order, this.messages),
+                  rawOrder: order,
+                  decision: effectiveDecision,
+                  decisionAt: decisionMeta.decisionAt || localOrder?.decisionAt || ''
+                },
+                status: order.status
+              });
+              summary.skipped += 1;
+              continue;
+            }
+
+            if (currentSyncStatus === 'pending_retry') {
               const reconciliation = await this.reconcileWooDecision({
                 order: {
                   ...localOrder,
@@ -312,6 +336,21 @@ export class ConfirmationService {
           }
 
           if (order.status !== PROCESSING_STATUS) {
+            if (workflow.confirmationSentAt) {
+              await this.markManualOverride({
+                order: {
+                  ...localOrder,
+                  ...normalizeWooOrder(order, this.messages),
+                  rawOrder: order
+                },
+                status: order.status
+              });
+              const updatedLocalOrder = this.store.getOrder(String(order.id));
+              if (updatedLocalOrder) {
+                summary.skipped += 1;
+                continue;
+              }
+            }
             summary.skipped += 1;
             continue;
           }
@@ -567,6 +606,49 @@ export class ConfirmationService {
     } catch (error) {
       this.logger.warn(`Unable to send WhatsApp follow-up for order ${orderId}: ${error.message}`);
       return null;
+    }
+  }
+
+  async markManualOverride({ order, status }) {
+    const normalizedOrder = {
+      ...order,
+      manualOverride: 'yes',
+      manualOverrideAt: new Date().toISOString(),
+      manualOverrideStatus: status,
+      confirmationState: 'manual',
+      wooSyncStatus: 'manual'
+    };
+
+    this.store.upsertOrder(normalizedOrder);
+
+    try {
+      const updatedOrder = await this.wooClient.updateOrderMeta(
+        normalizedOrder.orderId,
+        mergeMetaUpdates(
+          buildWorkflowMetaUpdate(normalizedOrder.rawOrder || {}, {
+            state: 'manual'
+          }),
+          buildDecisionMetaUpdate(normalizedOrder.rawOrder || {}, {
+            decision: normalizedOrder.decision || '',
+            decisionAt: normalizedOrder.decisionAt || '',
+            wooSyncStatus: 'manual',
+            wooSyncAttempts: normalizedOrder.wooSyncAttempts || 0,
+            lastSyncError: normalizedOrder.lastSyncError || '',
+            customerReplySent: normalizedOrder.customerReplySent || 'no',
+            manualOverride: 'yes',
+            manualOverrideAt: normalizedOrder.manualOverrideAt,
+            manualOverrideStatus: status
+          })
+        )
+      );
+
+      this.store.upsertOrder({
+        ...normalizedOrder,
+        rawOrder: updatedOrder || normalizedOrder.rawOrder
+      });
+      await this.safeAddOrderNote(normalizedOrder.orderId, 'WhatsApp workflow stopped due to manual WooCommerce status change.');
+    } catch (error) {
+      this.logger.warn(`Unable to persist manual override for order ${normalizedOrder.orderId}: ${error.message}`);
     }
   }
 
@@ -908,7 +990,10 @@ function getDecisionMeta(order) {
     wooSyncStatus: String(metaValue(DECISION_META_KEYS.wooSyncStatus) || ''),
     wooSyncAttempts: Number(metaValue(DECISION_META_KEYS.wooSyncAttempts) || 0),
     lastSyncError: String(metaValue(DECISION_META_KEYS.lastSyncError) || ''),
-    customerReplySent: String(metaValue(DECISION_META_KEYS.customerReplySent) || '')
+    customerReplySent: String(metaValue(DECISION_META_KEYS.customerReplySent) || ''),
+    manualOverride: String(metaValue(DECISION_META_KEYS.manualOverride) || ''),
+    manualOverrideAt: String(metaValue(DECISION_META_KEYS.manualOverrideAt) || ''),
+    manualOverrideStatus: String(metaValue(DECISION_META_KEYS.manualOverrideStatus) || '')
   };
 }
 
@@ -940,7 +1025,10 @@ function buildDecisionMetaUpdate(order, values) {
     [DECISION_META_KEYS.wooSyncStatus]: values.wooSyncStatus,
     [DECISION_META_KEYS.wooSyncAttempts]: values.wooSyncAttempts,
     [DECISION_META_KEYS.lastSyncError]: values.lastSyncError,
-    [DECISION_META_KEYS.customerReplySent]: values.customerReplySent
+    [DECISION_META_KEYS.customerReplySent]: values.customerReplySent,
+    [DECISION_META_KEYS.manualOverride]: values.manualOverride,
+    [DECISION_META_KEYS.manualOverrideAt]: values.manualOverrideAt,
+    [DECISION_META_KEYS.manualOverrideStatus]: values.manualOverrideStatus
   })
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => {
