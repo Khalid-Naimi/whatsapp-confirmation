@@ -1,11 +1,52 @@
 import { createHash } from 'node:crypto';
 import { verifyGenericHmacSignature, verifyWooSignature } from './utils/signatures.js';
 
-export function createApp({ config, confirmationService, logger = console }) {
+export function createApp({ config, confirmationService, store, logger = console }) {
   return async function handler(req, res) {
     try {
-      if (req.method === 'GET' && req.url === '/health') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      const pathname = parsedUrl.pathname;
+
+      if (req.method === 'OPTIONS') {
+        return sendCors(res, 204);
+      }
+
+      if (req.method === 'GET' && pathname === '/health') {
         return sendJson(res, 200, { ok: true });
+      }
+
+      if (req.method === 'GET' && pathname.startsWith('/api/')) {
+        const providedSecret = req.headers['x-task-secret'];
+        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
+          return sendCorsJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        }
+
+        if (pathname === '/api/orders/summary') {
+          const summary = store.getOrdersSummary();
+          return sendCorsJson(res, 200, { ok: true, ...summary });
+        }
+
+        if (pathname === '/api/orders') {
+          const status = parsedUrl.searchParams.get('status') || undefined;
+          const orders = store.listOrders(status).map(sanitizeOrder);
+          return sendCorsJson(res, 200, { ok: true, orders });
+        }
+
+        const orderMessagesMatch = pathname.match(/^\/api\/orders\/([^/]+)\/messages$/);
+        if (orderMessagesMatch) {
+          const orderId = decodeURIComponent(orderMessagesMatch[1]);
+          const messages = store.getMessagesByOrder(orderId);
+          return sendCorsJson(res, 200, { ok: true, orderId, messageCount: messages.length, messages });
+        }
+
+        const leadMessagesMatch = pathname.match(/^\/api\/leads\/([^/]+)\/messages$/);
+        if (leadMessagesMatch) {
+          const phone = decodeURIComponent(leadMessagesMatch[1]);
+          const messages = store.getMessagesByPhone(phone);
+          return sendCorsJson(res, 200, { ok: true, phone, messageCount: messages.length, messages });
+        }
+
+        return sendCorsJson(res, 404, { ok: false, error: 'Not found' });
       }
 
       if (req.method !== 'POST') {
@@ -14,7 +55,7 @@ export function createApp({ config, confirmationService, logger = console }) {
 
       const rawBody = await readBody(req);
 
-      if (req.url === '/webhooks/woocommerce') {
+      if (pathname === '/webhooks/woocommerce') {
         if (isWooPing(req, rawBody)) {
           return sendJson(res, 200, { ok: true, ping: true });
         }
@@ -35,7 +76,7 @@ export function createApp({ config, confirmationService, logger = console }) {
         return sendJson(res, result.status, result.body);
       }
 
-      if (req.url === '/webhooks/wasender') {
+      if (pathname === '/webhooks/wasender') {
         const body = parseJsonBody(rawBody);
         if (body === null) {
           return sendJson(res, 400, { ok: false, error: 'Invalid JSON body' });
@@ -57,7 +98,7 @@ export function createApp({ config, confirmationService, logger = console }) {
         return sendJson(res, result.status, result.body);
       }
 
-      if (req.url === '/tasks/order-followups') {
+      if (pathname === '/tasks/order-followups') {
         const providedSecret = req.headers['x-task-secret'];
         if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
           return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
@@ -118,4 +159,25 @@ function isWooPing(req, rawBody) {
 
 function hashEvent(input) {
   return createHash('sha256').update(input).digest('hex');
+}
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, x-task-secret'
+};
+
+function sendCors(res, statusCode) {
+  res.writeHead(statusCode, CORS_HEADERS);
+  res.end();
+}
+
+function sendCorsJson(res, statusCode, body) {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json', ...CORS_HEADERS });
+  res.end(JSON.stringify(body));
+}
+
+function sanitizeOrder(order) {
+  const { rawOrder, ...rest } = order;
+  return rest;
 }

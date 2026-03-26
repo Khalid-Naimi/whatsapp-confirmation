@@ -127,6 +127,7 @@ function createTestContext() {
   const app = createApp({
     config,
     confirmationService,
+    store,
     logger: {
       error() {}
     }
@@ -1320,4 +1321,130 @@ test('normalizePhone converts Moroccan customer inputs to +212 format', () => {
   assert.equal(normalizePhone('00212612345678'), '+212612345678');
   assert.equal(normalizePhone('612345678'), '+212612345678');
   assert.equal(normalizePhone('123'), '');
+});
+
+// --- Dashboard API endpoint tests ---
+
+test('GET /api/orders/summary returns order counts by state', async () => {
+  const { app, store } = createTestContext();
+  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001' });
+  store.upsertOrder({ orderId: '2', confirmationState: 'confirmed', phone: '+212600000002' });
+  store.upsertOrder({ orderId: '3', confirmationState: 'cancelled', phone: '+212600000003' });
+  store.upsertOrder({ orderId: '4', confirmationState: 'pending_confirmation', phone: '+212600000004' });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders/summary',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.total, 4);
+  assert.equal(result.body.confirmed, 2);
+  assert.equal(result.body.cancelled, 1);
+  assert.equal(result.body.pending_confirmation, 1);
+});
+
+test('GET /api/orders returns all orders', async () => {
+  const { app, store } = createTestContext();
+  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001', customerName: 'Ali' });
+  store.upsertOrder({ orderId: '2', confirmationState: 'cancelled', phone: '+212600000002', customerName: 'Sara' });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.orders.length, 2);
+});
+
+test('GET /api/orders?status=confirmed filters by status', async () => {
+  const { app, store } = createTestContext();
+  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001' });
+  store.upsertOrder({ orderId: '2', confirmationState: 'cancelled', phone: '+212600000002' });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders?status=confirmed',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.orders.length, 1);
+  assert.equal(result.body.orders[0].orderId, '1');
+});
+
+test('GET /api/orders strips rawOrder from response', async () => {
+  const { app, store } = createTestContext();
+  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001', rawOrder: { id: 1, secret: 'data' } });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.orders[0].rawOrder, undefined);
+});
+
+test('GET /api/orders/:orderId/messages returns messages for an order', async () => {
+  const { app, store } = createTestContext();
+  store.appendMessage({ orderId: '101', phone: '+212600000001', source: 'outbound', kind: 'confirmation_request', text: 'Salam' });
+  store.appendMessage({ orderId: '101', phone: '+212600000001', source: 'inbound', kind: 'customer_reply', text: '1' });
+  store.appendMessage({ orderId: '999', phone: '+212600000009', source: 'outbound', kind: 'confirmation_request', text: 'Other' });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders/101/messages',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.orderId, '101');
+  assert.equal(result.body.messageCount, 2);
+  assert.equal(result.body.messages.length, 2);
+});
+
+test('GET /api/leads/:phone/messages returns messages for a phone number', async () => {
+  const { app, store } = createTestContext();
+  store.appendMessage({ orderId: '101', phone: '+212600000001', source: 'outbound', kind: 'confirmation_request', text: 'Salam' });
+  store.appendMessage({ orderId: '102', phone: '+212600000001', source: 'outbound', kind: 'confirmation_request', text: 'Salam again' });
+  store.appendMessage({ orderId: '103', phone: '+212600000009', source: 'outbound', kind: 'confirmation_request', text: 'Other' });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/leads/+212600000001/messages',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.phone, '+212600000001');
+  assert.equal(result.body.messageCount, 2);
+});
+
+test('API endpoints return 401 without valid task secret', async () => {
+  const { app } = createTestContext();
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders/summary',
+    headers: { 'x-task-secret': 'wrong-secret' }
+  });
+
+  assert.equal(result.statusCode, 401);
+});
+
+test('API endpoints return CORS headers', async () => {
+  const { app, store } = createTestContext();
+  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001' });
+
+  const req = createMockReq({ method: 'GET', url: '/api/orders/summary', headers: { 'x-task-secret': 'task-secret' }, body: '' });
+  const res = createMockRes();
+  await app(req, res);
+
+  assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
 });
