@@ -120,4 +120,32 @@ export class JsonStore {
     const db = this.read();
     return db.orders.filter((order) => order.phone === phone && order.confirmationState === 'pending_confirmation');
   }
+
+  listOrders(status) {
+    const db = this.read();
+    if (status) {
+      return db.orders.filter((order) => order.confirmationState === status);
+    }
+    return db.orders;
+  }
+
+  getOrdersSummary() {
+    const db = this.read();
+    const summary = { total: db.orders.length };
+    for (const order of db.orders) {
+      const state = order.confirmationState || 'unknown';
+      summary[state] = (summary[state] || 0) + 1;
+    }
+    return summary;
+  }
+
+  getMessagesByOrder(orderId) {
+    const db = this.read();
+    return db.messages.filter((msg) => msg.orderId === orderId);
+  }
+
+  getMessagesByPhone(phone) {
+    const db = this.read();
+    return db.messages.filter((msg) => msg.phone === phone);
+  }
 }

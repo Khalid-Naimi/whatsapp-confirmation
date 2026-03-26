@@ -29,7 +29,8 @@ const confirmationService = new ConfirmationService({
 
 const app = createApp({
   config,
-  confirmationService
+  confirmationService,
+  store
 });
 
 const server = http.createServer(app);
