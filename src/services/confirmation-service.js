@@ -14,6 +14,8 @@ const DECISION_META_KEYS = {
   wooSyncAttempts: 'rhymat_whatsapp_woo_sync_attempts',
   lastSyncError: 'rhymat_whatsapp_last_sync_error',
   customerReplySent: 'rhymat_whatsapp_customer_reply_sent',
+  internalNotifiedConfirmed: 'rhymat_whatsapp_internal_notified_confirmed',
+  internalNotifiedCancelled: 'rhymat_whatsapp_internal_notified_cancelled',
   manualOverride: 'rhymat_whatsapp_manual_override',
   manualOverrideAt: 'rhymat_whatsapp_manual_override_at',
   manualOverrideStatus: 'rhymat_whatsapp_manual_override_status'
@@ -159,6 +161,8 @@ export class ConfirmationService {
     const decisionMeta = getDecisionMeta(pendingOrder.rawOrder || {});
     const existingDecision = pendingOrder.decision || decisionMeta.decision;
     const customerReplySent = pendingOrder.customerReplySent || decisionMeta.customerReplySent;
+    const internalNotifiedConfirmed = pendingOrder.internalNotifiedConfirmed || decisionMeta.internalNotifiedConfirmed;
+    const internalNotifiedCancelled = pendingOrder.internalNotifiedCancelled || decisionMeta.internalNotifiedCancelled;
 
     if (existingDecision === nextState) {
       const reconciliation = await this.reconcileWooDecision({
@@ -237,6 +241,14 @@ export class ConfirmationService {
         message: followUpMessage
       });
     }
+
+    nextOrderState = await this.sendInternalDecisionNotifications({
+      order: nextOrderState,
+      decision: nextState,
+      alreadyNotified: nextState === 'confirmed'
+        ? internalNotifiedConfirmed === 'yes' || nextOrderState.internalNotifiedConfirmed === 'yes'
+        : internalNotifiedCancelled === 'yes' || nextOrderState.internalNotifiedCancelled === 'yes'
+    });
 
     const reconciliation = await this.reconcileWooDecision({
       order: nextOrderState,
@@ -485,6 +497,9 @@ export class ConfirmationService {
             wooSyncAttempts: 0,
             lastSyncError: '',
             customerReplySent: 'no'
+            ,
+            internalNotifiedConfirmed: 'no',
+            internalNotifiedCancelled: 'no'
           })
         )
       );
@@ -606,6 +621,60 @@ export class ConfirmationService {
     } catch (error) {
       this.logger.warn(`Unable to send WhatsApp follow-up for order ${orderId}: ${error.message}`);
       return null;
+    }
+  }
+
+  async sendInternalDecisionNotifications({ order, decision, alreadyNotified }) {
+    if (alreadyNotified) {
+      return order;
+    }
+
+    const template = decision === 'confirmed'
+      ? this.messages.internalConfirmedTemplate
+      : this.messages.internalCancelledTemplate;
+    const message = interpolateTemplate(template, buildTemplateValues(order));
+
+    for (const phone of this.messages.internalNotifyPhones || []) {
+      try {
+        const result = await this.wasenderClient.sendMessage({
+          to: phone,
+          message
+        });
+        this.store.appendMessage({
+          source: 'outbound',
+          orderId: order.orderId,
+          phone,
+          kind: decision === 'confirmed' ? 'internal_confirmed_notification' : 'internal_cancelled_notification',
+          payload: result,
+          text: message
+        });
+      } catch (error) {
+        this.logger.warn(`Unable to send internal ${decision} notification for order ${order.orderId} to ${phone}: ${error.message}`);
+      }
+    }
+
+    const nextOrder = this.store.upsertOrder({
+      ...order,
+      internalNotifiedConfirmed: decision === 'confirmed' ? 'yes' : order.internalNotifiedConfirmed || 'no',
+      internalNotifiedCancelled: decision === 'cancelled' ? 'yes' : order.internalNotifiedCancelled || 'no'
+    });
+
+    try {
+      const updatedOrder = await this.wooClient.updateOrderMeta(
+        order.orderId,
+        buildDecisionMetaUpdate(order.rawOrder || {}, {
+          internalNotifiedConfirmed: decision === 'confirmed' ? 'yes' : nextOrder.internalNotifiedConfirmed || 'no',
+          internalNotifiedCancelled: decision === 'cancelled' ? 'yes' : nextOrder.internalNotifiedCancelled || 'no'
+        })
+      );
+
+      return this.store.upsertOrder({
+        ...nextOrder,
+        rawOrder: updatedOrder || nextOrder.rawOrder
+      });
+    } catch (error) {
+      this.logger.warn(`Unable to persist internal notification flag for order ${order.orderId}: ${error.message}`);
+      return nextOrder;
     }
   }
 
@@ -844,10 +913,12 @@ function buildTemplateValues(normalizedOrder) {
     customerName: normalizedOrder.customerName || 'l3ziz(a)',
     orderId: normalizedOrder.orderId,
     orderTotal: formatOrderTotal(normalizedOrder),
+    customerPhone: normalizedOrder.phone || '',
     orderItemsSummary: normalizedOrder.orderItemsSummary,
     deliveryAddress: normalizedOrder.deliveryAddress,
     deliveryCity: normalizedOrder.deliveryCity,
     deliveryEta: normalizedOrder.deliveryEta,
+    decision: normalizedOrder.decision || normalizedOrder.confirmationState || '',
     storeName: normalizedOrder.storeName || ''
   };
 }
@@ -991,6 +1062,8 @@ function getDecisionMeta(order) {
     wooSyncAttempts: Number(metaValue(DECISION_META_KEYS.wooSyncAttempts) || 0),
     lastSyncError: String(metaValue(DECISION_META_KEYS.lastSyncError) || ''),
     customerReplySent: String(metaValue(DECISION_META_KEYS.customerReplySent) || ''),
+    internalNotifiedConfirmed: String(metaValue(DECISION_META_KEYS.internalNotifiedConfirmed) || ''),
+    internalNotifiedCancelled: String(metaValue(DECISION_META_KEYS.internalNotifiedCancelled) || ''),
     manualOverride: String(metaValue(DECISION_META_KEYS.manualOverride) || ''),
     manualOverrideAt: String(metaValue(DECISION_META_KEYS.manualOverrideAt) || ''),
     manualOverrideStatus: String(metaValue(DECISION_META_KEYS.manualOverrideStatus) || '')
@@ -1026,6 +1099,8 @@ function buildDecisionMetaUpdate(order, values) {
     [DECISION_META_KEYS.wooSyncAttempts]: values.wooSyncAttempts,
     [DECISION_META_KEYS.lastSyncError]: values.lastSyncError,
     [DECISION_META_KEYS.customerReplySent]: values.customerReplySent,
+    [DECISION_META_KEYS.internalNotifiedConfirmed]: values.internalNotifiedConfirmed,
+    [DECISION_META_KEYS.internalNotifiedCancelled]: values.internalNotifiedCancelled,
     [DECISION_META_KEYS.manualOverride]: values.manualOverride,
     [DECISION_META_KEYS.manualOverrideAt]: values.manualOverrideAt,
     [DECISION_META_KEYS.manualOverrideStatus]: values.manualOverrideStatus

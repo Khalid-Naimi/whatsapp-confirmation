@@ -100,6 +100,9 @@ function createTestContext() {
       reminderMessage: 'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       confirmedReply: 'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
       cancelledReply: 'La commande dyalk t annulat.',
+      internalNotifyPhones: ['+212708357533', '+491729031097'],
+      internalConfirmedTemplate: 'Commande confirmat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
+      internalCancelledTemplate: 'Commande annulat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       deliveryEtaCasablanca: '24h',
       deliveryEtaOtherCities: '2 a 3 jours ouvrables',
       defaultCityLabel: 'Maghrib'
@@ -359,11 +362,14 @@ test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
     wasenderCalls[1].message,
     'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.'
   );
-  const lastMetaUpdate = wooOrderUpdates.at(-1).fields.meta_data;
-  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_state'), 'confirmed');
-  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_decision'), 'confirmed');
-  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_woo_sync_status'), 'synced');
-  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_customer_reply_sent'), 'yes');
+  assert.equal(wasenderCalls[2].to, '+212708357533');
+  assert.equal(wasenderCalls[3].to, '+491729031097');
+  assert.match(wasenderCalls[2].message, /Commande confirmat/);
+  assert.equal(store.getOrder('103').confirmationState, 'confirmed');
+  assert.equal(store.getOrder('103').decision, 'confirmed');
+  assert.equal(store.getOrder('103').wooSyncStatus, 'synced');
+  assert.equal(store.getOrder('103').customerReplySent, 'yes');
+  assert.equal(store.getOrder('103').internalNotifiedConfirmed, 'yes');
 });
 
 test('reply 2 cancels the order', async () => {
@@ -417,11 +423,14 @@ test('reply 2 cancels the order', async () => {
   assert.deepEqual(wooStatusCalls[0], { orderId: '104', status: 'cancelled' });
   assert.equal(store.getOrder('104').confirmationState, 'cancelled');
   assert.equal(wasenderCalls[1].message, 'La commande dyalk t annulat.');
-  const lastMetaUpdate = wooOrderUpdates.at(-1).fields.meta_data;
-  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_state'), 'cancelled');
-  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_decision'), 'cancelled');
-  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_woo_sync_status'), 'synced');
-  assert.equal(workflowMetaValue(lastMetaUpdate, 'rhymat_whatsapp_customer_reply_sent'), 'yes');
+  assert.equal(wasenderCalls[2].to, '+212708357533');
+  assert.equal(wasenderCalls[3].to, '+491729031097');
+  assert.match(wasenderCalls[2].message, /Commande annulat/);
+  assert.equal(store.getOrder('104').confirmationState, 'cancelled');
+  assert.equal(store.getOrder('104').decision, 'cancelled');
+  assert.equal(store.getOrder('104').wooSyncStatus, 'synced');
+  assert.equal(store.getOrder('104').customerReplySent, 'yes');
+  assert.equal(store.getOrder('104').internalNotifiedCancelled, 'yes');
 });
 
 test('replayed final reply does not send duplicate customer follow-up', async () => {
@@ -482,7 +491,7 @@ test('replayed final reply does not send duplicate customer follow-up', async ()
   });
 
   assert.equal(replayResult.statusCode, 200);
-  assert.equal(wasenderCalls.length, 2);
+  assert.equal(wasenderCalls.length, 4);
   assert.equal(replayResult.body.duplicate, true);
 });
 
@@ -783,14 +792,14 @@ test('reply recovers pending order from Woo after local cache loss and blocks fo
   assert.equal(restartedContext.store.getOrder('112').confirmationState, 'confirmed');
   assert.equal(restartedContext.store.read().events.at(-1).status, 'matched_via_woo_fallback');
   assert.deepEqual(restartedContext.wooStatusCalls[0], { orderId: '112', status: 'on-hold' });
-  assert.equal(restartedContext.wasenderCalls.length, 1);
+  assert.equal(restartedContext.wasenderCalls.length, 3);
 
   const summary = await restartedContext.confirmationService.runOrderFollowups({
     now: new Date('2026-03-20T10:00:00.000Z')
   });
 
   assert.equal(summary.remindersSent, 0);
-  assert.equal(restartedContext.wasenderCalls.length, 1);
+  assert.equal(restartedContext.wasenderCalls.length, 3);
 });
 
 test('Woo fallback picks the newest pending order for the same phone', async () => {
@@ -1214,7 +1223,7 @@ test('valid reply keeps decision final and retries Woo sync silently after failu
   assert.equal(store.getOrder('402').confirmationState, 'confirmed');
   assert.equal(store.getOrder('402').wooSyncStatus, 'pending_retry');
   assert.equal(store.getOrder('402').customerReplySent, 'yes');
-  assert.equal(wasenderCalls.length, 2);
+  assert.equal(wasenderCalls.length, 4);
 
   listedOrders.push({
     ...store.getOrder('402').rawOrder,
@@ -1228,7 +1237,72 @@ test('valid reply keeps decision final and retries Woo sync silently after failu
   assert.deepEqual(wooStatusCalls.at(-1), { orderId: '402', status: 'on-hold' });
   assert.equal(store.getOrder('402').wooSyncStatus, 'synced');
   assert.equal(store.getOrder('402').confirmationState, 'confirmed');
-  assert.equal(wasenderCalls.length, 2);
+  assert.equal(wasenderCalls.length, 4);
+});
+
+test('internal notification failure does not block final customer flow', async () => {
+  const { app, store, wasenderCalls, confirmationService } = createTestContext();
+  let internalFailureTriggered = false;
+  confirmationService.wasenderClient.sendMessage = async (payload) => {
+    if (payload.to === '+491729031097' && !internalFailureTriggered) {
+      internalFailureTriggered = true;
+      throw new Error('internal notify failed');
+    }
+    wasenderCalls.push(payload);
+    return { id: `msg-${wasenderCalls.length}` };
+  };
+
+  const orderPayload = {
+    id: 601,
+    status: 'pending',
+    total: '180.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Notif',
+      last_name: 'Fail',
+      phone: '0650000003',
+      state: 'Casablanca',
+      address_1: '6 Rue Notify'
+    },
+    line_items: [{ name: 'Produit Notify', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-601'
+    },
+    payload: orderPayload
+  });
+
+  const replyPayload = {
+    data: {
+      messages: {
+        key: {
+          cleanedSenderPn: '212650000003',
+          fromMe: false
+        },
+        messageBody: '1'
+      }
+    }
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret'
+    },
+    payload: replyPayload
+  });
+
+  assert.equal(result.statusCode, 202);
+  assert.equal(store.getOrder('601').confirmationState, 'confirmed');
+  assert.equal(store.getOrder('601').customerReplySent, 'yes');
+  assert.equal(store.getOrder('601').internalNotifiedConfirmed, 'yes');
+  assert.equal(wasenderCalls[1].message, 'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.');
 });
 
 test('manual cancelled status stops confirmed order workflow instead of restoring on-hold', async () => {

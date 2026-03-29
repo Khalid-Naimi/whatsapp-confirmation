@@ -62,6 +62,7 @@ export function loadConfig() {
       signatureHeader: (process.env.WASENDER_SIGNATURE_HEADER || 'x-wasender-signature').toLowerCase()
     },
     messages: {
+      internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),
       confirmationTemplate: process.env.CONFIRMATION_MESSAGE_TEMPLATE ||
         'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       invalidReply: process.env.INVALID_REPLY_MESSAGE ||
@@ -72,9 +73,20 @@ export function loadConfig() {
         'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
       cancelledReply: process.env.CANCELLED_REPLY_MESSAGE ||
         'La commande dyalk t annulat.',
+      internalConfirmedTemplate: process.env.INTERNAL_CONFIRMED_TEMPLATE ||
+        'Commande confirmat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
+      internalCancelledTemplate: process.env.INTERNAL_CANCELLED_TEMPLATE ||
+        'Commande annulat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       deliveryEtaCasablanca: process.env.DELIVERY_ETA_CASABLANCA || '24h',
       deliveryEtaOtherCities: process.env.DELIVERY_ETA_OTHER_CITIES || '2 a 3 jours ouvrables',
       defaultCityLabel: process.env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'
     }
   };
+}
+
+function parsePhoneList(value) {
+  return String(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
