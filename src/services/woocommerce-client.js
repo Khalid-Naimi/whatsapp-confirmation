@@ -5,6 +5,8 @@ function buildAuthHeader(consumerKey, consumerSecret) {
 export class WooCommerceClient {
   constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch }) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
+    this.consumerKey = consumerKey;
+    this.consumerSecret = consumerSecret;
     this.authHeader = buildAuthHeader(consumerKey, consumerSecret);
     this.fetch = fetchImpl;
   }
@@ -83,27 +85,74 @@ export class WooCommerceClient {
   }
 
   async request(path, { method, body }) {
-    const headers = {
-      Authorization: this.authHeader
-    };
-
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json';
+    const authStrategies = [{ mode: 'header' }];
+    if (method === 'GET') {
+      authStrategies.push({ mode: 'query' });
     }
 
-    const response = await this.fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body)
-    });
+    let lastError = null;
 
-    const data = await parseJsonSafe(response);
-    if (!response.ok) {
-      throw new Error(`WooCommerce request failed with ${response.status}: ${JSON.stringify(data)}`);
+    for (const strategy of authStrategies) {
+      const response = await this.fetch(buildRequestUrl({
+        baseUrl: this.baseUrl,
+        path,
+        consumerKey: this.consumerKey,
+        consumerSecret: this.consumerSecret,
+        authMode: strategy.mode
+      }), {
+        method,
+        headers: buildHeaders({
+          authHeader: this.authHeader,
+          authMode: strategy.mode,
+          hasBody: body !== undefined
+        }),
+        body: body === undefined ? undefined : JSON.stringify(body)
+      });
+
+      const data = await parseJsonSafe(response);
+      if (response.ok) {
+        return data;
+      }
+
+      lastError = new Error(`WooCommerce request failed with ${response.status}: ${JSON.stringify(data)}`);
+      if (!shouldRetryWithQueryAuth({ method, status: response.status, authMode: strategy.mode })) {
+        throw lastError;
+      }
     }
 
-    return data;
+    throw lastError || new Error('WooCommerce request failed');
   }
+}
+
+function buildHeaders({ authHeader, authMode, hasBody }) {
+  const headers = {
+    Accept: 'application/json',
+    'User-Agent': 'woocommerce-whatsapp-confirmation/1.0'
+  };
+
+  if (authMode === 'header') {
+    headers.Authorization = authHeader;
+  }
+
+  if (hasBody) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  return headers;
+}
+
+function buildRequestUrl({ baseUrl, path, consumerKey, consumerSecret, authMode }) {
+  const url = new URL(path, `${baseUrl}/`);
+  if (authMode === 'query') {
+    url.searchParams.set('consumer_key', consumerKey);
+    url.searchParams.set('consumer_secret', consumerSecret);
+  }
+
+  return url.toString();
+}
+
+function shouldRetryWithQueryAuth({ method, status, authMode }) {
+  return method === 'GET' && authMode === 'header' && [401, 403, 415].includes(status);
 }
 
 async function parseJsonSafe(response) {
