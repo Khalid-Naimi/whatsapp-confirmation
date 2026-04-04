@@ -234,6 +234,46 @@ function workflowMetaValue(metaData, key) {
   return metaData.find((item) => item.key === key)?.value;
 }
 
+function buildWorkflowMeta({
+  state = '',
+  confirmationSentAt = '',
+  reminderCount,
+  lastReminderAt = '',
+  cancelledAt = ''
+} = {}) {
+  return [
+    { key: 'rhymat_whatsapp_state', value: state },
+    { key: 'rhymat_whatsapp_confirmation_sent_at', value: confirmationSentAt },
+    ...(reminderCount === undefined ? [] : [{ key: 'rhymat_whatsapp_reminder_count', value: reminderCount }]),
+    { key: 'rhymat_whatsapp_last_reminder_at', value: lastReminderAt },
+    { key: 'rhymat_whatsapp_cancelled_at', value: cancelledAt }
+  ].filter((item) => item.value !== '');
+}
+
+function buildDecisionMeta({
+  decision = '',
+  decisionAt = '',
+  wooSyncStatus = '',
+  wooSyncAttempts,
+  lastSyncError = '',
+  customerReplySent = '',
+  manualOverride = '',
+  manualOverrideAt = '',
+  manualOverrideStatus = ''
+} = {}) {
+  return [
+    { key: 'rhymat_whatsapp_decision', value: decision },
+    { key: 'rhymat_whatsapp_decision_at', value: decisionAt },
+    { key: 'rhymat_whatsapp_woo_sync_status', value: wooSyncStatus },
+    ...(wooSyncAttempts === undefined ? [] : [{ key: 'rhymat_whatsapp_woo_sync_attempts', value: wooSyncAttempts }]),
+    { key: 'rhymat_whatsapp_last_sync_error', value: lastSyncError },
+    { key: 'rhymat_whatsapp_customer_reply_sent', value: customerReplySent },
+    { key: 'rhymat_whatsapp_manual_override', value: manualOverride },
+    { key: 'rhymat_whatsapp_manual_override_at', value: manualOverrideAt },
+    { key: 'rhymat_whatsapp_manual_override_status', value: manualOverrideStatus }
+  ].filter((item) => item.value !== '');
+}
+
 test('new WooCommerce order sends one confirmation message and writes workflow meta', async () => {
   const { app, wasenderCalls, store, wooOrderUpdates } = createTestContext();
   const payload = {
@@ -1399,12 +1439,337 @@ test('normalizePhone converts Moroccan customer inputs to +212 format', () => {
 
 // --- Dashboard API endpoint tests ---
 
-test('GET /api/orders/summary returns order counts by state', async () => {
+test('GET /api/orders returns live workflow stages and merged fields', async () => {
+  const { app, listedOrders, store } = createTestContext();
+  listedOrders.push(
+    {
+      id: 1,
+      status: 'processing',
+      total: '100.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Ali',
+        last_name: 'One',
+        phone: '0611111111',
+        state: 'Casablanca',
+        address_1: '1 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit A', quantity: 1 }],
+      meta_data: buildWorkflowMeta({
+        state: 'pending',
+        confirmationSentAt: '2026-03-20T10:00:00.000Z',
+        reminderCount: 0
+      })
+    },
+    {
+      id: 2,
+      status: 'processing',
+      total: '110.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Sara',
+        last_name: 'Two',
+        phone: '0622222222',
+        state: 'Rabat',
+        address_1: '2 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit B', quantity: 1 }],
+      meta_data: buildWorkflowMeta({
+        state: 'pending',
+        confirmationSentAt: '2026-03-19T10:00:00.000Z',
+        reminderCount: 1,
+        lastReminderAt: '2026-03-20T10:00:00.000Z'
+      })
+    },
+    {
+      id: 3,
+      status: 'processing',
+      total: '120.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Yassine',
+        last_name: 'Three',
+        phone: '0633333333',
+        state: 'Marrakech',
+        address_1: '3 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit C', quantity: 1 }],
+      meta_data: buildWorkflowMeta({
+        state: 'pending',
+        confirmationSentAt: '2026-03-18T10:00:00.000Z',
+        reminderCount: 2,
+        lastReminderAt: '2026-03-20T10:00:00.000Z'
+      })
+    },
+    {
+      id: 4,
+      status: 'on-hold',
+      total: '130.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Mina',
+        last_name: 'Four',
+        phone: '0644444444',
+        state: 'Casablanca',
+        address_1: '4 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit D', quantity: 1 }],
+      meta_data: [
+        ...buildWorkflowMeta({
+          state: 'confirmed',
+          confirmationSentAt: '2026-03-17T10:00:00.000Z',
+          reminderCount: 1,
+          lastReminderAt: '2026-03-18T10:00:00.000Z'
+        }),
+        ...buildDecisionMeta({
+          decision: 'confirmed',
+          decisionAt: '2026-03-18T12:00:00.000Z',
+          wooSyncStatus: 'synced',
+          wooSyncAttempts: 2,
+          customerReplySent: 'yes'
+        })
+      ]
+    },
+    {
+      id: 5,
+      status: 'completed',
+      total: '140.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Omar',
+        last_name: 'Five',
+        phone: '0655555555',
+        state: 'Rabat',
+        address_1: '5 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit E', quantity: 1 }],
+      meta_data: [
+        ...buildWorkflowMeta({
+          state: 'manual',
+          confirmationSentAt: '2026-03-16T10:00:00.000Z',
+          reminderCount: 1
+        }),
+        ...buildDecisionMeta({
+          wooSyncStatus: 'manual',
+          manualOverride: 'yes',
+          manualOverrideAt: '2026-03-17T09:00:00.000Z',
+          manualOverrideStatus: 'completed'
+        })
+      ]
+    }
+  );
+
+  store.upsertOrder({
+    orderId: '2',
+    confirmationState: 'cancelled',
+    phone: '+212622222222',
+    reminderCount: 99,
+    invalidReplyCount: 2,
+    manualFollowupRequired: true,
+    lastError: 'stale-local-state'
+  });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.orders.length, 5);
+
+  const byId = Object.fromEntries(result.body.orders.map((order) => [order.orderId, order]));
+  assert.equal(byId['1'].status, 'confirmation_sent');
+  assert.equal(byId['1'].workflowState, 'pending');
+  assert.equal(byId['1'].reminderCount, 0);
+
+  assert.equal(byId['2'].status, 'first_reminder_sent');
+  assert.equal(byId['2'].reminderCount, 1);
+  assert.equal(byId['2'].manualFollowupRequired, true);
+  assert.equal(byId['2'].invalidReplyCount, 2);
+  assert.equal(byId['2'].lastError, 'stale-local-state');
+
+  assert.equal(byId['3'].status, 'second_reminder_sent');
+  assert.equal(byId['3'].lastReminderAt, '2026-03-20T10:00:00.000Z');
+
+  assert.equal(byId['4'].status, 'confirmed');
+  assert.equal(byId['4'].decision, 'confirmed');
+  assert.equal(byId['4'].wooSyncStatus, 'synced');
+  assert.equal(byId['4'].customerReplySent, 'yes');
+
+  assert.equal(byId['5'].status, 'manual');
+  assert.equal(byId['5'].manualOverride, 'yes');
+  assert.equal(byId['5'].manualOverrideStatus, 'completed');
+
+  assert.equal(byId['1'].rawOrder, undefined);
+});
+
+test('GET /api/orders includes local-only send failure states', async () => {
   const { app, store } = createTestContext();
-  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001' });
-  store.upsertOrder({ orderId: '2', confirmationState: 'confirmed', phone: '+212600000002' });
-  store.upsertOrder({ orderId: '3', confirmationState: 'cancelled', phone: '+212600000003' });
-  store.upsertOrder({ orderId: '4', confirmationState: 'pending_confirmation', phone: '+212600000004' });
+  store.upsertOrder({
+    orderId: '901',
+    confirmationState: 'send_failed',
+    phone: '+212600000901',
+    customerName: 'Failed Send',
+    lastError: 'gateway error'
+  });
+  store.upsertOrder({
+    orderId: '902',
+    confirmationState: 'failed_missing_phone',
+    customerName: 'No Phone',
+    lastError: 'Missing or invalid phone number'
+  });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(
+    result.body.orders.map((order) => order.status).sort(),
+    ['failed_missing_phone', 'send_failed']
+  );
+  assert.equal(result.body.orders.find((order) => order.orderId === '901').lastError, 'gateway error');
+});
+
+test('GET /api/orders?status=first_reminder_sent filters by exact stage', async () => {
+  const { app, listedOrders } = createTestContext();
+  listedOrders.push(
+    {
+      id: 1,
+      status: 'processing',
+      total: '100.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Ali',
+        last_name: 'One',
+        phone: '0611111111',
+        state: 'Casablanca',
+        address_1: '1 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit A', quantity: 1 }],
+      meta_data: buildWorkflowMeta({
+        state: 'pending',
+        confirmationSentAt: '2026-03-20T10:00:00.000Z',
+        reminderCount: 1
+      })
+    },
+    {
+      id: 2,
+      status: 'on-hold',
+      total: '110.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Sara',
+        last_name: 'Two',
+        phone: '0622222222',
+        state: 'Rabat',
+        address_1: '2 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit B', quantity: 1 }],
+      meta_data: [
+        ...buildWorkflowMeta({
+          state: 'confirmed',
+          confirmationSentAt: '2026-03-19T10:00:00.000Z',
+          reminderCount: 1
+        }),
+        ...buildDecisionMeta({
+          decision: 'confirmed',
+          decisionAt: '2026-03-20T10:00:00.000Z',
+          wooSyncStatus: 'synced'
+        })
+      ]
+    }
+  );
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/orders?status=first_reminder_sent',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.orders.length, 1);
+  assert.equal(result.body.orders[0].orderId, '1');
+  assert.equal(result.body.orders[0].status, 'first_reminder_sent');
+});
+
+test('GET /api/orders/summary returns counts by exact stage', async () => {
+  const { app, listedOrders, store } = createTestContext();
+  listedOrders.push(
+    {
+      id: 1,
+      status: 'processing',
+      total: '100.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Ali',
+        last_name: 'One',
+        phone: '0611111111',
+        state: 'Casablanca',
+        address_1: '1 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit A', quantity: 1 }],
+      meta_data: buildWorkflowMeta({
+        state: 'pending',
+        confirmationSentAt: '2026-03-20T10:00:00.000Z',
+        reminderCount: 0
+      })
+    },
+    {
+      id: 2,
+      status: 'processing',
+      total: '110.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Sara',
+        last_name: 'Two',
+        phone: '0622222222',
+        state: 'Rabat',
+        address_1: '2 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit B', quantity: 1 }],
+      meta_data: buildWorkflowMeta({
+        state: 'pending',
+        confirmationSentAt: '2026-03-19T10:00:00.000Z',
+        reminderCount: 1
+      })
+    },
+    {
+      id: 3,
+      status: 'cancelled',
+      total: '120.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Yassine',
+        last_name: 'Three',
+        phone: '0633333333',
+        state: 'Marrakech',
+        address_1: '3 Rue Atlas'
+      },
+      line_items: [{ name: 'Produit C', quantity: 1 }],
+      meta_data: [
+        ...buildWorkflowMeta({
+          state: 'cancelled',
+          confirmationSentAt: '2026-03-18T10:00:00.000Z',
+          reminderCount: 2,
+          cancelledAt: '2026-03-21T10:00:00.000Z'
+        }),
+        ...buildDecisionMeta({
+          decision: 'cancelled',
+          decisionAt: '2026-03-21T10:00:00.000Z',
+          wooSyncStatus: 'synced'
+        })
+      ]
+    }
+  );
+  store.upsertOrder({
+    orderId: '901',
+    confirmationState: 'send_failed',
+    phone: '+212600000901'
+  });
 
   const result = await dispatch(app, {
     method: 'GET',
@@ -1415,54 +1780,12 @@ test('GET /api/orders/summary returns order counts by state', async () => {
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.ok, true);
   assert.equal(result.body.total, 4);
-  assert.equal(result.body.confirmed, 2);
-  assert.equal(result.body.cancelled, 1);
-  assert.equal(result.body.pending_confirmation, 1);
-});
-
-test('GET /api/orders returns all orders', async () => {
-  const { app, store } = createTestContext();
-  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001', customerName: 'Ali' });
-  store.upsertOrder({ orderId: '2', confirmationState: 'cancelled', phone: '+212600000002', customerName: 'Sara' });
-
-  const result = await dispatch(app, {
-    method: 'GET',
-    url: '/api/orders',
-    headers: { 'x-task-secret': 'task-secret' }
+  assert.deepEqual(result.body.byStage, {
+    confirmation_sent: 1,
+    first_reminder_sent: 1,
+    cancelled: 1,
+    send_failed: 1
   });
-
-  assert.equal(result.statusCode, 200);
-  assert.equal(result.body.orders.length, 2);
-});
-
-test('GET /api/orders?status=confirmed filters by status', async () => {
-  const { app, store } = createTestContext();
-  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001' });
-  store.upsertOrder({ orderId: '2', confirmationState: 'cancelled', phone: '+212600000002' });
-
-  const result = await dispatch(app, {
-    method: 'GET',
-    url: '/api/orders?status=confirmed',
-    headers: { 'x-task-secret': 'task-secret' }
-  });
-
-  assert.equal(result.statusCode, 200);
-  assert.equal(result.body.orders.length, 1);
-  assert.equal(result.body.orders[0].orderId, '1');
-});
-
-test('GET /api/orders strips rawOrder from response', async () => {
-  const { app, store } = createTestContext();
-  store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001', rawOrder: { id: 1, secret: 'data' } });
-
-  const result = await dispatch(app, {
-    method: 'GET',
-    url: '/api/orders',
-    headers: { 'x-task-secret': 'task-secret' }
-  });
-
-  assert.equal(result.statusCode, 200);
-  assert.equal(result.body.orders[0].rawOrder, undefined);
 });
 
 test('GET /api/orders/:orderId/messages returns messages for an order', async () => {

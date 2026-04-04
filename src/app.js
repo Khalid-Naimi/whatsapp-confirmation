@@ -22,13 +22,13 @@ export function createApp({ config, confirmationService, store, logger = console
         }
 
         if (pathname === '/api/orders/summary') {
-          const summary = store.getOrdersSummary();
+          const summary = await confirmationService.getOrdersSummaryForApi();
           return sendCorsJson(res, 200, { ok: true, ...summary });
         }
 
         if (pathname === '/api/orders') {
           const status = parsedUrl.searchParams.get('status') || undefined;
-          const orders = store.listOrders(status).map(sanitizeOrder);
+          const orders = await confirmationService.listOrdersForApi({ status });
           return sendCorsJson(res, 200, { ok: true, orders });
         }
 
@@ -175,9 +175,4 @@ function sendCors(res, statusCode) {
 function sendCorsJson(res, statusCode, body) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json', ...CORS_HEADERS });
   res.end(JSON.stringify(body));
-}
-
-function sanitizeOrder(order) {
-  const { rawOrder, ...rest } = order;
-  return rest;
 }
