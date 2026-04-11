@@ -3,12 +3,13 @@ function buildAuthHeader(consumerKey, consumerSecret) {
 }
 
 export class WooCommerceClient {
-  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch }) {
+  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, logger = console }) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
     this.consumerKey = consumerKey;
     this.consumerSecret = consumerSecret;
     this.authHeader = buildAuthHeader(consumerKey, consumerSecret);
     this.fetch = fetchImpl;
+    this.logger = logger;
   }
 
   async listOrdersByStatuses(statuses, { perPage = 100 } = {}) {
@@ -93,6 +94,7 @@ export class WooCommerceClient {
     let lastError = null;
 
     for (const strategy of authStrategies) {
+      this.logger.log(`[woo] request method=${method} path=${path} auth=${strategy.mode}${summarizeWooBody(body)}`);
       const response = await this.fetch(buildRequestUrl({
         baseUrl: this.baseUrl,
         path,
@@ -111,9 +113,11 @@ export class WooCommerceClient {
 
       const data = await parseJsonSafe(response);
       if (response.ok) {
+        this.logger.log(`[woo] success method=${method} path=${path} status=${response.status}`);
         return data;
       }
 
+      this.logger.warn(`[woo] failure method=${method} path=${path} status=${response.status} body=${safeJson(data)}`);
       lastError = new Error(`WooCommerce request failed with ${response.status}: ${JSON.stringify(data)}`);
       if (!shouldRetryWithQueryAuth({ method, status: response.status, authMode: strategy.mode })) {
         throw lastError;
@@ -160,5 +164,33 @@ async function parseJsonSafe(response) {
     return await response.json();
   } catch {
     return null;
+  }
+}
+
+function summarizeWooBody(body) {
+  if (!body) {
+    return '';
+  }
+
+  if (body.status) {
+    return ` targetStatus=${body.status}`;
+  }
+
+  if (Array.isArray(body.meta_data)) {
+    return ` metaKeys=${body.meta_data.map((item) => item.key).filter(Boolean).join(',')}`;
+  }
+
+  if (body.note) {
+    return ' note=true';
+  }
+
+  return '';
+}
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '"[unserializable]"';
   }
 }

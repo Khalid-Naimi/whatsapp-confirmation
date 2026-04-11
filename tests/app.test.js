@@ -21,6 +21,19 @@ function createTestContext() {
   const wooNoteCalls = [];
   const wooOrderUpdates = [];
   const listedOrders = [];
+  const logCalls = [];
+
+  const logger = {
+    log(message) {
+      logCalls.push(`log:${message}`);
+    },
+    warn(message) {
+      logCalls.push(`warn:${message}`);
+    },
+    error(message) {
+      logCalls.push(`error:${message?.message || message}`);
+    }
+  };
 
   const wasenderClient = {
     async sendMessage(payload) {
@@ -119,11 +132,7 @@ function createTestContext() {
       deliveryEtaOtherCities: '2 a 3 jours ouvrables',
       defaultCityLabel: 'Maghrib'
     },
-    logger: {
-      error() {},
-      warn() {},
-      log() {}
-    }
+    logger
   });
 
   const config = {
@@ -143,9 +152,7 @@ function createTestContext() {
     config,
     confirmationService,
     store,
-    logger: {
-      error() {}
-    }
+    logger
   });
 
   return {
@@ -157,7 +164,8 @@ function createTestContext() {
     wooNoteCalls,
     wooOrderUpdates,
     listedOrders,
-    confirmationService
+    confirmationService,
+    logCalls
   };
 }
 
@@ -363,7 +371,7 @@ test('duplicate WooCommerce webhook does not send twice', async () => {
 });
 
 test('invalid or non-WhatsApp number auto-cancels the order and sends email', async () => {
-  const { app, store, mailCalls, wooStatusCalls, wooNoteCalls, confirmationService } = createTestContext();
+  const { app, store, mailCalls, wooStatusCalls, wooNoteCalls, confirmationService, logCalls } = createTestContext();
   const payload = {
     id: 1021,
     status: 'pending',
@@ -408,6 +416,8 @@ test('invalid or non-WhatsApp number auto-cancels the order and sends email', as
   assert.equal(mailCalls[0].subject, 'Your order #1021 has been cancelled');
   assert.match(mailCalls[0].text, /incorrect or not connected to WhatsApp/);
   assert.match(wooNoteCalls[0].note, /Customer email notification sent/);
+  assert.ok(logCalls.some((item) => item.includes('classified invalid_or_non_whatsapp_number orderId=1021')));
+  assert.ok(logCalls.some((item) => item.includes('cancel completed orderId=1021 emailStatus=sent')));
 });
 
 test('invalid or non-WhatsApp number still cancels when billing email is missing', async () => {
@@ -495,7 +505,7 @@ test('invalid or non-WhatsApp number still cancels when email sending fails', as
 });
 
 test('generic Wasender failure still uses send_failed without auto-cancelling', async () => {
-  const { app, store, wooStatusCalls, mailCalls, confirmationService } = createTestContext();
+  const { app, store, wooStatusCalls, mailCalls, confirmationService, logCalls } = createTestContext();
   const payload = {
     id: 1024,
     status: 'pending',
@@ -534,6 +544,7 @@ test('generic Wasender failure still uses send_failed without auto-cancelling', 
   assert.equal(store.getOrder('1024').confirmationState, 'send_failed');
   assert.equal(wooStatusCalls.length, 0);
   assert.equal(mailCalls.length, 0);
+  assert.ok(logCalls.some((item) => item.includes('classified send_failed orderId=1024')));
 });
 
 test('reply 1 confirms and updates WooCommerce to on-hold', async () => {

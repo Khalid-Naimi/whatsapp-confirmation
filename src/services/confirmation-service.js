@@ -65,6 +65,9 @@ export class ConfirmationService {
     const result = await this.sendInitialConfirmation(payload, {
       note: 'WhatsApp confirmation sent to customer.'
     });
+    this.logger.log(
+      `[confirmation] order processed orderId=${normalizedOrder.orderId} result=${result.body?.reason || (result.body?.ok ? 'confirmation_sent' : 'unknown')}`
+    );
     this.store.recordEvent('woocommerce', eventKey, payload, result.body.ok ? 'processed' : result.body.reason);
     return result;
   }
@@ -590,10 +593,14 @@ export class ConfirmationService {
       });
 
       await this.safeAddOrderNote(normalizedOrder.orderId, note);
+      this.logger.log(`[confirmation] initial send accepted orderId=${normalizedOrder.orderId} phone=${normalizedOrder.phone}`);
 
       return { status: 202, body: { ok: true } };
     } catch (error) {
       if (isWhatsAppContactabilityFailure(error)) {
+        this.logger.warn(
+          `[confirmation] classified invalid_or_non_whatsapp_number orderId=${normalizedOrder.orderId} status=${String(error.status || '')} body=${safeErrorData(error)}`
+        );
         const cancelledOrder = await this.cancelOrderForUnreachableWhatsApp(orderPayload, error, now);
         return {
           status: 202,
@@ -606,6 +613,9 @@ export class ConfirmationService {
         };
       }
 
+      this.logger.warn(
+        `[confirmation] classified send_failed orderId=${normalizedOrder.orderId} status=${String(error.status || '')} message=${error.message}`
+      );
       this.store.upsertOrder({
         ...normalizedOrder,
         confirmationState: 'send_failed',
@@ -680,6 +690,7 @@ export class ConfirmationService {
     const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
     const nowIso = now.toISOString();
     const cancellationReason = 'invalid_or_non_whatsapp_number';
+    this.logger.log(`[confirmation] cancelling unreachable whatsapp orderId=${normalizedOrder.orderId}`);
     const statusUpdatedOrder = await this.wooClient.updateOrderStatus(normalizedOrder.orderId, 'cancelled');
     const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
       normalizedOrder.orderId,
@@ -701,6 +712,9 @@ export class ConfirmationService {
     );
 
     const emailResult = await this.sendCancellationEmail(normalizedOrder);
+    this.logger.log(
+      `[confirmation] cancel completed orderId=${normalizedOrder.orderId} emailStatus=${emailResult.status} wooStatus=cancelled`
+    );
     await this.safeAddOrderNote(normalizedOrder.orderId, buildUnreachableWhatsAppCancellationNote(emailResult.status));
 
     return this.store.upsertOrder({
@@ -752,6 +766,7 @@ export class ConfirmationService {
 
   async sendCancellationEmail(order) {
     if (!order.customerEmail) {
+      this.logger.warn(`[confirmation] cancellation email skipped orderId=${order.orderId} reason=missing_customer_email`);
       return { status: 'skipped', error: '' };
     }
 
@@ -763,11 +778,13 @@ export class ConfirmationService {
         throw new Error('Mail service is not configured');
       }
 
+      this.logger.log(`[confirmation] sending cancellation email orderId=${order.orderId} to=${order.customerEmail}`);
       await this.mailService.send({
         to: order.customerEmail,
         subject,
         text
       });
+      this.logger.log(`[confirmation] cancellation email sent orderId=${order.orderId} to=${order.customerEmail}`);
       return { status: 'sent', error: '' };
     } catch (error) {
       this.logger.warn(`Unable to send cancellation email for order ${order.orderId}: ${error.message}`);
@@ -1472,6 +1489,14 @@ function buildUnreachableWhatsAppCancellationNote(emailStatus) {
   }
 
   return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification failed.';
+}
+
+function safeErrorData(error) {
+  try {
+    return JSON.stringify(error?.data ?? null);
+  } catch {
+    return '"[unserializable]"';
+  }
 }
 
 function isSameFinalDecision(order, inbound) {

@@ -9,16 +9,19 @@ import { WooCommerceClient } from './services/woocommerce-client.js';
 
 const config = loadConfig();
 const store = new JsonStore(config.dataFile);
+const logger = console;
 
 const wasenderClient = new WasenderClient({
   baseUrl: config.wasender.baseUrl,
-  apiToken: config.wasender.apiToken
+  apiToken: config.wasender.apiToken,
+  logger
 });
 
 const wooClient = new WooCommerceClient({
   baseUrl: config.woo.baseUrl,
   consumerKey: config.woo.consumerKey,
-  consumerSecret: config.woo.consumerSecret
+  consumerSecret: config.woo.consumerSecret,
+  logger
 });
 
 const mailService = new MailService(config.mail);
@@ -28,13 +31,15 @@ const confirmationService = new ConfirmationService({
   wasenderClient,
   wooClient,
   mailService,
-  messages: config.messages
+  messages: config.messages,
+  logger
 });
 
 const app = createApp({
   config,
   confirmationService,
-  store
+  store,
+  logger
 });
 
 const server = http.createServer(app);

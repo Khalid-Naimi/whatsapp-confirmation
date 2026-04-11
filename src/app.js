@@ -57,34 +57,43 @@ export function createApp({ config, confirmationService, store, logger = console
 
       if (pathname === '/webhooks/woocommerce') {
         if (isWooPing(req, rawBody)) {
+          logger.log('[webhook][woocommerce] ping received');
           return sendJson(res, 200, { ok: true, ping: true });
         }
 
         const body = parseJsonBody(rawBody);
         if (body === null) {
+          logger.warn('[webhook][woocommerce] invalid json body');
           return sendJson(res, 400, { ok: false, error: 'Invalid JSON body' });
         }
 
         const signature = req.headers['x-wc-webhook-signature'];
         const valid = verifyWooSignature(rawBody, signature, config.woo.webhookSecret);
         if (!valid) {
+          logger.warn('[webhook][woocommerce] invalid signature');
           return sendJson(res, 401, { ok: false, error: 'Invalid WooCommerce signature' });
         }
 
         const deliveryId = req.headers['x-wc-webhook-delivery-id'] || hashEvent(rawBody);
+        logger.log(`[webhook][woocommerce] received orderId=${String(body.id || '')} deliveryId=${String(deliveryId)}`);
         const result = await confirmationService.processWooOrder(body, String(deliveryId));
+        logger.log(
+          `[webhook][woocommerce] completed orderId=${String(body.id || '')} status=${result.status} ok=${String(result.body?.ok)} reason=${String(result.body?.reason || '')}`
+        );
         return sendJson(res, result.status, result.body);
       }
 
       if (pathname === '/webhooks/wasender') {
         const body = parseJsonBody(rawBody);
         if (body === null) {
+          logger.warn('[webhook][wasender] invalid json body');
           return sendJson(res, 400, { ok: false, error: 'Invalid JSON body' });
         }
 
         const signature = req.headers[config.wasender.signatureHeader];
         const valid = verifyGenericHmacSignature(rawBody, signature, config.wasender.webhookSecret);
         if (!valid) {
+          logger.warn('[webhook][wasender] invalid signature');
           return sendJson(res, 401, { ok: false, error: 'Invalid Wasender signature' });
         }
 
@@ -94,17 +103,24 @@ export function createApp({ config, confirmationService, store, logger = console
           body.data?.id ||
           req.headers['x-event-id'] ||
           hashEvent(rawBody);
+        logger.log(`[webhook][wasender] received eventId=${String(eventId)}`);
         const result = await confirmationService.processWasenderInbound(body, String(eventId));
+        logger.log(
+          `[webhook][wasender] completed eventId=${String(eventId)} status=${result.status} ok=${String(result.body?.ok)} reason=${String(result.body?.reason || '')}`
+        );
         return sendJson(res, result.status, result.body);
       }
 
       if (pathname === '/tasks/order-followups') {
         const providedSecret = req.headers['x-task-secret'];
         if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
+          logger.warn('[task][order-followups] invalid task secret');
           return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
         }
 
+        logger.log('[task][order-followups] started');
         const result = await confirmationService.runOrderFollowups();
+        logger.log(`[task][order-followups] completed pending=${result.pending || 0} reminded=${result.reminded || 0} cancelled=${result.cancelled || 0} errors=${result.errors || 0}`);
         return sendJson(res, 200, { ok: true, summary: result });
       }
 
