@@ -1,4 +1,4 @@
-import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems } from '../utils/format.js';
+import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems, validateMoroccanMobilePhone } from '../utils/format.js';
 import { WasenderSendError } from './wasender-client.js';
 
 const WORKFLOW_META_KEYS = {
@@ -534,13 +534,28 @@ export class ConfirmationService {
 
   async sendInitialConfirmation(orderPayload, { note, now = new Date() } = {}) {
     const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
-    if (!normalizedOrder.phone) {
+    const phoneValidation = validateMoroccanMobilePhone(orderPayload?.billing?.phone || orderPayload?.shipping?.phone);
+    if (phoneValidation.reason === 'missing_phone') {
       this.store.upsertOrder({
         ...normalizedOrder,
         confirmationState: 'failed_missing_phone',
         lastError: 'Missing or invalid phone number'
       });
       return { status: 202, body: { ok: false, reason: 'missing_phone' } };
+    }
+
+    if (!phoneValidation.isValid) {
+      this.logger.warn(`[confirmation] classified invalid_moroccan_mobile_number orderId=${normalizedOrder.orderId}`);
+      const cancelledOrder = await this.cancelOrderForInvalidMoroccanMobile(orderPayload, now);
+      return {
+        status: 202,
+        body: {
+          ok: false,
+          reason: 'invalid_moroccan_mobile_number',
+          cancelled: true,
+          emailStatus: cancelledOrder.customerEmailStatus
+        }
+      };
     }
 
     const message = interpolateTemplate(this.messages.confirmationTemplate, buildTemplateValues(normalizedOrder));
@@ -688,9 +703,31 @@ export class ConfirmationService {
 
   async cancelOrderForUnreachableWhatsApp(orderPayload, error, now = new Date()) {
     const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
+    return this.cancelOrderWithReason({
+      orderPayload,
+      now,
+      cancellationReason: 'invalid_or_non_whatsapp_number',
+      logLabel: 'unreachable whatsapp',
+      noteBuilder: buildUnreachableWhatsAppCancellationNote,
+      errorMessage: error.message
+    });
+  }
+
+  async cancelOrderForInvalidMoroccanMobile(orderPayload, now = new Date()) {
+    return this.cancelOrderWithReason({
+      orderPayload,
+      now,
+      cancellationReason: 'invalid_moroccan_mobile_number',
+      logLabel: 'invalid moroccan mobile',
+      noteBuilder: buildInvalidMoroccanMobileCancellationNote,
+      errorMessage: 'Phone number is not a valid Moroccan mobile number'
+    });
+  }
+
+  async cancelOrderWithReason({ orderPayload, now, cancellationReason, logLabel, noteBuilder, errorMessage }) {
+    const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
     const nowIso = now.toISOString();
-    const cancellationReason = 'invalid_or_non_whatsapp_number';
-    this.logger.log(`[confirmation] cancelling unreachable whatsapp orderId=${normalizedOrder.orderId}`);
+    this.logger.log(`[confirmation] cancelling ${logLabel} orderId=${normalizedOrder.orderId}`);
     const statusUpdatedOrder = await this.wooClient.updateOrderStatus(normalizedOrder.orderId, 'cancelled');
     const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
       normalizedOrder.orderId,
@@ -715,7 +752,7 @@ export class ConfirmationService {
     this.logger.log(
       `[confirmation] cancel completed orderId=${normalizedOrder.orderId} emailStatus=${emailResult.status} wooStatus=cancelled`
     );
-    await this.safeAddOrderNote(normalizedOrder.orderId, buildUnreachableWhatsAppCancellationNote(emailResult.status));
+    await this.safeAddOrderNote(normalizedOrder.orderId, noteBuilder(emailResult.status));
 
     return this.store.upsertOrder({
       ...normalizedOrder,
@@ -731,7 +768,7 @@ export class ConfirmationService {
       cancellationReason,
       customerEmailStatus: emailResult.status,
       customerEmailError: emailResult.error || '',
-      lastError: error.message
+      lastError: errorMessage
     });
   }
 
@@ -1489,6 +1526,18 @@ function buildUnreachableWhatsAppCancellationNote(emailStatus) {
   }
 
   return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification failed.';
+}
+
+function buildInvalidMoroccanMobileCancellationNote(emailStatus) {
+  if (emailStatus === 'sent') {
+    return 'Order cancelled automatically because the provided phone number is not a valid Moroccan mobile number. Customer email notification sent.';
+  }
+
+  if (emailStatus === 'skipped') {
+    return 'Order cancelled automatically because the provided phone number is not a valid Moroccan mobile number. Customer email notification skipped because no billing email was available.';
+  }
+
+  return 'Order cancelled automatically because the provided phone number is not a valid Moroccan mobile number. Customer email notification failed.';
 }
 
 function safeErrorData(error) {

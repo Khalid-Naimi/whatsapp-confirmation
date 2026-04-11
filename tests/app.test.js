@@ -8,7 +8,7 @@ import { createApp } from '../src/app.js';
 import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
 import { WasenderSendError } from '../src/services/wasender-client.js';
-import { normalizePhone } from '../src/utils/format.js';
+import { normalizePhone, validateMoroccanMobilePhone } from '../src/utils/format.js';
 
 function createTestContext() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'woo-confirmation-'));
@@ -418,6 +418,43 @@ test('invalid or non-WhatsApp number auto-cancels the order and sends email', as
   assert.match(wooNoteCalls[0].note, /Customer email notification sent/);
   assert.ok(logCalls.some((item) => item.includes('classified invalid_or_non_whatsapp_number orderId=1021')));
   assert.ok(logCalls.some((item) => item.includes('cancel completed orderId=1021 emailStatus=sent')));
+});
+
+test('invalid Moroccan mobile number auto-cancels before Wasender send', async () => {
+  const { app, store, wasenderCalls, mailCalls, wooStatusCalls, wooNoteCalls, logCalls } = createTestContext();
+  const payload = {
+    id: 10215,
+    status: 'pending',
+    total: '100.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Bad',
+      last_name: 'Prefix',
+      phone: '0521234567',
+      email: 'badprefix@example.com',
+      state: 'Rabat'
+    },
+    line_items: [{ name: 'Produit', quantity: 1 }]
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-10215'
+    },
+    payload
+  });
+
+  assert.equal(result.statusCode, 202);
+  assert.equal(result.body.reason, 'invalid_moroccan_mobile_number');
+  assert.equal(wasenderCalls.length, 0);
+  assert.equal(mailCalls.length, 1);
+  assert.deepEqual(wooStatusCalls[0], { orderId: '10215', status: 'cancelled' });
+  assert.equal(store.getOrder('10215').cancellationReason, 'invalid_moroccan_mobile_number');
+  assert.match(wooNoteCalls[0].note, /not a valid Moroccan mobile number/);
+  assert.ok(logCalls.some((item) => item.includes('classified invalid_moroccan_mobile_number orderId=10215')));
 });
 
 test('invalid or non-WhatsApp number still cancels when billing email is missing', async () => {
@@ -1628,11 +1665,34 @@ test('manual non-processing status stops pending reminder workflow', async () =>
 test('normalizePhone converts Moroccan customer inputs to +212 format', () => {
   assert.equal(normalizePhone('06 12 34 56 78'), '+212612345678');
   assert.equal(normalizePhone('06-12-34-56-78'), '+212612345678');
+  assert.equal(normalizePhone('(06) 12 34 56 78'), '+212612345678');
+  assert.equal(normalizePhone('07-12-34-56-78'), '+212712345678');
   assert.equal(normalizePhone('+212 6 12 34 56 78'), '+212612345678');
   assert.equal(normalizePhone('212612345678'), '+212612345678');
   assert.equal(normalizePhone('00212612345678'), '+212612345678');
+  assert.equal(normalizePhone('00212712345678'), '+212712345678');
   assert.equal(normalizePhone('612345678'), '+212612345678');
   assert.equal(normalizePhone('123'), '');
+  assert.equal(normalizePhone('0521234567'), '');
+  assert.equal(normalizePhone('+33123456789'), '');
+});
+
+test('validateMoroccanMobilePhone distinguishes missing, invalid, and valid numbers', () => {
+  assert.deepEqual(validateMoroccanMobilePhone(''), {
+    normalized: '',
+    isValid: false,
+    reason: 'missing_phone'
+  });
+  assert.deepEqual(validateMoroccanMobilePhone('0521234567'), {
+    normalized: '',
+    isValid: false,
+    reason: 'invalid_moroccan_mobile_number'
+  });
+  assert.deepEqual(validateMoroccanMobilePhone('07 12 34 56 78'), {
+    normalized: '+212712345678',
+    isValid: true,
+    reason: ''
+  });
 });
 
 // --- Dashboard API endpoint tests ---
