@@ -38,6 +38,12 @@ Backend-only Node.js service that:
 - `WASENDER_API_TOKEN`: Wasender API token
 - `WASENDER_WEBHOOK_SECRET`: shared secret for Wasender webhook validation
 - `WASENDER_SIGNATURE_HEADER`: request header containing the Wasender signature
+- `SMTP_HOST`: SMTP host used for customer cancellation emails
+- `SMTP_PORT`: SMTP port used for customer cancellation emails
+- `SMTP_SECURE`: whether SMTP uses SSL/TLS
+- `SMTP_USER`: SMTP username
+- `SMTP_PASS`: SMTP password
+- `MAIL_FROM`: sender identity for customer cancellation emails
 - `DELIVERY_ETA_CASABLANCA`: ETA used when city is exactly `Casablanca`
 - `DELIVERY_ETA_OTHER_CITIES`: ETA used for every other city or missing city
 - `DEFAULT_DELIVERY_CITY_LABEL`: fallback city label when no city is available
@@ -46,10 +52,13 @@ Backend-only Node.js service that:
 - `REMINDER_MESSAGE`: 24h/48h reminder template
 - `CONFIRMED_REPLY_MESSAGE`: confirmation follow-up message
 - `CANCELLED_REPLY_MESSAGE`: cancellation follow-up message
+- `CANCELLATION_EMAIL_SUBJECT`: subject template for invalid/non-WhatsApp cancellation emails
+- `CANCELLATION_EMAIL_BODY`: body template for invalid/non-WhatsApp cancellation emails
 
 ## Notes
 
 - Persistence is file-backed JSON for easy local setup.
 - In production, consider replacing `JsonStore` with a real database.
 - Confirmation/reminder state is stored on WooCommerce orders using `rhymat_whatsapp_*` meta keys.
+- Contactability failures from Wasender that indicate an invalid or non-WhatsApp number now auto-cancel the order and attempt a customer email using the WooCommerce billing email.
 - Use a Render Cron Job to call `POST /tasks/order-followups` every hour with header `x-task-secret: <TASK_SECRET>`.

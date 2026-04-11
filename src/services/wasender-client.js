@@ -57,7 +57,11 @@ export class WasenderClient {
         continue;
       }
 
-      throw new Error(`Wasender send-message failed with ${response.status}: ${JSON.stringify(data)}`);
+      throw new WasenderSendError({
+        status: response.status,
+        data,
+        message: `Wasender send-message failed with ${response.status}: ${JSON.stringify(data)}`
+      });
     }
 
     throw new Error('Wasender send-message failed: retry limit reached');
@@ -90,4 +94,13 @@ function resolveRetryDelayMs(data, fallbackMs) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export class WasenderSendError extends Error {
+  constructor({ status, data, message }) {
+    super(message);
+    this.name = 'WasenderSendError';
+    this.status = status;
+    this.data = data;
+  }
 }

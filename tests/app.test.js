@@ -7,6 +7,7 @@ import { createHmac } from 'node:crypto';
 import { createApp } from '../src/app.js';
 import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
+import { WasenderSendError } from '../src/services/wasender-client.js';
 import { normalizePhone } from '../src/utils/format.js';
 
 function createTestContext() {
@@ -15,6 +16,7 @@ function createTestContext() {
   const store = new JsonStore(dataFile);
 
   const wasenderCalls = [];
+  const mailCalls = [];
   const wooStatusCalls = [];
   const wooNoteCalls = [];
   const wooOrderUpdates = [];
@@ -90,16 +92,26 @@ function createTestContext() {
     }
   };
 
+  const mailService = {
+    async send(payload) {
+      mailCalls.push(payload);
+      return { id: `mail-${mailCalls.length}` };
+    }
+  };
+
   const confirmationService = new ConfirmationService({
     store,
     wasenderClient,
     wooClient,
+    mailService,
     messages: {
       confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       invalidReply: '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       reminderMessage: 'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       confirmedReply: 'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
       cancelledReply: 'La commande dyalk t annulat.',
+      cancellationEmailSubject: 'Your order #{{orderId}} has been cancelled',
+      cancellationEmailBody: 'Salam {{customerName}},\n\nWe were unable to confirm your order because the phone number provided appears to be incorrect or not connected to WhatsApp.\n\nFor that reason, your order #{{orderId}} has been cancelled.\n\nIf you would still like to receive your order, please place a new order using a valid phone number that is reachable on WhatsApp.\n\nThank you for your understanding.',
       internalNotifyPhones: ['+212708357533', '+491729031097'],
       internalConfirmedTemplate: 'Commande confirmat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       internalCancelledTemplate: 'Commande annulat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
@@ -140,6 +152,7 @@ function createTestContext() {
     app,
     store,
     wasenderCalls,
+    mailCalls,
     wooStatusCalls,
     wooNoteCalls,
     wooOrderUpdates,
@@ -347,6 +360,180 @@ test('duplicate WooCommerce webhook does not send twice', async () => {
 
   assert.equal(result.statusCode, 200);
   assert.equal(wasenderCalls.length, 1);
+});
+
+test('invalid or non-WhatsApp number auto-cancels the order and sends email', async () => {
+  const { app, store, mailCalls, wooStatusCalls, wooNoteCalls, confirmationService } = createTestContext();
+  const payload = {
+    id: 1021,
+    status: 'pending',
+    total: '100.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Sara',
+      last_name: 'Email',
+      phone: '212600000021',
+      email: 'sara@example.com',
+      state: 'Rabat'
+    },
+    line_items: [{ name: 'Produit', quantity: 1 }]
+  };
+
+  confirmationService.wasenderClient.sendMessage = async () => {
+    throw new WasenderSendError({
+      status: 422,
+      data: { message: 'Recipient not registered on WhatsApp' },
+      message: 'Wasender send-message failed with 422: {"message":"Recipient not registered on WhatsApp"}'
+    });
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-1021'
+    },
+    payload
+  });
+
+  assert.equal(result.statusCode, 202);
+  assert.equal(result.body.reason, 'invalid_or_non_whatsapp_number');
+  assert.deepEqual(wooStatusCalls[0], { orderId: '1021', status: 'cancelled' });
+  assert.equal(store.getOrder('1021').confirmationState, 'cancelled');
+  assert.equal(store.getOrder('1021').cancellationReason, 'invalid_or_non_whatsapp_number');
+  assert.equal(store.getOrder('1021').customerEmailStatus, 'sent');
+  assert.equal(mailCalls.length, 1);
+  assert.equal(mailCalls[0].to, 'sara@example.com');
+  assert.equal(mailCalls[0].subject, 'Your order #1021 has been cancelled');
+  assert.match(mailCalls[0].text, /incorrect or not connected to WhatsApp/);
+  assert.match(wooNoteCalls[0].note, /Customer email notification sent/);
+});
+
+test('invalid or non-WhatsApp number still cancels when billing email is missing', async () => {
+  const { app, store, mailCalls, wooStatusCalls, wooNoteCalls, confirmationService } = createTestContext();
+  const payload = {
+    id: 1022,
+    status: 'pending',
+    total: '100.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'No',
+      last_name: 'Email',
+      phone: '212600000022',
+      state: 'Rabat'
+    },
+    line_items: [{ name: 'Produit', quantity: 1 }]
+  };
+
+  confirmationService.wasenderClient.sendMessage = async () => {
+    throw new WasenderSendError({
+      status: 400,
+      data: { error: 'invalid phone number' },
+      message: 'Wasender send-message failed with 400: {"error":"invalid phone number"}'
+    });
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-1022'
+    },
+    payload
+  });
+
+  assert.deepEqual(wooStatusCalls[0], { orderId: '1022', status: 'cancelled' });
+  assert.equal(store.getOrder('1022').customerEmailStatus, 'skipped');
+  assert.equal(mailCalls.length, 0);
+  assert.match(wooNoteCalls[0].note, /notification skipped/);
+});
+
+test('invalid or non-WhatsApp number still cancels when email sending fails', async () => {
+  const { app, store, wooStatusCalls, wooNoteCalls, confirmationService } = createTestContext();
+  const payload = {
+    id: 1023,
+    status: 'pending',
+    total: '100.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Mail',
+      last_name: 'Fail',
+      phone: '212600000023',
+      email: 'mailfail@example.com',
+      state: 'Rabat'
+    },
+    line_items: [{ name: 'Produit', quantity: 1 }]
+  };
+
+  confirmationService.wasenderClient.sendMessage = async () => {
+    throw new WasenderSendError({
+      status: 404,
+      data: { message: 'Recipient unreachable' },
+      message: 'Wasender send-message failed with 404: {"message":"Recipient unreachable"}'
+    });
+  };
+  confirmationService.mailService.send = async () => {
+    throw new Error('smtp authentication failed');
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-1023'
+    },
+    payload
+  });
+
+  assert.deepEqual(wooStatusCalls[0], { orderId: '1023', status: 'cancelled' });
+  assert.equal(store.getOrder('1023').customerEmailStatus, 'failed');
+  assert.equal(store.getOrder('1023').customerEmailError, 'smtp authentication failed');
+  assert.match(wooNoteCalls[0].note, /notification failed/);
+});
+
+test('generic Wasender failure still uses send_failed without auto-cancelling', async () => {
+  const { app, store, wooStatusCalls, mailCalls, confirmationService } = createTestContext();
+  const payload = {
+    id: 1024,
+    status: 'pending',
+    total: '100.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Gateway',
+      last_name: 'Error',
+      phone: '212600000024',
+      email: 'gateway@example.com',
+      state: 'Rabat'
+    },
+    line_items: [{ name: 'Produit', quantity: 1 }]
+  };
+
+  confirmationService.wasenderClient.sendMessage = async () => {
+    throw new WasenderSendError({
+      status: 500,
+      data: { message: 'gateway error' },
+      message: 'Wasender send-message failed with 500: {"message":"gateway error"}'
+    });
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-1024'
+    },
+    payload
+  });
+
+  assert.equal(result.statusCode, 502);
+  assert.equal(result.body.reason, 'send_failed');
+  assert.equal(store.getOrder('1024').confirmationState, 'send_failed');
+  assert.equal(wooStatusCalls.length, 0);
+  assert.equal(mailCalls.length, 0);
 });
 
 test('reply 1 confirms and updates WooCommerce to on-hold', async () => {

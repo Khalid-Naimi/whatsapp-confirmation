@@ -61,6 +61,14 @@ export function loadConfig() {
       webhookSecret: process.env.WASENDER_WEBHOOK_SECRET || '',
       signatureHeader: (process.env.WASENDER_SIGNATURE_HEADER || 'x-wasender-signature').toLowerCase()
     },
+    mail: {
+      host: process.env.SMTP_HOST || '',
+      port: Number(process.env.SMTP_PORT || 465),
+      secure: parseBooleanEnv(process.env.SMTP_SECURE, true),
+      user: process.env.SMTP_USER || '',
+      pass: process.env.SMTP_PASS || '',
+      from: process.env.MAIL_FROM || process.env.SMTP_USER || ''
+    },
     messages: {
       internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),
       confirmationTemplate: process.env.CONFIRMATION_MESSAGE_TEMPLATE ||
@@ -73,6 +81,10 @@ export function loadConfig() {
         'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
       cancelledReply: process.env.CANCELLED_REPLY_MESSAGE ||
         'La commande dyalk t annulat.',
+      cancellationEmailSubject: process.env.CANCELLATION_EMAIL_SUBJECT ||
+        'Your order #{{orderId}} has been cancelled',
+      cancellationEmailBody: process.env.CANCELLATION_EMAIL_BODY ||
+        'Salam {{customerName}},\n\nWe were unable to confirm your order because the phone number provided appears to be incorrect or not connected to WhatsApp.\n\nFor that reason, your order #{{orderId}} has been cancelled.\n\nIf you would still like to receive your order, please place a new order using a valid phone number that is reachable on WhatsApp.\n\nThank you for your understanding.',
       internalConfirmedTemplate: process.env.INTERNAL_CONFIRMED_TEMPLATE ||
         'Commande confirmat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       internalCancelledTemplate: process.env.INTERNAL_CANCELLED_TEMPLATE ||
@@ -89,4 +101,12 @@ function parsePhoneList(value) {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseBooleanEnv(value, defaultValue) {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue;
+  }
+
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }

@@ -1,6 +1,7 @@
 import { loadConfig } from '../config.js';
 import { JsonStore } from '../json-store.js';
 import { ConfirmationService } from '../services/confirmation-service.js';
+import { MailService } from '../services/mail-service.js';
 import { WasenderClient } from '../services/wasender-client.js';
 import { WooCommerceClient } from '../services/woocommerce-client.js';
 
@@ -18,10 +19,13 @@ const wooClient = new WooCommerceClient({
   consumerSecret: config.woo.consumerSecret
 });
 
+const mailService = new MailService(config.mail);
+
 const confirmationService = new ConfirmationService({
   store,
   wasenderClient,
   wooClient,
+  mailService,
   messages: config.messages
 });
 

@@ -1,4 +1,5 @@
 import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems } from '../utils/format.js';
+import { WasenderSendError } from './wasender-client.js';
 
 const WORKFLOW_META_KEYS = {
   state: 'rhymat_whatsapp_state',
@@ -14,6 +15,7 @@ const DECISION_META_KEYS = {
   wooSyncAttempts: 'rhymat_whatsapp_woo_sync_attempts',
   lastSyncError: 'rhymat_whatsapp_last_sync_error',
   customerReplySent: 'rhymat_whatsapp_customer_reply_sent',
+  cancellationReason: 'rhymat_whatsapp_cancellation_reason',
   internalNotifiedConfirmed: 'rhymat_whatsapp_internal_notified_confirmed',
   internalNotifiedCancelled: 'rhymat_whatsapp_internal_notified_cancelled',
   manualOverride: 'rhymat_whatsapp_manual_override',
@@ -30,10 +32,11 @@ const AUTO_CANCEL_MS = 72 * 60 * 60 * 1000;
 const MAX_WOO_SYNC_ATTEMPTS = 6;
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, messages, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, messages, logger = console }) {
     this.store = store;
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
+    this.mailService = mailService;
     this.messages = messages;
     this.logger = logger;
   }
@@ -590,6 +593,19 @@ export class ConfirmationService {
 
       return { status: 202, body: { ok: true } };
     } catch (error) {
+      if (isWhatsAppContactabilityFailure(error)) {
+        const cancelledOrder = await this.cancelOrderForUnreachableWhatsApp(orderPayload, error, now);
+        return {
+          status: 202,
+          body: {
+            ok: false,
+            reason: 'invalid_or_non_whatsapp_number',
+            cancelled: true,
+            emailStatus: cancelledOrder.customerEmailStatus
+          }
+        };
+      }
+
       this.store.upsertOrder({
         ...normalizedOrder,
         confirmationState: 'send_failed',
@@ -660,6 +676,51 @@ export class ConfirmationService {
     });
   }
 
+  async cancelOrderForUnreachableWhatsApp(orderPayload, error, now = new Date()) {
+    const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
+    const nowIso = now.toISOString();
+    const cancellationReason = 'invalid_or_non_whatsapp_number';
+    const statusUpdatedOrder = await this.wooClient.updateOrderStatus(normalizedOrder.orderId, 'cancelled');
+    const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
+      normalizedOrder.orderId,
+      mergeMetaUpdates(
+        buildWorkflowMetaUpdate(statusUpdatedOrder || orderPayload, {
+          state: 'cancelled',
+          cancelledAt: nowIso
+        }),
+        buildDecisionMetaUpdate(statusUpdatedOrder || orderPayload, {
+          decision: 'cancelled',
+          decisionAt: nowIso,
+          wooSyncStatus: 'synced',
+          wooSyncAttempts: 0,
+          lastSyncError: '',
+          customerReplySent: 'no',
+          cancellationReason
+        })
+      )
+    );
+
+    const emailResult = await this.sendCancellationEmail(normalizedOrder);
+    await this.safeAddOrderNote(normalizedOrder.orderId, buildUnreachableWhatsAppCancellationNote(emailResult.status));
+
+    return this.store.upsertOrder({
+      ...normalizedOrder,
+      rawOrder: metaUpdatedOrder || statusUpdatedOrder || orderPayload,
+      confirmationState: 'cancelled',
+      wooStatus: 'cancelled',
+      decision: 'cancelled',
+      decisionAt: nowIso,
+      wooSyncStatus: 'synced',
+      wooSyncAttempts: 0,
+      lastSyncError: '',
+      customerReplySent: 'no',
+      cancellationReason,
+      customerEmailStatus: emailResult.status,
+      customerEmailError: emailResult.error || '',
+      lastError: error.message
+    });
+  }
+
   async safeAddOrderNote(orderId, note) {
     try {
       await this.wooClient.addOrderNote(orderId, note);
@@ -686,6 +747,31 @@ export class ConfirmationService {
     } catch (error) {
       this.logger.warn(`Unable to send WhatsApp follow-up for order ${orderId}: ${error.message}`);
       return null;
+    }
+  }
+
+  async sendCancellationEmail(order) {
+    if (!order.customerEmail) {
+      return { status: 'skipped', error: '' };
+    }
+
+    const subject = interpolateTemplate(this.messages.cancellationEmailSubject, buildTemplateValues(order));
+    const text = interpolateTemplate(this.messages.cancellationEmailBody, buildTemplateValues(order));
+
+    try {
+      if (!this.mailService) {
+        throw new Error('Mail service is not configured');
+      }
+
+      await this.mailService.send({
+        to: order.customerEmail,
+        subject,
+        text
+      });
+      return { status: 'sent', error: '' };
+    } catch (error) {
+      this.logger.warn(`Unable to send cancellation email for order ${order.orderId}: ${error.message}`);
+      return { status: 'failed', error: error.message };
     }
   }
 
@@ -953,6 +1039,7 @@ function buildApiOrder({ liveOrder, localOrder, messages }) {
     : {
         orderId: String(localOrder?.orderId || ''),
         phone: localOrder?.phone || '',
+        customerEmail: localOrder?.customerEmail || '',
         customerName: localOrder?.customerName || '',
         total: localOrder?.total || '',
         currency: localOrder?.currency || '',
@@ -1000,11 +1087,15 @@ function buildApiOrder({ liveOrder, localOrder, messages }) {
     wooSyncAttempts: workflowView.wooSyncAttempts,
     lastSyncError: workflowView.lastSyncError,
     customerReplySent: workflowView.customerReplySent,
+    cancellationReason: workflowView.cancellationReason,
     manualOverride: workflowView.manualOverride,
     manualOverrideAt: workflowView.manualOverrideAt,
     manualOverrideStatus: workflowView.manualOverrideStatus,
     invalidReplyCount: Number(localOrder?.invalidReplyCount || 0),
     manualFollowupRequired: Boolean(localOrder?.manualFollowupRequired),
+    customerEmail: normalizedOrder.customerEmail || '',
+    customerEmailStatus: localOrder?.customerEmailStatus || '',
+    customerEmailError: localOrder?.customerEmailError || '',
     lastError: localOrder?.lastError || '',
     updatedAt: localOrder?.updatedAt || ''
   };
@@ -1027,6 +1118,7 @@ function mergeWorkflowView({ workflow, decisionMeta, localOrder }) {
       : Number(localOrder?.wooSyncAttempts || 0),
     lastSyncError: decisionMeta.lastSyncError || String(localOrder?.lastSyncError || ''),
     customerReplySent: decisionMeta.customerReplySent || String(localOrder?.customerReplySent || ''),
+    cancellationReason: decisionMeta.cancellationReason || String(localOrder?.cancellationReason || ''),
     manualOverride: decisionMeta.manualOverride || String(localOrder?.manualOverride || ''),
     manualOverrideAt: decisionMeta.manualOverrideAt || String(localOrder?.manualOverrideAt || ''),
     manualOverrideStatus: decisionMeta.manualOverrideStatus || String(localOrder?.manualOverrideStatus || '')
@@ -1089,6 +1181,7 @@ function normalizeWooOrder(payload, messages) {
   return {
     orderId: String(payload.id),
     phone: normalizePhone(billing.phone || shipping.phone),
+    customerEmail: String(billing.email || '').trim(),
     customerName: [billing.first_name, billing.last_name].filter(Boolean).join(' ').trim(),
     total: payload.total,
     currency: payload.currency,
@@ -1108,6 +1201,7 @@ function buildTemplateValues(normalizedOrder) {
     orderId: normalizedOrder.orderId,
     orderTotal: formatOrderTotal(normalizedOrder),
     customerPhone: normalizedOrder.phone || '',
+    customerEmail: normalizedOrder.customerEmail || '',
     orderItemsSummary: normalizedOrder.orderItemsSummary,
     deliveryAddress: normalizedOrder.deliveryAddress,
     deliveryCity: normalizedOrder.deliveryCity,
@@ -1278,6 +1372,7 @@ function getDecisionMeta(order) {
     wooSyncAttempts: Number(metaValue(DECISION_META_KEYS.wooSyncAttempts) || 0),
     lastSyncError: String(metaValue(DECISION_META_KEYS.lastSyncError) || ''),
     customerReplySent: String(metaValue(DECISION_META_KEYS.customerReplySent) || ''),
+    cancellationReason: String(metaValue(DECISION_META_KEYS.cancellationReason) || ''),
     internalNotifiedConfirmed: String(metaValue(DECISION_META_KEYS.internalNotifiedConfirmed) || ''),
     internalNotifiedCancelled: String(metaValue(DECISION_META_KEYS.internalNotifiedCancelled) || ''),
     manualOverride: String(metaValue(DECISION_META_KEYS.manualOverride) || ''),
@@ -1315,6 +1410,7 @@ function buildDecisionMetaUpdate(order, values) {
     [DECISION_META_KEYS.wooSyncAttempts]: values.wooSyncAttempts,
     [DECISION_META_KEYS.lastSyncError]: values.lastSyncError,
     [DECISION_META_KEYS.customerReplySent]: values.customerReplySent,
+    [DECISION_META_KEYS.cancellationReason]: values.cancellationReason,
     [DECISION_META_KEYS.internalNotifiedConfirmed]: values.internalNotifiedConfirmed,
     [DECISION_META_KEYS.internalNotifiedCancelled]: values.internalNotifiedCancelled,
     [DECISION_META_KEYS.manualOverride]: values.manualOverride,
@@ -1338,6 +1434,44 @@ function mergeMetaUpdates(...metaSets) {
     }
   }
   return [...merged.values()];
+}
+
+function isWhatsAppContactabilityFailure(error) {
+  if (!(error instanceof WasenderSendError)) {
+    return false;
+  }
+
+  if (![400, 404, 422].includes(Number(error.status))) {
+    return false;
+  }
+
+  const haystack = JSON.stringify(error.data || {}).toLowerCase();
+  return [
+    'not on whatsapp',
+    'not registered on whatsapp',
+    'not connected to whatsapp',
+    'not a valid whatsapp',
+    'invalid phone',
+    'invalid number',
+    'number is invalid',
+    'phone number is invalid',
+    'invalid recipient',
+    'recipient does not exist',
+    'unreachable',
+    'jid'
+  ].some((pattern) => haystack.includes(pattern));
+}
+
+function buildUnreachableWhatsAppCancellationNote(emailStatus) {
+  if (emailStatus === 'sent') {
+    return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification sent.';
+  }
+
+  if (emailStatus === 'skipped') {
+    return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification skipped because no billing email was available.';
+  }
+
+  return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification failed.';
 }
 
 function isSameFinalDecision(order, inbound) {
