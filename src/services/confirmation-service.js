@@ -1019,19 +1019,24 @@ export class ConfirmationService {
     let rawOrder = order.rawOrder || {};
 
     try {
-      const statusUpdatedOrder = await this.wooClient.updateOrderStatus(order.orderId, targetWooStatus);
-      rawOrder = statusUpdatedOrder || rawOrder;
-      const metaUpdatedOrder = await this.persistDecisionMeta({
-        orderPayload: rawOrder,
-        orderId: order.orderId,
-        state: targetState,
-        nowIso,
-        customerReplySent: order.customerReplySent || 'no',
-        wooSyncStatus: 'synced',
-        wooSyncAttempts: attemptNumber,
-        lastSyncError: ''
+      const updatedOrder = await this.wooClient.updateOrder(order.orderId, {
+        status: targetWooStatus,
+        meta_data: mergeMetaUpdates(
+          buildWorkflowMetaUpdate(rawOrder, {
+            state: targetState,
+            cancelledAt: targetState === 'cancelled' ? nowIso : ''
+          }),
+          buildDecisionMetaUpdate(rawOrder, {
+            decision: targetState,
+            decisionAt: nowIso,
+            wooSyncStatus: 'synced',
+            wooSyncAttempts: attemptNumber,
+            lastSyncError: '',
+            customerReplySent: order.customerReplySent || 'no'
+          })
+        )
       });
-      rawOrder = metaUpdatedOrder || rawOrder;
+      rawOrder = updatedOrder || rawOrder;
       await this.safeAddOrderNote(order.orderId, note);
       this.store.upsertOrder({
         ...order,

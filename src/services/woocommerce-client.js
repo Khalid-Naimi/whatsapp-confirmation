@@ -94,32 +94,59 @@ export class WooCommerceClient {
     let lastError = null;
 
     for (const strategy of authStrategies) {
-      this.logger.log(`[woo] request method=${method} path=${path} auth=${strategy.mode}${summarizeWooBody(body)}`);
-      const response = await this.fetch(buildRequestUrl({
-        baseUrl: this.baseUrl,
-        path,
-        consumerKey: this.consumerKey,
-        consumerSecret: this.consumerSecret,
-        authMode: strategy.mode
-      }), {
-        method,
-        headers: buildHeaders({
-          authHeader: this.authHeader,
-          authMode: strategy.mode,
-          hasBody: body !== undefined
-        }),
-        body: body === undefined ? undefined : JSON.stringify(body)
-      });
+      const maxAttempts = shouldRetryTransient(method) ? 3 : 1;
 
-      const data = await parseJsonSafe(response);
-      if (response.ok) {
-        this.logger.log(`[woo] success method=${method} path=${path} status=${response.status}`);
-        return data;
-      }
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (attempt > 1) {
+          await sleep(1000);
+        }
 
-      this.logger.warn(`[woo] failure method=${method} path=${path} status=${response.status} body=${safeJson(data)}`);
-      lastError = new Error(`WooCommerce request failed with ${response.status}: ${JSON.stringify(data)}`);
-      if (!shouldRetryWithQueryAuth({ method, status: response.status, authMode: strategy.mode })) {
+        this.logger.log(`[woo] request method=${method} path=${path} auth=${strategy.mode}${attempt > 1 ? ` attempt=${attempt}` : ''}${summarizeWooBody(body)}`);
+
+        let response;
+        try {
+          response = await this.fetch(buildRequestUrl({
+            baseUrl: this.baseUrl,
+            path,
+            consumerKey: this.consumerKey,
+            consumerSecret: this.consumerSecret,
+            authMode: strategy.mode
+          }), {
+            method,
+            headers: buildHeaders({
+              authHeader: this.authHeader,
+              authMode: strategy.mode,
+              hasBody: body !== undefined
+            }),
+            body: body === undefined ? undefined : JSON.stringify(body)
+          });
+        } catch (networkError) {
+          lastError = networkError;
+          if (attempt < maxAttempts) {
+            this.logger.warn(`[woo] network error method=${method} path=${path} attempt=${attempt} message=${networkError.message} — retrying`);
+            continue;
+          }
+          throw networkError;
+        }
+
+        const data = await parseJsonSafe(response);
+        if (response.ok) {
+          this.logger.log(`[woo] success method=${method} path=${path} status=${response.status}`);
+          return data;
+        }
+
+        this.logger.warn(`[woo] failure method=${method} path=${path} status=${response.status} body=${safeJson(data)}`);
+        lastError = new Error(`WooCommerce request failed with ${response.status}: ${JSON.stringify(data)}`);
+
+        if (shouldRetryWithQueryAuth({ method, status: response.status, authMode: strategy.mode })) {
+          break;
+        }
+
+        if (attempt < maxAttempts && isTransientStatus(response.status)) {
+          this.logger.warn(`[woo] transient failure method=${method} path=${path} status=${response.status} attempt=${attempt} — retrying`);
+          continue;
+        }
+
         throw lastError;
       }
     }
@@ -157,6 +184,18 @@ function buildRequestUrl({ baseUrl, path, consumerKey, consumerSecret, authMode 
 
 function shouldRetryWithQueryAuth({ method, status, authMode }) {
   return method === 'GET' && authMode === 'header' && [401, 403, 415].includes(status);
+}
+
+function shouldRetryTransient(method) {
+  return method !== 'GET';
+}
+
+function isTransientStatus(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function parseJsonSafe(response) {

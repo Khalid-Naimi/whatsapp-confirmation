@@ -631,7 +631,9 @@ test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
   });
 
   assert.equal(result.statusCode, 202);
-  assert.deepEqual(wooStatusCalls[0], { orderId: '103', status: 'on-hold' });
+  const confirmStatusUpdate = wooOrderUpdates.find((u) => u.fields.status);
+  assert.equal(confirmStatusUpdate?.orderId, '103');
+  assert.equal(confirmStatusUpdate?.fields.status, 'on-hold');
   assert.equal(store.getOrder('103').confirmationState, 'confirmed');
   assert.equal(
     wasenderCalls[1].message,
@@ -695,7 +697,9 @@ test('reply 2 cancels the order', async () => {
     payload: replyPayload
   });
 
-  assert.deepEqual(wooStatusCalls[0], { orderId: '104', status: 'cancelled' });
+  const cancelStatusUpdate = wooOrderUpdates.find((u) => u.fields.status);
+  assert.equal(cancelStatusUpdate?.orderId, '104');
+  assert.equal(cancelStatusUpdate?.fields.status, 'cancelled');
   assert.equal(store.getOrder('104').confirmationState, 'cancelled');
   assert.equal(wasenderCalls[1].message, 'La commande dyalk t annulat.');
   assert.equal(wasenderCalls[2].to, '+212708357533');
@@ -1066,7 +1070,9 @@ test('reply recovers pending order from Woo after local cache loss and blocks fo
   assert.equal(replyResult.statusCode, 202);
   assert.equal(restartedContext.store.getOrder('112').confirmationState, 'confirmed');
   assert.equal(restartedContext.store.read().events.at(-1).status, 'matched_via_woo_fallback');
-  assert.deepEqual(restartedContext.wooStatusCalls[0], { orderId: '112', status: 'on-hold' });
+  const recoverStatusUpdate = restartedContext.wooOrderUpdates.find((u) => u.fields.status);
+  assert.equal(recoverStatusUpdate?.orderId, '112');
+  assert.equal(recoverStatusUpdate?.fields.status, 'on-hold');
   assert.equal(restartedContext.wasenderCalls.length, 3);
 
   const summary = await restartedContext.confirmationService.runOrderFollowups({
@@ -1078,7 +1084,7 @@ test('reply recovers pending order from Woo after local cache loss and blocks fo
 });
 
 test('Woo fallback picks the newest pending order for the same phone', async () => {
-  const { app, store, listedOrders, wooStatusCalls } = createTestContext();
+  const { app, store, listedOrders, wooOrderUpdates } = createTestContext();
 
   listedOrders.push(
     {
@@ -1141,7 +1147,9 @@ test('Woo fallback picks the newest pending order for the same phone', async () 
   });
 
   assert.equal(replyResult.statusCode, 202);
-  assert.deepEqual(wooStatusCalls[0], { orderId: '502', status: 'cancelled' });
+  const fallbackStatusUpdate = wooOrderUpdates.find((u) => u.fields.status);
+  assert.equal(fallbackStatusUpdate?.orderId, '502');
+  assert.equal(fallbackStatusUpdate?.fields.status, 'cancelled');
   assert.equal(store.getOrder('502').confirmationState, 'cancelled');
   assert.equal(store.getOrder('501'), null);
 });
@@ -1437,7 +1445,7 @@ test('task endpoint runs followups with valid secret', async () => {
 });
 
 test('valid reply keeps decision final and retries Woo sync silently after failure', async () => {
-  const { app, store, wasenderCalls, listedOrders, wooStatusCalls, confirmationService } = createTestContext();
+  const { app, store, wasenderCalls, listedOrders, wooOrderUpdates, confirmationService } = createTestContext();
   const orderPayload = {
     id: 402,
     status: 'pending',
@@ -1464,13 +1472,13 @@ test('valid reply keeps decision final and retries Woo sync silently after failu
   });
 
   let failOnce = true;
-  const originalUpdateOrderStatus = confirmationService.wooClient.updateOrderStatus.bind(confirmationService.wooClient);
-  confirmationService.wooClient.updateOrderStatus = async (orderId, status) => {
-    if (failOnce) {
+  const originalUpdateOrder = confirmationService.wooClient.updateOrder.bind(confirmationService.wooClient);
+  confirmationService.wooClient.updateOrder = async (orderId, fields) => {
+    if (failOnce && fields.status) {
       failOnce = false;
       throw new Error('temporary woo failure');
     }
-    return originalUpdateOrderStatus(orderId, status);
+    return originalUpdateOrder(orderId, fields);
   };
 
   const replyPayload = {
@@ -1509,7 +1517,9 @@ test('valid reply keeps decision final and retries Woo sync silently after failu
   const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
 
   assert.equal(summary.errors, 0);
-  assert.deepEqual(wooStatusCalls.at(-1), { orderId: '402', status: 'on-hold' });
+  const retryStatusUpdate = [...wooOrderUpdates].reverse().find((u) => u.fields.status);
+  assert.equal(retryStatusUpdate?.orderId, '402');
+  assert.equal(retryStatusUpdate?.fields.status, 'on-hold');
   assert.equal(store.getOrder('402').wooSyncStatus, 'synced');
   assert.equal(store.getOrder('402').confirmationState, 'confirmed');
   assert.equal(wasenderCalls.length, 4);
