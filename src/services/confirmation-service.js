@@ -1061,6 +1061,14 @@ export class ConfirmationService {
         wooSyncAttempts: attemptNumber,
         lastSyncError: error.message
       });
+      // Best-effort status-only fallback: if the combined atomic call was rejected
+      // (e.g. WooCommerce or a plugin refuses the larger payload), at least push
+      // the status change so the order isn't stuck in 'processing'.
+      try {
+        await this.wooClient.updateOrderStatus(order.orderId, targetWooStatus);
+      } catch (statusError) {
+        this.logger.warn(`[confirmation] status-only fallback failed for order ${order.orderId}: ${statusError.message}`);
+      }
       try {
         const metaUpdatedOrder = await this.persistDecisionMeta({
           orderPayload: rawOrder,

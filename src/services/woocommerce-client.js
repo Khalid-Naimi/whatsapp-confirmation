@@ -211,19 +211,20 @@ function summarizeWooBody(body) {
     return '';
   }
 
+  const parts = [];
   if (body.status) {
-    return ` targetStatus=${body.status}`;
+    parts.push(`targetStatus=${body.status}`);
   }
 
   if (Array.isArray(body.meta_data)) {
-    return ` metaKeys=${body.meta_data.map((item) => item.key).filter(Boolean).join(',')}`;
+    parts.push(`metaKeys=${body.meta_data.map((item) => item.key).filter(Boolean).join(',')}`);
   }
 
   if (body.note) {
-    return ' note=true';
+    parts.push('note=true');
   }
 
-  return '';
+  return parts.length ? ` ${parts.join(' ')}` : '';
 }
 
 function safeJson(value) {
