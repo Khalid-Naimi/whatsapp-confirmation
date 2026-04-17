@@ -131,7 +131,8 @@ export class WooCommerceClient {
 
         const data = await parseJsonSafe(response);
         if (response.ok) {
-          this.logger.log(`[woo] success method=${method} path=${path} status=${response.status}`);
+          const orderStatus = data?.status ? ` orderStatus=${data.status}` : '';
+          this.logger.log(`[woo] success method=${method} path=${path} status=${response.status}${orderStatus}`);
           return data;
         }
 
