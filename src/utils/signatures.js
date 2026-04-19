@@ -20,7 +20,6 @@ export function verifyWooSignature(rawBody, signatureHeader, secret) {
 }
 
 export function verifyGenericHmacSignature(rawBody, providedSignature, secret) {
-  void rawBody;
   if (!secret) {
     return true;
   }
@@ -28,5 +27,9 @@ export function verifyGenericHmacSignature(rawBody, providedSignature, secret) {
     return false;
   }
 
-  return providedSignature.trim() === secret;
+  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
+  if (expected.length !== providedSignature.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(providedSignature));
 }

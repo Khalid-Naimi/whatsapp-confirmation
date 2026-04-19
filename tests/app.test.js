@@ -245,7 +245,11 @@ function createMockRes() {
 
 async function dispatch(app, { method, url, headers = {}, payload = {} }) {
   const body = JSON.stringify(payload);
-  const req = createMockReq({ method, url, headers, body });
+  const effectiveHeaders = { ...headers };
+  if (url === '/webhooks/wasender' && effectiveHeaders['x-wasender-signature'] === 'wasender-secret') {
+    effectiveHeaders['x-wasender-signature'] = createHmac('sha256', 'wasender-secret').update(body).digest('base64');
+  }
+  const req = createMockReq({ method, url, headers: effectiveHeaders, body });
   const res = createMockRes();
   await app(req, res);
   return {

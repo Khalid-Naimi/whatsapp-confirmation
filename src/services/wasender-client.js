@@ -30,7 +30,7 @@ export class WasenderClient {
   async sendMessageWithRetries({ to, message }) {
     let attempt = 0;
 
-    while (attempt <= this.maxRetries) {
+    while (attempt < this.maxRetries) {
       await this.waitForAvailability();
       this.logger.log(`[wasender] send attempt=${attempt + 1} to=${maskPhone(to)}`);
 
@@ -69,8 +69,6 @@ export class WasenderClient {
         message: `Wasender send-message failed with ${response.status}: ${JSON.stringify(data)}`
       });
     }
-
-    throw new Error('Wasender send-message failed: retry limit reached');
   }
 
   async waitForAvailability() {
