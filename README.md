@@ -4,7 +4,7 @@ Backend-only Node.js service that:
 
 - receives WooCommerce order webhooks
 - sends order confirmation messages through Wasender
-- receives WhatsApp replies through Wasender webhooks
+- receives both confirmation replies and feedback replies through the same Wasender webhook
 - updates WooCommerce order status to `on-hold` or `cancelled`
 
 ## Endpoints
@@ -60,5 +60,24 @@ Backend-only Node.js service that:
 - Persistence is file-backed JSON for easy local setup.
 - In production, consider replacing `JsonStore` with a real database.
 - Confirmation/reminder state is stored on WooCommerce orders using `rhymat_whatsapp_*` meta keys.
+- Feedback replies are stored on WooCommerce orders using `rhymat_feedback_*` meta keys:
+  - `rhymat_feedback_state`
+  - `rhymat_feedback_reply_at`
+  - `rhymat_feedback_reply_last_message_id`
+  - `rhymat_feedback_reply_count`
+  - `rhymat_feedback_sender_phone`
+  - `rhymat_feedback_last_kind`
+  - `rhymat_feedback_last_text`
+  - `rhymat_feedback_last_caption`
+  - `rhymat_feedback_last_media_url`
+  - `rhymat_feedback_last_mime_type`
+  - `rhymat_feedback_payload_json`
+- `POST /webhooks/wasender` now supports batch inbound payloads and routes each inbound message independently:
+  - explicit `FDBK-{orderId}` token -> feedback
+  - unique `waiting_for_feedback` phone match -> feedback
+  - active pending confirmation candidate -> confirmation
+  - everything else is logged/skipped as unmatched inbound
+- Verified Wasender webhook requests return `200 OK` even if some inbound messages are skipped or feedback persistence fails.
+- Wasender payload parsing is defensive. The receiver accepts `data.messages` as an object or array and logs reduced key summaries for unknown inbound payload shapes instead of failing the whole request.
 - Contactability failures from Wasender that indicate an invalid or non-WhatsApp number now auto-cancel the order and attempt a customer email using the WooCommerce billing email.
 - Use a Render Cron Job to call `POST /tasks/order-followups` every hour with header `x-task-secret: <TASK_SECRET>`.

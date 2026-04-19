@@ -108,7 +108,7 @@ export function createApp({ config, confirmationService, store, logger = console
         logger.log(
           `[webhook][wasender] completed eventId=${String(eventId)} status=${result.status} ok=${String(result.body?.ok)} reason=${String(result.body?.reason || '')}`
         );
-        return sendJson(res, result.status, result.body);
+        return sendJson(res, 200, result.body);
       }
 
       if (pathname === '/tasks/order-followups') {

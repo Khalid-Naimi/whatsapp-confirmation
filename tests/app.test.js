@@ -80,6 +80,13 @@ function createTestContext() {
       const start = (page - 1) * perPage;
       return filtered.slice(start, start + perPage);
     },
+    async getOrder(orderId) {
+      const order = listedOrders.find((item) => String(item.id) === String(orderId));
+      if (!order) {
+        throw new Error(`Order ${orderId} not found`);
+      }
+      return order;
+    },
     async updateOrder(orderId, fields) {
       wooOrderUpdates.push({ orderId, fields });
       const index = listedOrders.findIndex((order) => String(order.id) === String(orderId));
@@ -292,6 +299,34 @@ function buildDecisionMeta({
     { key: 'rhymat_whatsapp_manual_override', value: manualOverride },
     { key: 'rhymat_whatsapp_manual_override_at', value: manualOverrideAt },
     { key: 'rhymat_whatsapp_manual_override_status', value: manualOverrideStatus }
+  ].filter((item) => item.value !== '');
+}
+
+function buildFeedbackMeta({
+  state = '',
+  replyAt = '',
+  replyLastMessageId = '',
+  replyCount,
+  senderPhone = '',
+  lastKind = '',
+  lastText = '',
+  lastCaption = '',
+  lastMediaUrl = '',
+  lastMimeType = '',
+  payloadJson = ''
+} = {}) {
+  return [
+    { key: 'rhymat_feedback_state', value: state },
+    { key: 'rhymat_feedback_reply_at', value: replyAt },
+    { key: 'rhymat_feedback_reply_last_message_id', value: replyLastMessageId },
+    ...(replyCount === undefined ? [] : [{ key: 'rhymat_feedback_reply_count', value: replyCount }]),
+    { key: 'rhymat_feedback_sender_phone', value: senderPhone },
+    { key: 'rhymat_feedback_last_kind', value: lastKind },
+    { key: 'rhymat_feedback_last_text', value: lastText },
+    { key: 'rhymat_feedback_last_caption', value: lastCaption },
+    { key: 'rhymat_feedback_last_media_url', value: lastMediaUrl },
+    { key: 'rhymat_feedback_last_mime_type', value: lastMimeType },
+    { key: 'rhymat_feedback_payload_json', value: payloadJson }
   ].filter((item) => item.value !== '');
 }
 
@@ -630,7 +665,7 @@ test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
     payload: replyPayload
   });
 
-  assert.equal(result.statusCode, 202);
+  assert.equal(result.statusCode, 200);
   const confirmStatusUpdate = wooOrderUpdates.find((u) => u.fields.status);
   assert.equal(confirmStatusUpdate?.orderId, '103');
   assert.equal(confirmStatusUpdate?.fields.status, 'on-hold');
@@ -771,7 +806,7 @@ test('replayed final reply does not send duplicate customer follow-up', async ()
 
   assert.equal(replayResult.statusCode, 200);
   assert.equal(wasenderCalls.length, 4);
-  assert.equal(replayResult.body.duplicate, true);
+  assert.equal(replayResult.body.duplicates, 1);
 });
 
 test('invalid reply sends clarification twice then goes manual', async () => {
@@ -864,7 +899,7 @@ test('invalid reply sends clarification twice then goes manual', async () => {
   assert.equal(store.getOrder('105').confirmationState, 'pending_confirmation');
   assert.equal(store.getOrder('105').invalidReplyCount, 2);
   assert.equal(store.getOrder('105').manualFollowupRequired, true);
-  assert.equal(thirdResult.body.reason, 'manual_followup_required');
+  assert.equal(thirdResult.body.ignored, 1);
   assert.equal(
     wasenderCalls[1].message,
     '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533'
@@ -986,7 +1021,7 @@ test('missing city uses fallback label and non-Casablanca eta', async () => {
   assert.match(wasenderCalls[0].message, /Tawsil: 2 a 3 jours ouvrables/);
 });
 
-test('message without pending order is flagged as manual and gets no reply', async () => {
+test('message without pending order is ignored as unmatched and gets no reply', async () => {
   const { app, store, wasenderCalls } = createTestContext();
   const replyPayload = {
     data: {
@@ -1009,10 +1044,10 @@ test('message without pending order is flagged as manual and gets no reply', asy
     payload: replyPayload
   });
 
-  assert.equal(result.statusCode, 202);
+  assert.equal(result.statusCode, 200);
   assert.equal(wasenderCalls.length, 0);
   const db = store.read();
-  assert.equal(db.events.at(-1).status, 'manual_followup_required');
+  assert.equal(db.events.at(-1).status, 'unmatched_inbound');
 });
 
 test('reply recovers pending order from Woo after local cache loss and blocks follow-up reminders', async () => {
@@ -1067,7 +1102,7 @@ test('reply recovers pending order from Woo after local cache loss and blocks fo
     }
   });
 
-  assert.equal(replyResult.statusCode, 202);
+  assert.equal(replyResult.statusCode, 200);
   assert.equal(restartedContext.store.getOrder('112').confirmationState, 'confirmed');
   assert.equal(restartedContext.store.read().events.at(-1).status, 'matched_via_woo_fallback');
   const recoverStatusUpdate = restartedContext.wooOrderUpdates.find((u) => u.fields.status);
@@ -1146,7 +1181,7 @@ test('Woo fallback picks the newest pending order for the same phone', async () 
     }
   });
 
-  assert.equal(replyResult.statusCode, 202);
+  assert.equal(replyResult.statusCode, 200);
   const fallbackStatusUpdate = wooOrderUpdates.find((u) => u.fields.status);
   assert.equal(fallbackStatusUpdate?.orderId, '502');
   assert.equal(fallbackStatusUpdate?.fields.status, 'cancelled');
@@ -1206,8 +1241,7 @@ test('audio reply with pending order is treated like invalid input', async () =>
     payload: audioPayload
   });
 
-  assert.equal(result.statusCode, 202);
-  assert.equal(result.body.reason, 'invalid_reply');
+  assert.equal(result.statusCode, 200);
   assert.equal(wasenderCalls.length, 2);
   assert.equal(
     wasenderCalls[1].message,
@@ -1216,7 +1250,7 @@ test('audio reply with pending order is treated like invalid input', async () =>
   assert.equal(store.getOrder('110').invalidReplyCount, 1);
 });
 
-test('audio reply without pending order is manual and gets no reply', async () => {
+test('audio reply without pending order is ignored and gets no reply', async () => {
   const { app, store, wasenderCalls } = createTestContext();
   const audioPayload = {
     data: {
@@ -1243,10 +1277,10 @@ test('audio reply without pending order is manual and gets no reply', async () =
     payload: audioPayload
   });
 
-  assert.equal(result.statusCode, 202);
+  assert.equal(result.statusCode, 200);
   assert.equal(wasenderCalls.length, 0);
   const db = store.read();
-  assert.equal(db.events.at(-1).status, 'manual_followup_required');
+  assert.equal(db.events.at(-1).status, 'unmatched_inbound');
 });
 
 test('bot-originated Wasender events are ignored', async () => {
@@ -1272,9 +1306,629 @@ test('bot-originated Wasender events are ignored', async () => {
     payload: replyPayload
   });
 
-  assert.equal(result.statusCode, 202);
+  assert.equal(result.statusCode, 200);
   assert.equal(wasenderCalls.length, 0);
-  assert.equal(result.body.ignored, true);
+  assert.equal(result.body.ignored, 1);
+});
+
+test('batch payload processes confirmation and feedback independently', async () => {
+  const { app, store, listedOrders, wooOrderUpdates, wooNoteCalls } = createTestContext();
+
+  const confirmationOrder = {
+    id: 701,
+    status: 'pending',
+    total: '90.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Batch',
+      last_name: 'Confirm',
+      phone: '0611111701',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Confirm', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(confirmationOrder),
+      'x-wc-webhook-delivery-id': 'delivery-batch-confirm-701'
+    },
+    payload: confirmationOrder
+  });
+
+  listedOrders.push({
+    id: 801,
+    status: 'completed',
+    total: '120.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Batch',
+      last_name: 'Feedback',
+      phone: '0611111801',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Feedback', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      replyCount: 0
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'wasender-batch-1'
+    },
+    payload: {
+      data: {
+        messages: [
+          {
+            key: {
+              cleanedSenderPn: '212611111701',
+              fromMe: false
+            },
+            messageBody: '1'
+          },
+          {
+            key: {
+              cleanedSenderPn: '212611111801',
+              fromMe: false,
+              id: 'feedback-batch-801'
+            },
+            message: {
+              imageMessage: {
+                caption: 'FDBK-801 very good',
+                mimetype: 'image/jpeg',
+                url: 'https://cdn.example.com/801.jpg'
+              }
+            }
+          }
+        ]
+      }
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.processed, 2);
+  assert.equal(result.body.confirmation, 1);
+  assert.equal(result.body.feedback, 1);
+  assert.equal(store.getOrder('701').confirmationState, 'confirmed');
+  const feedbackMeta = workflowMetaValue(
+    listedOrders.find((order) => String(order.id) === '801').meta_data,
+    'rhymat_feedback_state'
+  );
+  assert.equal(feedbackMeta, 'reply_received');
+  assert.ok(wooOrderUpdates.some((update) => update.orderId === '701' && update.fields.status === 'on-hold'));
+  assert.ok(wooNoteCalls.some((note) => note.orderId === '801' && /\[image\]/.test(note.note)));
+});
+
+test('mixed batch with one unusable message still processes the usable message', async () => {
+  const { app, listedOrders, wooNoteCalls } = createTestContext();
+  listedOrders.push({
+    id: 802,
+    status: 'completed',
+    total: '88.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Mixed',
+      last_name: 'Batch',
+      phone: '0611111802',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Mixed', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'wasender-batch-2'
+    },
+    payload: {
+      data: {
+        messages: [
+          {},
+          {
+            key: {
+              cleanedSenderPn: '212611111802',
+              fromMe: false,
+              id: 'feedback-batch-802'
+            },
+            messageBody: 'FDBK-802 smooth delivery'
+          }
+        ]
+      }
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.processed, 1);
+  assert.equal(result.body.ignored, 1);
+  assert.ok(wooNoteCalls.some((note) => note.orderId === '802' && /\[text\]/.test(note.note)));
+});
+
+test('text feedback token updates only feedback meta', async () => {
+  const { app, listedOrders, wooOrderUpdates } = createTestContext();
+  listedOrders.push({
+    id: 901,
+    status: 'completed',
+    total: '99.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Text',
+      last_name: 'Feedback',
+      phone: '0611111901',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Text', quantity: 1 }],
+    meta_data: [
+      ...buildWorkflowMeta({
+        state: 'confirmed',
+        confirmationSentAt: '2026-03-18T08:00:00.000Z'
+      }),
+      ...buildDecisionMeta({
+        decision: 'confirmed',
+        decisionAt: '2026-03-18T09:00:00.000Z'
+      }),
+      ...buildFeedbackMeta({
+        state: 'waiting_for_feedback'
+      })
+    ]
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'feedback-text-901'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '212611111901',
+        fromMe: false,
+        id: 'feedback-text-901-message'
+      },
+      messageBody: 'FDBK-901 great service'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  const order = listedOrders.find((item) => String(item.id) === '901');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_text'), 'FDBK-901 great service');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_reply_count'), 1);
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_whatsapp_state'), 'confirmed');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_whatsapp_decision'), 'confirmed');
+  assert.ok(wooOrderUpdates.some((update) => update.orderId === '901' && !update.fields.status));
+});
+
+test('image feedback with caption stores caption media url and mime type', async () => {
+  const { app, listedOrders, wooNoteCalls } = createTestContext();
+  listedOrders.push({
+    id: 902,
+    status: 'completed',
+    total: '99.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Image',
+      last_name: 'Caption',
+      phone: '0611111902',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Image', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'feedback-image-902'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '212611111902',
+            fromMe: false,
+            id: 'feedback-image-902-message'
+          },
+          message: {
+            imageMessage: {
+              caption: 'FDBK-902 packed well',
+              mimetype: 'image/png',
+              url: 'https://cdn.example.com/902.png'
+            }
+          }
+        }
+      }
+    }
+  });
+
+  const order = listedOrders.find((item) => String(item.id) === '902');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_caption'), 'FDBK-902 packed well');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_media_url'), 'https://cdn.example.com/902.png');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_mime_type'), 'image/png');
+  assert.ok(wooNoteCalls.some((note) => note.orderId === '902' && /\[image\]/.test(note.note)));
+});
+
+test('image feedback without caption falls back by unique waiting-feedback phone', async () => {
+  const { app, listedOrders } = createTestContext();
+  listedOrders.push({
+    id: 903,
+    status: 'completed',
+    total: '99.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Image',
+      last_name: 'Fallback',
+      phone: '0611111903',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Image Fallback', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'feedback-image-903'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '212611111903',
+            fromMe: false,
+            id: 'feedback-image-903-message'
+          },
+          message: {
+            imageMessage: {
+              mimetype: 'image/jpeg',
+              url: 'https://cdn.example.com/903.jpg'
+            }
+          }
+        }
+      }
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  const order = listedOrders.find((item) => String(item.id) === '903');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_caption'), '');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_media_url'), 'https://cdn.example.com/903.jpg');
+});
+
+for (const scenario of [
+  {
+    name: 'audio',
+    orderId: 904,
+    phone: '0611111904',
+    message: {
+      audioMessage: {
+        mimetype: 'audio/ogg',
+        url: 'https://cdn.example.com/904.ogg'
+      }
+    }
+  },
+  {
+    name: 'video',
+    orderId: 905,
+    phone: '0611111905',
+    message: {
+      videoMessage: {
+        caption: 'FDBK-905 video proof',
+        mimetype: 'video/mp4',
+        url: 'https://cdn.example.com/905.mp4'
+      }
+    }
+  },
+  {
+    name: 'document',
+    orderId: 906,
+    phone: '0611111906',
+    message: {
+      documentMessage: {
+        caption: 'FDBK-906 invoice attached',
+        mimetype: 'application/pdf',
+        fileName: 'feedback-906.pdf'
+      }
+    }
+  },
+  {
+    name: 'sticker',
+    orderId: 907,
+    phone: '0611111907',
+    message: {
+      stickerMessage: {
+        mimetype: 'image/webp',
+        url: 'https://cdn.example.com/907.webp'
+      }
+    }
+  }
+]) {
+  test(`${scenario.name} feedback with explicit token updates feedback meta`, async () => {
+    const { app, listedOrders } = createTestContext();
+    listedOrders.push({
+      id: scenario.orderId,
+      status: 'completed',
+      total: '77.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Media',
+        last_name: scenario.name,
+        phone: scenario.phone,
+        state: 'Casablanca'
+      },
+      line_items: [{ name: `Produit ${scenario.name}`, quantity: 1 }],
+      meta_data: buildFeedbackMeta({
+        state: 'waiting_for_feedback'
+      })
+    });
+
+    const message =
+      {
+        key: {
+          cleanedSenderPn: `212${scenario.phone.slice(1)}`,
+          fromMe: false,
+          id: `feedback-${scenario.name}-${scenario.orderId}`
+        },
+        messageBody: `FDBK-${scenario.orderId}`,
+        message: scenario.message
+      };
+
+    await dispatch(app, {
+      method: 'POST',
+      url: '/webhooks/wasender',
+      headers: {
+        'x-wasender-signature': 'wasender-secret',
+        'x-event-id': `feedback-${scenario.name}-${scenario.orderId}`
+      },
+      payload: {
+        data: {
+          messages: message
+        }
+      }
+    });
+
+    const order = listedOrders.find((item) => String(item.id) === String(scenario.orderId));
+    assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+    assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_kind'), scenario.name);
+  });
+}
+
+test('random inbound image without feedback match is ignored and not routed to confirmation', async () => {
+  const { app, store, wasenderCalls } = createTestContext();
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'random-image-unmatched'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '212611111999',
+            fromMe: false
+          },
+          message: {
+            imageMessage: {
+              mimetype: 'image/jpeg',
+              url: 'https://cdn.example.com/random.jpg'
+            }
+          }
+        }
+      }
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ignored, 1);
+  assert.equal(wasenderCalls.length, 0);
+  assert.equal(store.read().events.at(-1).status, 'unmatched_inbound');
+});
+
+for (const scenario of [
+  {
+    name: 'video',
+    message: {
+      videoMessage: {
+        mimetype: 'video/mp4',
+        url: 'https://cdn.example.com/unmatched.mp4'
+      }
+    }
+  },
+  {
+    name: 'document',
+    message: {
+      documentMessage: {
+        mimetype: 'application/pdf',
+        fileName: 'unmatched.pdf'
+      }
+    }
+  },
+  {
+    name: 'sticker',
+    message: {
+      stickerMessage: {
+        mimetype: 'image/webp',
+        url: 'https://cdn.example.com/unmatched.webp'
+      }
+    }
+  }
+]) {
+  test(`random inbound ${scenario.name} without confirmation candidate is ignored`, async () => {
+    const { app, store } = createTestContext();
+    const result = await dispatch(app, {
+      method: 'POST',
+      url: '/webhooks/wasender',
+      headers: {
+        'x-wasender-signature': 'wasender-secret',
+        'x-event-id': `unmatched-${scenario.name}`
+      },
+      payload: {
+        data: {
+          messages: {
+            key: {
+              cleanedSenderPn: '212611112000',
+              fromMe: false
+            },
+            message: scenario.message
+          }
+        }
+      }
+    });
+
+    assert.equal(result.statusCode, 200);
+    assert.equal(result.body.ignored, 1);
+    assert.equal(store.read().events.at(-1).status, 'unmatched_inbound');
+  });
+}
+
+test('repeated provider message id does not increment feedback reply count twice', async () => {
+  const { app, listedOrders, wooNoteCalls } = createTestContext();
+  listedOrders.push({
+    id: 908,
+    status: 'completed',
+    total: '66.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Repeat',
+      last_name: 'Feedback',
+      phone: '0611111908',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Repeat', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+
+  const payload = {
+    data: {
+      messages: {
+        key: {
+          cleanedSenderPn: '212611111908',
+          fromMe: false,
+          id: 'feedback-repeat-908'
+        },
+        messageBody: 'FDBK-908 all good'
+      }
+    }
+  };
+
+  const firstResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'feedback-repeat-908-a'
+    },
+    payload
+  });
+  const secondResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'feedback-repeat-908-b'
+    },
+    payload
+  });
+
+  const order = listedOrders.find((item) => String(item.id) === '908');
+  assert.equal(firstResult.statusCode, 200);
+  assert.equal(secondResult.statusCode, 200);
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_reply_count'), 1);
+  assert.equal(secondResult.body.duplicates, 1);
+  assert.equal(wooNoteCalls.filter((note) => note.orderId === '908').length, 1);
+});
+
+test('ambiguous waiting-feedback phone match is skipped safely', async () => {
+  const { app, store, listedOrders, wooNoteCalls } = createTestContext();
+  listedOrders.push(
+    {
+      id: 909,
+      status: 'completed',
+      total: '66.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Ambiguous',
+        last_name: 'One',
+        phone: '0611111909',
+        state: 'Casablanca'
+      },
+      line_items: [{ name: 'Produit Ambiguous 1', quantity: 1 }],
+      meta_data: buildFeedbackMeta({
+        state: 'waiting_for_feedback'
+      })
+    },
+    {
+      id: 910,
+      status: 'completed',
+      total: '67.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Ambiguous',
+        last_name: 'Two',
+        phone: '0611111909',
+        state: 'Casablanca'
+      },
+      line_items: [{ name: 'Produit Ambiguous 2', quantity: 1 }],
+      meta_data: buildFeedbackMeta({
+        state: 'waiting_for_feedback'
+      })
+    }
+  );
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': 'wasender-secret',
+      'x-event-id': 'feedback-ambiguous-909'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '212611111909',
+            fromMe: false
+          },
+          message: {
+            imageMessage: {
+              mimetype: 'image/jpeg',
+              url: 'https://cdn.example.com/ambiguous.jpg'
+            }
+          }
+        }
+      }
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ignored, 1);
+  assert.equal(store.read().events.at(-1).status, 'feedback_match_ambiguous');
+  assert.equal(wooNoteCalls.length, 0);
 });
 
 test('task endpoint rejects invalid task secret', async () => {
@@ -1502,7 +2156,7 @@ test('valid reply keeps decision final and retries Woo sync silently after failu
     payload: replyPayload
   });
 
-  assert.equal(replyResult.statusCode, 202);
+  assert.equal(replyResult.statusCode, 200);
   assert.equal(store.getOrder('402').confirmationState, 'confirmed');
   assert.equal(store.getOrder('402').wooSyncStatus, 'pending_retry');
   assert.equal(store.getOrder('402').customerReplySent, 'yes');
@@ -1583,7 +2237,7 @@ test('internal notification failure does not block final customer flow', async (
     payload: replyPayload
   });
 
-  assert.equal(result.statusCode, 202);
+  assert.equal(result.statusCode, 200);
   assert.equal(store.getOrder('601').confirmationState, 'confirmed');
   assert.equal(store.getOrder('601').customerReplySent, 'yes');
   assert.equal(store.getOrder('601').internalNotifiedConfirmed, 'yes');

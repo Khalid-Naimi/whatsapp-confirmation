@@ -63,6 +63,12 @@ export class WooCommerceClient {
     });
   }
 
+  async getOrder(orderId) {
+    return this.request(`/wp-json/wc/v3/orders/${orderId}`, {
+      method: 'GET'
+    });
+  }
+
   async updateOrder(orderId, fields) {
     return this.request(`/wp-json/wc/v3/orders/${orderId}`, {
       method: 'PUT',

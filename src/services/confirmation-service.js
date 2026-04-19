@@ -22,14 +22,29 @@ const DECISION_META_KEYS = {
   manualOverrideAt: 'rhymat_whatsapp_manual_override_at',
   manualOverrideStatus: 'rhymat_whatsapp_manual_override_status'
 };
+const FEEDBACK_META_KEYS = {
+  state: 'rhymat_feedback_state',
+  replyAt: 'rhymat_feedback_reply_at',
+  replyLastMessageId: 'rhymat_feedback_reply_last_message_id',
+  replyCount: 'rhymat_feedback_reply_count',
+  senderPhone: 'rhymat_feedback_sender_phone',
+  lastKind: 'rhymat_feedback_last_kind',
+  lastText: 'rhymat_feedback_last_text',
+  lastCaption: 'rhymat_feedback_last_caption',
+  lastMediaUrl: 'rhymat_feedback_last_media_url',
+  lastMimeType: 'rhymat_feedback_last_mime_type',
+  payloadJson: 'rhymat_feedback_payload_json'
+};
 
 const PROCESSING_STATUS = 'processing';
 const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled', 'completed', 'failed', 'refunded'];
 const REPLY_RECOVERY_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled'];
+const FEEDBACK_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed'];
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
 const AUTO_CANCEL_MS = 72 * 60 * 60 * 1000;
 const MAX_WOO_SYNC_ATTEMPTS = 6;
+const MAX_FEEDBACK_PAYLOAD_JSON_LENGTH = 4000;
 
 export class ConfirmationService {
   constructor({ store, wasenderClient, wooClient, mailService = null, messages, logger = console }) {
@@ -77,39 +92,218 @@ export class ConfirmationService {
       return { status: 200, body: { ok: true, duplicate: true } };
     }
 
-    const inbound = normalizeWasenderInbound(payload);
-    if (!inbound.phone || (!inbound.text && inbound.type !== 'audio')) {
+    const inboundMessages = extractWasenderInboundMessages(payload, eventKey, this.logger);
+    if (!inboundMessages.length) {
       this.store.recordEvent('wasender', eventKey, payload, 'ignored_non_message');
-      return { status: 202, body: { ok: true, ignored: true } };
+      return { status: 200, body: { ok: true, ignored: true, messageCount: 0 } };
     }
 
-    const replyContext = await this.resolveReplyContext(inbound.phone);
-    const pendingOrder = replyContext.pendingOrder;
-    const latestOrder = replyContext.latestOrder;
-    this.store.appendMessage({
-      source: 'inbound',
-      orderId: latestOrder?.orderId || null,
-      phone: inbound.phone,
-      kind: inbound.type === 'audio' ? 'customer_audio_reply' : 'customer_reply',
-      payload,
-      text: inbound.text
+    const summary = {
+      messageCount: inboundMessages.length,
+      processed: 0,
+      ignored: 0,
+      duplicates: 0,
+      failed: 0,
+      feedback: 0,
+      confirmation: 0
+    };
+    const messageStatuses = [];
+
+    for (const message of inboundMessages) {
+      if (this.store.hasProcessedEvent('wasender_message', message.messageKey)) {
+        summary.duplicates += 1;
+        messageStatuses.push('duplicate_message');
+        continue;
+      }
+
+      let result;
+      try {
+        result = await this.routeInboundMessage(message);
+      } catch (error) {
+        this.logger.error(error);
+        result = {
+          ok: false,
+          failed: true,
+          ignored: false,
+          duplicate: false,
+          route: 'unknown',
+          eventStatus: 'processing_failed',
+          reason: error.message
+        };
+      }
+
+      const eventStatus = result.eventStatus || 'processed';
+      this.store.recordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, eventStatus);
+      messageStatuses.push(eventStatus);
+
+      if (result.duplicate) {
+        summary.duplicates += 1;
+        continue;
+      }
+
+      if (result.failed) {
+        summary.failed += 1;
+        continue;
+      }
+
+      if (result.ignored) {
+        summary.ignored += 1;
+        continue;
+      }
+
+      summary.processed += 1;
+      if (result.route === 'feedback') {
+        summary.feedback += 1;
+      }
+      if (result.route === 'confirmation') {
+        summary.confirmation += 1;
+      }
+    }
+
+    const requestStatus = summarizeWasenderRequestStatus(messageStatuses);
+    this.store.recordEvent('wasender', eventKey, payload, requestStatus);
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        ...summary
+      }
+    };
+  }
+
+  async routeInboundMessage(message) {
+    if (message.fromMe) {
+      return {
+        ok: true,
+        ignored: true,
+        duplicate: false,
+        failed: false,
+        route: 'ignored',
+        eventStatus: 'ignored_non_message'
+      };
+    }
+
+    const feedbackToken = extractFeedbackToken(message.textBody, message.captionText);
+    if (feedbackToken) {
+      const feedbackMatch = await this.matchFeedbackOrder(message, { orderId: feedbackToken, explicitToken: true });
+      return this.processFeedbackMatchResult(message, feedbackMatch);
+    }
+
+    const feedbackFallbackMatch = await this.matchFeedbackOrder(message, { explicitToken: false });
+    if (feedbackFallbackMatch.kind === 'matched') {
+      return this.processFeedbackInboundMessage(message, feedbackFallbackMatch);
+    }
+    if (feedbackFallbackMatch.kind === 'ambiguous') {
+      this.appendInboundMessage({
+        message,
+        orderId: null,
+        storedKind: `feedback_${message.kind || 'unknown'}`
+      });
+      return {
+        ok: true,
+        ignored: true,
+        duplicate: false,
+        failed: false,
+        route: 'feedback',
+        eventStatus: 'feedback_match_ambiguous'
+      };
+    }
+
+    return this.routeConfirmationInboundMessage(message);
+  }
+
+  async processFeedbackMatchResult(message, feedbackMatch) {
+    if (feedbackMatch.kind === 'matched') {
+      return this.processFeedbackInboundMessage(message, feedbackMatch);
+    }
+
+    this.appendInboundMessage({
+      message,
+      orderId: null,
+      storedKind: `feedback_${message.kind || 'unknown'}`
     });
 
-    if (!pendingOrder) {
-      if (latestOrder && isSameFinalDecision(latestOrder, inbound)) {
-        this.store.recordEvent('wasender', eventKey, payload, 'duplicate_final_reply');
-        return { status: 200, body: { ok: true, duplicate: true } };
+    return {
+      ok: true,
+      ignored: true,
+      duplicate: false,
+      failed: false,
+      route: 'feedback',
+      eventStatus: feedbackMatch.kind === 'ambiguous'
+        ? 'feedback_match_ambiguous'
+        : 'feedback_unmatched'
+    };
+  }
+
+  async routeConfirmationInboundMessage(message) {
+    if (!message.senderPhone || !isConfirmationMessageKind(message.kind)) {
+      this.appendInboundMessage({
+        message,
+        orderId: null,
+        storedKind: `unmatched_${message.kind || 'unknown'}`
+      });
+      return {
+        ok: true,
+        ignored: true,
+        duplicate: false,
+        failed: false,
+        route: 'ignored',
+        eventStatus: 'unmatched_inbound'
+      };
+    }
+
+    const replyContext = await this.resolveReplyContext(message.senderPhone);
+    if (!replyContext.pendingOrder) {
+      const inbound = {
+        type: message.kind,
+        text: message.textBody
+      };
+      this.appendInboundMessage({
+        message,
+        orderId: replyContext.latestOrder?.orderId || null,
+        storedKind: message.kind === 'audio' ? 'customer_audio_reply' : 'customer_reply'
+      });
+
+      if (replyContext.latestOrder && isSameFinalDecision(replyContext.latestOrder, inbound)) {
+        return {
+          ok: true,
+          ignored: false,
+          duplicate: true,
+          failed: false,
+          route: 'confirmation',
+          eventStatus: 'duplicate_final_reply'
+        };
       }
-      this.store.recordEvent('wasender', eventKey, payload, 'manual_followup_required');
-      return { status: 202, body: { ok: false, reason: 'unmatched_reply' } };
+
+      return {
+        ok: true,
+        ignored: true,
+        duplicate: false,
+        failed: false,
+        route: 'ignored',
+        eventStatus: 'unmatched_inbound'
+      };
     }
 
-    const pendingCount = this.store.listPendingOrdersByPhone(inbound.phone).length;
+    return this.processConfirmationInboundMessage(message, replyContext);
+  }
+
+  async processConfirmationInboundMessage(message, replyContext) {
+    const pendingOrder = replyContext.pendingOrder;
+    const latestOrder = replyContext.latestOrder;
+
+    this.appendInboundMessage({
+      message,
+      orderId: latestOrder?.orderId || null,
+      storedKind: message.kind === 'audio' ? 'customer_audio_reply' : 'customer_reply'
+    });
+
+    const pendingCount = this.store.listPendingOrdersByPhone(message.senderPhone).length;
     if (pendingCount > 1) {
-      this.logger.warn(`Multiple pending orders found for ${inbound.phone}; using latest order ${pendingOrder.orderId}.`);
+      this.logger.warn(`Multiple pending orders found for ${message.senderPhone}; using latest order ${pendingOrder.orderId}.`);
     }
 
-    const reply = inbound.type === 'audio' ? '' : inbound.text.trim();
+    const reply = message.kind === 'audio' ? '' : String(message.textBody || '').trim();
     if (reply !== '1' && reply !== '2') {
       const invalidReplyCount = Number(pendingOrder.invalidReplyCount || 0);
       if (invalidReplyCount < 2) {
@@ -146,12 +340,26 @@ export class ConfirmationService {
           manualFollowupRequired: true,
           confirmationState: 'pending_confirmation'
         });
-        this.store.recordEvent('wasender', eventKey, payload, 'manual_followup_required');
-        return { status: 202, body: { ok: false, reason: 'manual_followup_required' } };
+        return {
+          ok: false,
+          ignored: true,
+          duplicate: false,
+          failed: false,
+          route: 'confirmation',
+          eventStatus: 'manual_followup_required',
+          reason: 'manual_followup_required'
+        };
       }
 
-      this.store.recordEvent('wasender', eventKey, payload, 'invalid_reply');
-      return { status: 202, body: { ok: false, reason: 'invalid_reply' } };
+      return {
+        ok: false,
+        ignored: true,
+        duplicate: false,
+        failed: false,
+        route: 'confirmation',
+        eventStatus: 'invalid_reply',
+        reason: 'invalid_reply'
+      };
     }
 
     const nextState = reply === '1' ? 'confirmed' : 'cancelled';
@@ -163,7 +371,6 @@ export class ConfirmationService {
       ? this.messages.confirmedReply
       : this.messages.cancelledReply;
     const nowIso = new Date().toISOString();
-    const workflow = getWorkflowMeta(pendingOrder.rawOrder || {});
     const decisionMeta = getDecisionMeta(pendingOrder.rawOrder || {});
     const existingDecision = pendingOrder.decision || decisionMeta.decision;
     const customerReplySent = pendingOrder.customerReplySent || decisionMeta.customerReplySent;
@@ -181,8 +388,14 @@ export class ConfirmationService {
         note,
         nowIso
       });
-      this.store.recordEvent('wasender', eventKey, payload, reconciliation.success ? 'duplicate_final_reply' : reconciliation.syncStatus);
-      return { status: 200, body: { ok: true, duplicate: true } };
+      return {
+        ok: true,
+        ignored: false,
+        duplicate: true,
+        failed: false,
+        route: 'confirmation',
+        eventStatus: reconciliation.success ? 'duplicate_final_reply' : reconciliation.syncStatus
+      };
     }
 
     let nextOrderState = this.store.upsertOrder({
@@ -263,21 +476,168 @@ export class ConfirmationService {
       note,
       nowIso
     });
-    const eventStatus = replyContext.matchedViaWooFallback
-      ? 'matched_via_woo_fallback'
-      : reconciliation.success
-        ? nextState
-        : reconciliation.syncStatus;
-    this.store.recordEvent('wasender', eventKey, payload, eventStatus);
+    return {
+      ok: true,
+      ignored: false,
+      duplicate: false,
+      failed: false,
+      route: 'confirmation',
+      eventStatus: replyContext.matchedViaWooFallback
+        ? 'matched_via_woo_fallback'
+        : reconciliation.success
+          ? nextState
+          : reconciliation.syncStatus
+    };
+  }
+
+  appendInboundMessage({ message, orderId, storedKind }) {
+    this.store.appendMessage({
+      source: 'inbound',
+      orderId: orderId || null,
+      phone: message.senderPhone || message.senderRaw || '',
+      kind: storedKind,
+      payload: message.rawEnvelopeSnapshot,
+      text: message.textBody || '',
+      caption: message.captionText || '',
+      mimeType: message.mimeType || '',
+      mediaUrl: message.mediaRef || '',
+      providerMessageId: message.providerMessageId || '',
+      timestamp: message.timestamp || '',
+      messageType: message.kind || 'unknown'
+    });
+  }
+
+  async matchFeedbackOrder(message, { orderId = '', explicitToken = false } = {}) {
+    if (explicitToken) {
+      try {
+        const order = await this.wooClient.getOrder(orderId);
+        return { kind: 'matched', orderId: String(orderId), order };
+      } catch (error) {
+        this.logger.warn(`[feedback] unable to resolve token orderId=${orderId} messageKey=${message.messageKey} error=${error.message}`);
+        return { kind: 'unmatched' };
+      }
+    }
+
+    if (!message.senderPhone) {
+      return { kind: 'unmatched' };
+    }
+
+    const orders = await this.findFeedbackOrdersByPhone(message.senderPhone);
+    if (orders.length === 1) {
+      return {
+        kind: 'matched',
+        orderId: String(orders[0].id),
+        order: orders[0]
+      };
+    }
+    if (orders.length > 1) {
+      this.logger.warn(`[feedback] ambiguous phone fallback phone=${message.senderPhone} matches=${orders.map((order) => order.id).join(',')}`);
+      return { kind: 'ambiguous' };
+    }
+
+    return { kind: 'unmatched' };
+  }
+
+  async processFeedbackInboundMessage(message, feedbackMatch) {
+    const feedbackOrder = feedbackMatch.order || await this.wooClient.getOrder(feedbackMatch.orderId);
+    const normalizedOrder = normalizeWooOrder(feedbackOrder, this.messages);
+    const localOrder = this.store.getOrder(normalizedOrder.orderId);
+    const replyAt = resolveInboundTimestamp(message.timestamp);
+    const providerMessageId = message.providerMessageId || message.messageKey;
+    const feedbackMeta = getFeedbackMeta(feedbackOrder);
+
+    this.appendInboundMessage({
+      message,
+      orderId: normalizedOrder.orderId,
+      storedKind: `feedback_${message.kind || 'unknown'}`
+    });
+
+    if (feedbackMeta.replyLastMessageId && feedbackMeta.replyLastMessageId === providerMessageId) {
+      return {
+        ok: true,
+        ignored: false,
+        duplicate: true,
+        failed: false,
+        route: 'feedback',
+        eventStatus: 'feedback_duplicate'
+      };
+    }
+
+    const replyCount = Number(feedbackMeta.replyCount || 0) + 1;
+    const payloadJson = buildReducedPayloadSnapshot(message);
+
+    let updatedOrder;
+    try {
+      updatedOrder = await this.wooClient.updateOrderMeta(
+        normalizedOrder.orderId,
+        buildFeedbackMetaUpdate(feedbackOrder, {
+          state: 'reply_received',
+          replyAt,
+          replyLastMessageId: providerMessageId,
+          replyCount,
+          senderPhone: message.senderPhone || message.senderRaw || '',
+          lastKind: message.kind,
+          lastText: message.textBody || '',
+          lastCaption: message.captionText || '',
+          lastMediaUrl: message.mediaRef || '',
+          lastMimeType: message.mimeType || '',
+          payloadJson
+        })
+      );
+    } catch (error) {
+      this.logger.warn(`[feedback] failed Woo meta update orderId=${normalizedOrder.orderId} messageKey=${message.messageKey} error=${error.message}`);
+      return {
+        ok: false,
+        ignored: false,
+        duplicate: false,
+        failed: true,
+        route: 'feedback',
+        eventStatus: 'feedback_woo_update_failed',
+        reason: error.message
+      };
+    }
+
+    try {
+      await this.wooClient.addOrderNote(normalizedOrder.orderId, buildFeedbackNote(message));
+    } catch (error) {
+      this.logger.warn(`[feedback] failed Woo note orderId=${normalizedOrder.orderId} messageKey=${message.messageKey} error=${error.message}`);
+    }
+
+    this.store.upsertOrder({
+      ...localOrder,
+      ...normalizeWooOrder(updatedOrder || feedbackOrder, this.messages),
+      rawOrder: updatedOrder || feedbackOrder,
+      feedbackState: 'reply_received',
+      feedbackReplyAt: replyAt,
+      feedbackReplyLastMessageId: providerMessageId,
+      feedbackReplyCount: replyCount,
+      feedbackSenderPhone: message.senderPhone || message.senderRaw || '',
+      feedbackLastKind: message.kind,
+      feedbackLastText: message.textBody || '',
+      feedbackLastCaption: message.captionText || '',
+      feedbackLastMediaUrl: message.mediaRef || '',
+      feedbackLastMimeType: message.mimeType || ''
+    });
 
     return {
-      status: 202,
-      body: {
-        ok: true,
-        state: nextState,
-        wooSyncStatus: reconciliation.syncStatus
-      }
+      ok: true,
+      ignored: false,
+      duplicate: false,
+      failed: false,
+      route: 'feedback',
+      eventStatus: 'feedback_reply_received'
     };
+  }
+
+  async findFeedbackOrdersByPhone(phone) {
+    const orders = await this.listOrdersForStatuses(FEEDBACK_MATCH_STATUSES);
+    return orders
+      .filter((order) => {
+        const normalizedOrder = normalizeWooOrder(order, this.messages);
+        const feedbackMeta = getFeedbackMeta(order);
+        return normalizedOrder.phone === phone && feedbackMeta.state === 'waiting_for_feedback';
+      })
+      .sort(compareOrdersByRecency);
   }
 
   async runOrderFollowups({ now = new Date(), backfillOnly = false } = {}) {
@@ -1284,61 +1644,92 @@ function resolveDeliveryEta(city, messages) {
     : messages.deliveryEtaOtherCities;
 }
 
-function normalizeWasenderInbound(payload) {
-  const messages = extractWasenderMessages(payload);
-  const primaryMessage = messages[0] || {};
-  const messageKey = primaryMessage.key || {};
-  const messageNode = primaryMessage.message || {};
+function extractWasenderInboundMessages(payload, eventKey, logger = console) {
+  const messages = extractWasenderMessages(payload, logger);
 
-  if (messageKey.fromMe || primaryMessage.fromMe) {
-    return {
-      phone: '',
-      text: ''
-    };
-  }
-
-  const candidatePhone =
-    messageKey.cleanedSenderPn ||
-    messageKey.senderPn ||
-    normalizeRemoteJid(messageKey.remoteJid) ||
-    payload.from ||
-    payload.sender ||
-    payload.senderPhone ||
-    payload.phone ||
-    payload.data?.from ||
-    payload.data?.sender ||
-    payload.data?.senderPhone ||
-    payload.message?.from;
-
-  const candidateText =
-    primaryMessage.messageBody ||
-    messageNode.conversation ||
-    messageNode.extendedTextMessage?.text ||
-    payload.text ||
-    payload.message ||
-    payload.body ||
-    payload.data?.text ||
-    payload.data?.body ||
-    payload.message?.text;
-
-  const messageType = detectWasenderMessageType(primaryMessage, messageNode);
-
-  return {
-    phone: normalizePhone(candidatePhone),
-    text: typeof candidateText === 'string' ? candidateText : '',
-    type: messageType
-  };
+  return messages.map((message, index) => normalizeWasenderInboundMessage({
+    payload,
+    eventKey,
+    message,
+    index
+  }));
 }
 
-function extractWasenderMessages(payload) {
-  const candidate = payload.data?.messages;
+function extractWasenderMessages(payload, logger = console) {
+  const candidate = payload?.data?.messages;
   if (Array.isArray(candidate)) {
     return candidate;
   }
   if (candidate && typeof candidate === 'object') {
     return [candidate];
   }
+
+  if (isLikelyWasenderMessageEnvelope(payload)) {
+    return [payload];
+  }
+
+  logger.warn(`[webhook][wasender] unrecognized inbound payload shape topKeys=${JSON.stringify(Object.keys(payload || {}).sort())} dataKeys=${JSON.stringify(Object.keys(payload?.data || {}).sort())}`);
   return [];
+}
+
+function normalizeWasenderInboundMessage({ payload, eventKey, message, index }) {
+  const messageKey = message?.key || {};
+  const messageNode = message?.message || {};
+  const media = extractInboundMediaFields(message, messageNode);
+  const providerMessageId = String(
+    message?.id ||
+    messageKey?.id ||
+    message?.messageId ||
+    payload?.id ||
+    ''
+  ).trim();
+  const timestamp = resolveInboundTimestamp(
+    message?.messageTimestamp ||
+    message?.timestamp ||
+    messageKey?.messageTimestamp ||
+    payload?.timestamp ||
+    payload?.data?.timestamp
+  );
+  const textBody = extractInboundText(message, messageNode, payload);
+  const captionText = extractInboundCaption(messageNode, media.node);
+  const senderRaw =
+    messageKey.cleanedSenderPn ||
+    messageKey.senderPn ||
+    normalizeRemoteJid(messageKey.remoteJid) ||
+    payload?.from ||
+    payload?.sender ||
+    payload?.senderPhone ||
+    payload?.phone ||
+    payload?.data?.from ||
+    payload?.data?.sender ||
+    payload?.data?.senderPhone ||
+    payload?.message?.from ||
+    '';
+
+  return {
+    webhookEventKey: eventKey,
+    messageIndex: index,
+    messageKey: providerMessageId || `${eventKey}:${index}`,
+    providerMessageId: providerMessageId || null,
+    senderPhone: normalizePhone(senderRaw),
+    senderRaw: String(senderRaw || ''),
+    timestamp,
+    kind: media.kind,
+    textBody,
+    captionText,
+    mediaRef: media.mediaRef,
+    mimeType: media.mimeType,
+    fromMe: Boolean(messageKey.fromMe || message?.fromMe),
+    rawMessage: message,
+    rawEnvelopeSnapshot: {
+      eventKey,
+      index,
+      topLevelKeys: Object.keys(payload || {}).sort(),
+      dataKeys: Object.keys(payload?.data || {}).sort(),
+      providerMessageId: providerMessageId || '',
+      message
+    }
+  };
 }
 
 function normalizeRemoteJid(remoteJid) {
@@ -1349,16 +1740,188 @@ function normalizeRemoteJid(remoteJid) {
   return remoteJid.split('@')[0];
 }
 
-function detectWasenderMessageType(primaryMessage, messageNode) {
-  if (
-    primaryMessage.audio ||
-    messageNode.audioMessage ||
-    messageNode.ptt
-  ) {
-    return 'audio';
+function extractInboundText(message, messageNode, payload) {
+  const candidateText =
+    message?.messageBody ||
+    messageNode?.conversation ||
+    messageNode?.extendedTextMessage?.text ||
+    payload?.text ||
+    payload?.body ||
+    payload?.data?.text ||
+    payload?.data?.body ||
+    payload?.message?.text;
+
+  return typeof candidateText === 'string' ? candidateText : '';
+}
+
+function extractInboundCaption(messageNode, mediaNode) {
+  const caption =
+    mediaNode?.caption ||
+    messageNode?.extendedTextMessage?.text ||
+    '';
+
+  return typeof caption === 'string' ? caption : '';
+}
+
+function extractInboundMediaFields(message, messageNode) {
+  const mediaCandidates = [
+    { kind: 'image', node: messageNode?.imageMessage },
+    { kind: 'audio', node: messageNode?.audioMessage || (messageNode?.ptt ? { mimetype: '' } : null) || (message?.audio ? { ...message.audio, mimetype: message?.audio?.mimetype } : null) },
+    { kind: 'video', node: messageNode?.videoMessage },
+    { kind: 'document', node: messageNode?.documentMessage },
+    { kind: 'sticker', node: messageNode?.stickerMessage }
+  ];
+
+  for (const candidate of mediaCandidates) {
+    if (!candidate.node) {
+      continue;
+    }
+
+    return {
+      kind: candidate.kind,
+      node: candidate.node,
+      mediaRef: extractMediaReference(candidate.node),
+      mimeType: String(candidate.node?.mimetype || candidate.node?.mimeType || '')
+    };
   }
 
-  return 'text';
+  return {
+    kind: 'text',
+    node: null,
+    mediaRef: '',
+    mimeType: ''
+  };
+}
+
+function extractMediaReference(mediaNode) {
+  const candidate = [
+    mediaNode?.url,
+    mediaNode?.mediaUrl,
+    mediaNode?.directPath,
+    mediaNode?.fileUrl,
+    mediaNode?.downloadUrl,
+    mediaNode?.fileSha256 && `sha256:${mediaNode.fileSha256}`,
+    mediaNode?.mediaKey && `mediaKey:${mediaNode.mediaKey}`,
+    mediaNode?.id,
+    mediaNode?.fileName
+  ].find(Boolean);
+
+  return typeof candidate === 'string' ? candidate : '';
+}
+
+function isLikelyWasenderMessageEnvelope(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return false;
+  }
+
+  return Boolean(
+    payload?.key ||
+    payload?.messageBody ||
+    payload?.message?.conversation ||
+    payload?.message?.extendedTextMessage?.text ||
+    payload?.message?.audioMessage ||
+    payload?.message?.imageMessage ||
+    payload?.message?.videoMessage ||
+    payload?.message?.documentMessage ||
+    payload?.message?.stickerMessage
+  );
+}
+
+function isConfirmationMessageKind(kind) {
+  return kind === 'text' || kind === 'audio';
+}
+
+function extractFeedbackToken(textBody, captionText) {
+  const haystack = `${String(textBody || '')}\n${String(captionText || '')}`;
+  const match = haystack.match(/\bFDBK-(\d+)\b/iu);
+  return match ? match[1] : '';
+}
+
+function buildReducedPayloadSnapshot(message) {
+  const payload = {
+    providerMessageId: message.providerMessageId || '',
+    senderPhone: message.senderPhone || '',
+    senderRaw: message.senderRaw || '',
+    timestamp: message.timestamp || '',
+    kind: message.kind || 'unknown',
+    textBody: message.textBody || '',
+    captionText: message.captionText || '',
+    mediaRef: message.mediaRef || '',
+    mimeType: message.mimeType || '',
+    rawKeys: Object.keys(message.rawMessage || {}).sort()
+  };
+  const serialized = JSON.stringify(payload);
+  if (serialized.length <= MAX_FEEDBACK_PAYLOAD_JSON_LENGTH) {
+    return serialized;
+  }
+
+  return JSON.stringify({
+    providerMessageId: payload.providerMessageId,
+    senderPhone: payload.senderPhone,
+    timestamp: payload.timestamp,
+    kind: payload.kind,
+    rawKeys: payload.rawKeys
+  });
+}
+
+function summarizeWasenderRequestStatus(messageStatuses) {
+  if (!messageStatuses.length) {
+    return 'ignored_non_message';
+  }
+  if (messageStatuses.length === 1) {
+    return messageStatuses[0];
+  }
+  if (messageStatuses.every((status) => status === 'ignored_non_message' || status === 'unmatched_inbound')) {
+    return 'ignored_non_message';
+  }
+  if (messageStatuses.some((status) => status.endsWith('_failed') || status === 'processing_failed')) {
+    return 'batch_processed_with_failures';
+  }
+
+  return 'batch_processed';
+}
+
+function resolveInboundTimestamp(value) {
+  if (!value && value !== 0) {
+    return new Date().toISOString();
+  }
+
+  if (typeof value === 'number' || /^\d+$/u.test(String(value))) {
+    const numericValue = Number(value);
+    const timestamp = numericValue > 1e12 ? numericValue : numericValue * 1000;
+    const parsed = new Date(timestamp);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString();
+  }
+
+  return new Date().toISOString();
+}
+
+function buildFeedbackNote(message) {
+  const kind = message.kind || 'unknown';
+  if (kind === 'text') {
+    const text = truncateForNote(message.textBody || message.captionText || '');
+    return text
+      ? `Feedback reply received via WhatsApp [text]: ${text}`
+      : 'Feedback reply received via WhatsApp [text]';
+  }
+
+  return `Feedback reply received via WhatsApp [${kind}]`;
+}
+
+function truncateForNote(value, maxLength = 160) {
+  const text = String(value || '').trim().replace(/\s+/gu, ' ');
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength - 3)}...`;
 }
 
 function extractMessageId(sendResult) {
@@ -1448,6 +2011,28 @@ function getDecisionMeta(order) {
   };
 }
 
+function getFeedbackMeta(order) {
+  const metaValue = (key) => {
+    const metaData = Array.isArray(order?.meta_data) ? order.meta_data : [];
+    const metaItem = metaData.find((item) => item.key === key);
+    return metaItem?.value ?? '';
+  };
+
+  return {
+    state: String(metaValue(FEEDBACK_META_KEYS.state) || ''),
+    replyAt: String(metaValue(FEEDBACK_META_KEYS.replyAt) || ''),
+    replyLastMessageId: String(metaValue(FEEDBACK_META_KEYS.replyLastMessageId) || ''),
+    replyCount: Number(metaValue(FEEDBACK_META_KEYS.replyCount) || 0),
+    senderPhone: String(metaValue(FEEDBACK_META_KEYS.senderPhone) || ''),
+    lastKind: String(metaValue(FEEDBACK_META_KEYS.lastKind) || ''),
+    lastText: String(metaValue(FEEDBACK_META_KEYS.lastText) || ''),
+    lastCaption: String(metaValue(FEEDBACK_META_KEYS.lastCaption) || ''),
+    lastMediaUrl: String(metaValue(FEEDBACK_META_KEYS.lastMediaUrl) || ''),
+    lastMimeType: String(metaValue(FEEDBACK_META_KEYS.lastMimeType) || ''),
+    payloadJson: String(metaValue(FEEDBACK_META_KEYS.payloadJson) || '')
+  };
+}
+
 function buildWorkflowMetaUpdate(order, values) {
   const existingMeta = Array.isArray(order?.meta_data) ? order.meta_data : [];
 
@@ -1483,6 +2068,31 @@ function buildDecisionMetaUpdate(order, values) {
     [DECISION_META_KEYS.manualOverride]: values.manualOverride,
     [DECISION_META_KEYS.manualOverrideAt]: values.manualOverrideAt,
     [DECISION_META_KEYS.manualOverrideStatus]: values.manualOverrideStatus
+  })
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => {
+      const existing = existingMeta.find((item) => item.key === key);
+      return existing?.id
+        ? { id: existing.id, key, value }
+        : { key, value };
+    });
+}
+
+function buildFeedbackMetaUpdate(order, values) {
+  const existingMeta = Array.isArray(order?.meta_data) ? order.meta_data : [];
+
+  return Object.entries({
+    [FEEDBACK_META_KEYS.state]: values.state,
+    [FEEDBACK_META_KEYS.replyAt]: values.replyAt,
+    [FEEDBACK_META_KEYS.replyLastMessageId]: values.replyLastMessageId,
+    [FEEDBACK_META_KEYS.replyCount]: values.replyCount,
+    [FEEDBACK_META_KEYS.senderPhone]: values.senderPhone,
+    [FEEDBACK_META_KEYS.lastKind]: values.lastKind,
+    [FEEDBACK_META_KEYS.lastText]: values.lastText,
+    [FEEDBACK_META_KEYS.lastCaption]: values.lastCaption,
+    [FEEDBACK_META_KEYS.lastMediaUrl]: values.lastMediaUrl,
+    [FEEDBACK_META_KEYS.lastMimeType]: values.lastMimeType,
+    [FEEDBACK_META_KEYS.payloadJson]: values.payloadJson
   })
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => {
