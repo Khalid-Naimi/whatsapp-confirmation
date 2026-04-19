@@ -27,7 +27,7 @@ export function verifyGenericHmacSignature(rawBody, providedSignature, secret) {
     return false;
   }
 
-  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  const expected = crypto.createHmac('md5', secret).update(rawBody).digest('hex');
   if (expected.length !== providedSignature.length) {
     return false;
   }

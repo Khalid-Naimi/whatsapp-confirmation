@@ -59,7 +59,7 @@ export function loadConfig() {
       baseUrl: process.env.WASENDER_BASE_URL || 'https://www.wasenderapi.com/api',
       apiToken: process.env.WASENDER_API_TOKEN || '',
       webhookSecret: (process.env.WASENDER_WEBHOOK_SECRET || '').trim(),
-      signatureHeader: (process.env.WASENDER_SIGNATURE_HEADER || 'x-wasender-signature').toLowerCase()
+      signatureHeader: (process.env.WASENDER_SIGNATURE_HEADER || 'x-webhook-signature').toLowerCase()
     },
     mail: {
       host: process.env.SMTP_HOST || '',

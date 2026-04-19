@@ -247,7 +247,7 @@ async function dispatch(app, { method, url, headers = {}, payload = {} }) {
   const body = JSON.stringify(payload);
   const effectiveHeaders = { ...headers };
   if (url === '/webhooks/wasender' && effectiveHeaders['x-wasender-signature'] === 'wasender-secret') {
-    effectiveHeaders['x-wasender-signature'] = createHmac('sha256', 'wasender-secret').update(body).digest('hex');
+    effectiveHeaders['x-wasender-signature'] = createHmac('md5', 'wasender-secret').update(body).digest('hex');
   }
   const req = createMockReq({ method, url, headers: effectiveHeaders, body });
   const res = createMockRes();
