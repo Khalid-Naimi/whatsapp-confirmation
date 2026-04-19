@@ -19,7 +19,7 @@ export function verifyWooSignature(rawBody, signatureHeader, secret) {
   return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
 }
 
-export function verifyGenericHmacSignature(rawBody, providedSignature, secret) {
+export function verifyWasenderSignature(rawBody, providedSignature, secret) {
   if (!secret) {
     return true;
   }
@@ -27,9 +27,21 @@ export function verifyGenericHmacSignature(rawBody, providedSignature, secret) {
     return false;
   }
 
-  const expected = crypto.createHmac('md5', secret).update(rawBody).digest('hex');
-  if (expected.length !== providedSignature.length) {
+  const normalizedSecret = String(secret).trim();
+  const normalizedSignature = String(providedSignature).trim();
+
+  if (safeEqual(normalizedSecret, normalizedSignature)) {
+    return true;
+  }
+
+  const expectedHmac = crypto.createHmac('md5', normalizedSecret).update(rawBody).digest('hex');
+  return safeEqual(expectedHmac, normalizedSignature);
+}
+
+function safeEqual(expected, actual) {
+  if (expected.length !== actual.length) {
     return false;
   }
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(providedSignature));
+
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
 }

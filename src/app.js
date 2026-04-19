@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { verifyGenericHmacSignature, verifyWooSignature } from './utils/signatures.js';
+import { verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 
 export function createApp({ config, confirmationService, store, logger = console }) {
   return async function handler(req, res) {
@@ -91,7 +91,7 @@ export function createApp({ config, confirmationService, store, logger = console
         }
 
         const signature = req.headers[config.wasender.signatureHeader];
-        const valid = verifyGenericHmacSignature(rawBody, signature, config.wasender.webhookSecret);
+        const valid = verifyWasenderSignature(rawBody, signature, config.wasender.webhookSecret);
         if (!valid) {
           logger.warn('[webhook][wasender] invalid signature');
           return sendJson(res, 401, { ok: false, error: 'Invalid Wasender signature' });

@@ -245,11 +245,7 @@ function createMockRes() {
 
 async function dispatch(app, { method, url, headers = {}, payload = {} }) {
   const body = JSON.stringify(payload);
-  const effectiveHeaders = { ...headers };
-  if (url === '/webhooks/wasender' && effectiveHeaders['x-wasender-signature'] === 'wasender-secret') {
-    effectiveHeaders['x-wasender-signature'] = createHmac('md5', 'wasender-secret').update(body).digest('hex');
-  }
-  const req = createMockReq({ method, url, headers: effectiveHeaders, body });
+  const req = createMockReq({ method, url, headers, body });
   const res = createMockRes();
   await app(req, res);
   return {
@@ -260,6 +256,14 @@ async function dispatch(app, { method, url, headers = {}, payload = {} }) {
 
 function signWoo(payload) {
   return createHmac('sha256', 'woo-secret').update(JSON.stringify(payload)).digest('base64');
+}
+
+function signWasenderPlain(secret = 'wasender-secret') {
+  return secret;
+}
+
+function signWasenderHmac(payload, secret = 'wasender-secret') {
+  return createHmac('md5', secret).update(JSON.stringify(payload)).digest('hex');
 }
 
 function workflowMetaValue(metaData, key) {
@@ -664,7 +668,7 @@ test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: replyPayload
   });
@@ -731,7 +735,7 @@ test('reply 2 cancels the order', async () => {
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: replyPayload
   });
@@ -793,7 +797,7 @@ test('replayed final reply does not send duplicate customer follow-up', async ()
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: replyPayload
   });
@@ -802,7 +806,7 @@ test('replayed final reply does not send duplicate customer follow-up', async ()
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'replay-final-1'
     },
     payload: replyPayload
@@ -854,7 +858,7 @@ test('invalid reply sends clarification twice then goes manual', async () => {
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: replyPayload
   });
@@ -874,7 +878,7 @@ test('invalid reply sends clarification twice then goes manual', async () => {
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: secondReplyPayload
   });
@@ -894,7 +898,7 @@ test('invalid reply sends clarification twice then goes manual', async () => {
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: thirdReplyPayload
   });
@@ -916,6 +920,7 @@ test('invalid reply sends clarification twice then goes manual', async () => {
 
 test('bad signatures are rejected', async () => {
   const { app } = createTestContext();
+  const wasenderPayload = { id: 'wa-4', from: '212600000005', text: '1' };
   const wooResult = await dispatch(app, {
     method: 'POST',
     url: '/webhooks/woocommerce',
@@ -930,11 +935,41 @@ test('bad signatures are rejected', async () => {
     headers: {
       'x-wasender-signature': 'bad'
     },
-    payload: { id: 'wa-4', from: '212600000005', text: '1' }
+    payload: wasenderPayload
+  });
+  const wasenderHmacResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderHmac(wasenderPayload, 'wrong-secret')
+    },
+    payload: wasenderPayload
+  });
+  const wasenderMissingHeaderResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    payload: wasenderPayload
   });
 
   assert.equal(wooResult.statusCode, 401);
   assert.equal(wasenderResult.statusCode, 401);
+  assert.equal(wasenderHmacResult.statusCode, 401);
+  assert.equal(wasenderMissingHeaderResult.statusCode, 401);
+});
+
+test('legacy Wasender HMAC signature is still accepted', async () => {
+  const { app } = createTestContext();
+  const payload = { id: 'wa-4b', from: '212600000005', text: '1' };
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderHmac(payload)
+    },
+    payload
+  });
+
+  assert.equal(result.statusCode, 200);
 });
 
 test('non-Casablanca city uses 2 to 3 business days', async () => {
@@ -1043,7 +1078,7 @@ test('message without pending order is ignored as unmatched and gets no reply', 
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: replyPayload
   });
@@ -1091,7 +1126,7 @@ test('reply recovers pending order from Woo after local cache loss and blocks fo
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: {
       data: {
@@ -1170,7 +1205,7 @@ test('Woo fallback picks the newest pending order for the same phone', async () 
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: {
       data: {
@@ -1240,7 +1275,7 @@ test('audio reply with pending order is treated like invalid input', async () =>
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: audioPayload
   });
@@ -1276,7 +1311,7 @@ test('audio reply without pending order is ignored and gets no reply', async () 
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: audioPayload
   });
@@ -1305,7 +1340,7 @@ test('bot-originated Wasender events are ignored', async () => {
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: replyPayload
   });
@@ -1364,7 +1399,7 @@ test('batch payload processes confirmation and feedback independently', async ()
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'wasender-batch-1'
     },
     payload: {
@@ -1433,7 +1468,7 @@ test('mixed batch with one unusable message still processes the usable message',
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'wasender-batch-2'
     },
     payload: {
@@ -1492,7 +1527,7 @@ test('text feedback token updates only feedback meta', async () => {
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'feedback-text-901'
     },
     payload: {
@@ -1538,7 +1573,7 @@ test('image feedback with caption stores caption media url and mime type', async
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'feedback-image-902'
     },
     payload: {
@@ -1591,7 +1626,7 @@ test('image feedback without caption falls back by unique waiting-feedback phone
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'feedback-image-903'
     },
     payload: {
@@ -1702,7 +1737,7 @@ for (const scenario of [
       method: 'POST',
       url: '/webhooks/wasender',
       headers: {
-        'x-wasender-signature': 'wasender-secret',
+        'x-wasender-signature': signWasenderPlain(),
         'x-event-id': `feedback-${scenario.name}-${scenario.orderId}`
       },
       payload: {
@@ -1724,7 +1759,7 @@ test('random inbound image without feedback match is ignored and not routed to c
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'random-image-unmatched'
     },
     payload: {
@@ -1786,7 +1821,7 @@ for (const scenario of [
       method: 'POST',
       url: '/webhooks/wasender',
       headers: {
-        'x-wasender-signature': 'wasender-secret',
+        'x-wasender-signature': signWasenderPlain(),
         'x-event-id': `unmatched-${scenario.name}`
       },
       payload: {
@@ -1844,7 +1879,7 @@ test('repeated provider message id does not increment feedback reply count twice
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'feedback-repeat-908-a'
     },
     payload
@@ -1853,7 +1888,7 @@ test('repeated provider message id does not increment feedback reply count twice
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'feedback-repeat-908-b'
     },
     payload
@@ -1908,7 +1943,7 @@ test('ambiguous waiting-feedback phone match is skipped safely', async () => {
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret',
+      'x-wasender-signature': signWasenderPlain(),
       'x-event-id': 'feedback-ambiguous-909'
     },
     payload: {
@@ -2155,7 +2190,7 @@ test('valid reply keeps decision final and retries Woo sync silently after failu
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: replyPayload
   });
@@ -2236,7 +2271,7 @@ test('internal notification failure does not block final customer flow', async (
     method: 'POST',
     url: '/webhooks/wasender',
     headers: {
-      'x-wasender-signature': 'wasender-secret'
+      'x-wasender-signature': signWasenderPlain()
     },
     payload: replyPayload
   });
