@@ -91,6 +91,11 @@ export function createApp({ config, confirmationService, store, logger = console
         }
 
         const signature = req.headers[config.wasender.signatureHeader];
+        // TEMP DIAGNOSTIC — remove once signature format is confirmed
+        {
+          const allSigHeaders = Object.keys(req.headers).filter((h) => h.toLowerCase().includes('sign') || h.toLowerCase().includes('hmac') || h.toLowerCase().includes('hash'));
+          logger.warn(`[webhook][wasender][diag] sigHeader=${config.wasender.signatureHeader} received=${String(signature ?? 'MISSING')} len=${String(signature?.length ?? 0)} allSigHeaders=${JSON.stringify(allSigHeaders)}`);
+        }
         const valid = verifyGenericHmacSignature(rawBody, signature, config.wasender.webhookSecret);
         if (!valid) {
           logger.warn('[webhook][wasender] invalid signature');
