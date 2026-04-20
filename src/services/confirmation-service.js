@@ -49,6 +49,8 @@ const PROCESSING_STATUS = 'processing';
 const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled', 'completed', 'failed', 'refunded'];
 const REPLY_RECOVERY_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled'];
 const FEEDBACK_SELF_TEST_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed', 'cancelled'];
+const FEEDBACK_SELF_TEST_RECOVERY_PER_PAGE = 50;
+const FEEDBACK_SELF_TEST_RECOVERY_MAX_PAGES = 2;
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
 const AUTO_CANCEL_MS = 72 * 60 * 60 * 1000;
@@ -88,6 +90,10 @@ export class ConfirmationService {
 
     if (isFeedbackSelfTestOrder(payload)) {
       const feedbackMeta = getFeedbackMeta(payload);
+      this.store.upsertOrder({
+        ...normalizedOrder,
+        rawOrder: payload
+      });
       this.logger.log(
         `[confirmation] skipped self-test confirmation send orderId=${normalizedOrder.orderId} testPhone=${feedbackMeta.testPhone || ''} token=${feedbackMeta.token || ''} runId=${feedbackMeta.testRunId || ''}`
       );
@@ -230,10 +236,31 @@ export class ConfirmationService {
       return this.routeConfirmationInboundMessage(message);
     }
 
+    const feedbackMatch = await this.matchFeedbackOrder(message);
+    if (feedbackMatch.kind === 'matched' && feedbackMatch.source === 'self_test_phone_local') {
+      const candidateSuffix = feedbackMatch.matchedOrderIds?.length > 1
+        ? ` candidateOrderIds=${feedbackMatch.matchedOrderIds.join(',')} chosenOrderId=${feedbackMatch.orderId}`
+        : '';
+      this.logger.log(
+        `[feedback] route=self_test_phone_match source=local matchedOrderId=${feedbackMatch.orderId} senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
+      );
+      return this.processFeedbackMatchResult(message, feedbackMatch);
+    }
+
+    if (feedbackMatch.kind === 'matched' && feedbackMatch.source === 'self_test_phone_woo_recovery') {
+      const candidateSuffix = feedbackMatch.matchedOrderIds?.length > 1
+        ? ` candidateOrderIds=${feedbackMatch.matchedOrderIds.join(',')} chosenOrderId=${feedbackMatch.orderId}`
+        : '';
+      this.logger.log(
+        `[feedback] route=self_test_phone_match source=woo_recovery matchedOrderId=${feedbackMatch.orderId} senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
+      );
+      return this.processFeedbackMatchResult(message, feedbackMatch);
+    }
+
     this.logger.log(
-      `[feedback] route=feedback_unmatched senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} reason=token_required messageKey=${message.messageKey}`
+      `[feedback] route=feedback_unmatched senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} reason=no_active_self_test_candidate messageKey=${message.messageKey}`
     );
-    return this.processFeedbackMatchResult(message, { kind: 'unmatched', source: 'token_required' });
+    return this.processFeedbackMatchResult(message, feedbackMatch);
   }
 
   async processFeedbackMatchResult(message, feedbackMatch) {
@@ -533,7 +560,26 @@ export class ConfirmationService {
 
   async matchFeedbackOrder(message, { token = '', explicitToken = false } = {}) {
     if (!explicitToken) {
-      return { kind: 'unmatched', source: 'token_required' };
+      if (!message.senderPhone) {
+        return { kind: 'unmatched', source: 'self_test_phone' };
+      }
+
+      const localCandidates = this.store.listActiveSelfTestFeedbackOrdersByPhone(message.senderPhone);
+      if (localCandidates.length) {
+        return {
+          kind: 'matched',
+          orderId: String(localCandidates[0].orderId),
+          source: 'self_test_phone_local',
+          matchedOrderIds: localCandidates.map((order) => String(order.orderId))
+        };
+      }
+
+      const recoveredMatch = await this.recoverLatestSelfTestFeedbackOrderByPhone(message.senderPhone);
+      if (recoveredMatch) {
+        return recoveredMatch;
+      }
+
+      return { kind: 'unmatched', source: 'self_test_phone' };
     }
 
     if (explicitToken) {
@@ -580,6 +626,62 @@ export class ConfirmationService {
       );
       return { kind: 'unmatched', source: 'self_test_token' };
     }
+  }
+
+  async recoverLatestSelfTestFeedbackOrderByPhone(phone) {
+    const seenOrderIds = new Set();
+    const matches = [];
+
+    for (const status of FEEDBACK_SELF_TEST_MATCH_STATUSES) {
+      for (let page = 1; page <= FEEDBACK_SELF_TEST_RECOVERY_MAX_PAGES; page += 1) {
+        const orders = await this.wooClient.listOrders({
+          status,
+          perPage: FEEDBACK_SELF_TEST_RECOVERY_PER_PAGE,
+          page
+        });
+
+        if (!orders.length) {
+          break;
+        }
+
+        for (const order of orders) {
+          const orderId = String(order.id);
+          if (seenOrderIds.has(orderId)) {
+            continue;
+          }
+          seenOrderIds.add(orderId);
+
+          const feedbackMeta = getFeedbackMeta(order);
+          if (!isFeedbackSelfTestOrder(order) || feedbackMeta.testPhone !== phone) {
+            continue;
+          }
+
+          matches.push(order);
+        }
+
+        if (orders.length < FEEDBACK_SELF_TEST_RECOVERY_PER_PAGE) {
+          break;
+        }
+      }
+    }
+
+    if (!matches.length) {
+      return null;
+    }
+
+    const sortedMatches = matches.sort(compareSelfTestFeedbackCandidates);
+    const chosenOrder = sortedMatches[0];
+    this.store.upsertOrder({
+      ...normalizeWooOrder(chosenOrder, this.messages),
+      rawOrder: chosenOrder
+    });
+
+    return {
+      kind: 'matched',
+      orderId: String(chosenOrder.id),
+      source: 'self_test_phone_woo_recovery',
+      matchedOrderIds: sortedMatches.map((order) => String(order.id))
+    };
   }
 
   async processFeedbackInboundMessage(message, feedbackMatch) {
@@ -1654,6 +1756,7 @@ function hasDecisionMetaValue(value) {
 function normalizeWooOrder(payload, messages) {
   const billing = payload.billing || {};
   const shipping = payload.shipping || {};
+  const feedbackMeta = getFeedbackMeta(payload);
   const billingState = String(billing.state || payload.billing_state || '').trim();
   const deliveryAddress = String(billing.address_1 || payload.billing_address_1 || '').trim() || 'Ma kaynach';
   const shippingCity = String(shipping.city || '').trim();
@@ -1675,6 +1778,23 @@ function normalizeWooOrder(payload, messages) {
     lineItems,
     orderItemsSummary: summarizeOrderItems(lineItems),
     wooStatus: payload.status || 'pending',
+    feedbackState: feedbackMeta.state || '',
+    feedbackToken: feedbackMeta.token || '',
+    feedbackTestPhone: feedbackMeta.testPhone || '',
+    feedbackTestActive: feedbackMeta.testActive,
+    feedbackIsTest: feedbackMeta.isTest,
+    feedbackTestRunId: feedbackMeta.testRunId || '',
+    feedbackRequestedAt: feedbackMeta.requestedAt || '',
+    feedbackSentAt: feedbackMeta.sentAt || '',
+    feedbackReplyAt: feedbackMeta.replyAt || '',
+    feedbackReplyLastMessageId: feedbackMeta.replyLastMessageId || '',
+    feedbackReplyCount: Number(feedbackMeta.replyCount || 0),
+    feedbackSenderPhone: feedbackMeta.senderPhone || '',
+    feedbackLastKind: feedbackMeta.lastKind || '',
+    feedbackLastText: feedbackMeta.lastText || '',
+    feedbackLastCaption: feedbackMeta.lastCaption || '',
+    feedbackLastMediaUrl: feedbackMeta.lastMediaUrl || '',
+    feedbackLastMimeType: feedbackMeta.lastMimeType || '',
     rawOrder: payload
   };
 }
@@ -1999,6 +2119,28 @@ function extractMessageId(sendResult) {
   return sendResult?.id || sendResult?.messageId || sendResult?.data?.id || null;
 }
 
+function compareSelfTestFeedbackCandidates(left, right) {
+  const sentDelta = getTimestampValue(right?.feedbackSentAt || getFeedbackMeta(right).sentAt)
+    - getTimestampValue(left?.feedbackSentAt || getFeedbackMeta(left).sentAt);
+  if (sentDelta !== 0) {
+    return sentDelta;
+  }
+
+  const requestedDelta = getTimestampValue(right?.feedbackRequestedAt || getFeedbackMeta(right).requestedAt)
+    - getTimestampValue(left?.feedbackRequestedAt || getFeedbackMeta(left).requestedAt);
+  if (requestedDelta !== 0) {
+    return requestedDelta;
+  }
+
+  const updatedDelta = getTimestampValue(right?.updatedAt || right?.date_modified_gmt || right?.date_modified)
+    - getTimestampValue(left?.updatedAt || left?.date_modified_gmt || left?.date_modified);
+  if (updatedDelta !== 0) {
+    return updatedDelta;
+  }
+
+  return Number(right?.orderId || right?.id || 0) - Number(left?.orderId || left?.id || 0);
+}
+
 function compareOrdersByRecency(left, right) {
   return getOrderDateValue(right) - getOrderDateValue(left);
 }
@@ -2041,6 +2183,11 @@ function getOrderDateValue(order) {
   }
 
   return Number(order?.id) || 0;
+}
+
+function getTimestampValue(value) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function getWorkflowMeta(order) {

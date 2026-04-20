@@ -75,12 +75,13 @@ Backend-only Node.js service that:
 - `POST /webhooks/wasender` now supports batch inbound payloads and routes each inbound message independently:
   - explicit `FDBK-{orderId}` token -> feedback
   - bare `1` / `2` with an active pending confirmation candidate -> confirmation
-  - self-test feedback remains token-only
-  - tokenless feedback is treated as unmatched by this service
+  - self-test feedback replies no longer require the tester to repeat the token
+  - tokenless self-test replies are matched automatically by tester phone against the newest active self-test candidate
+  - normal customer feedback remains token-based for now
   - everything else is logged/skipped as unmatched inbound
 - Verified Wasender webhook requests return `200 OK` even if some inbound messages are skipped or feedback persistence fails.
 - Wasender payload parsing is defensive. The receiver accepts `data.messages` as an object or array and logs reduced key summaries for unknown inbound payload shapes instead of failing the whole request.
 - Contactability failures from Wasender that indicate an invalid or non-WhatsApp number now auto-cancel the order and attempt a customer email using the WooCommerce billing email.
-- In production, feedback requests are created by an external Woo/plugin flow. This service does not keep a local `waiting_for_feedback` candidate index, so live Woo full-scan phone matching is intentionally disabled.
-- If tokenless feedback matching is needed later, the external plugin should push feedback-candidate state into this service so inbound matching can stay local and avoid Woo scans.
+- Self-test feedback candidates are cached locally when their Woo webhook arrives, and tokenless self-test replies can recover after restart/deploy using bounded recent Woo reads instead of a full-store scan.
+- Normal customer feedback still requires an explicit token because this service does not yet own general feedback-send orchestration.
 - Use a Render Cron Job to call `POST /tasks/order-followups` every hour with header `x-task-secret: <TASK_SECRET>`.

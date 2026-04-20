@@ -117,6 +117,21 @@ export class JsonStore {
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
   }
 
+  listActiveSelfTestFeedbackOrdersByPhone(phone) {
+    const db = this.read();
+    return db.orders
+      .filter((order) =>
+        order.feedbackState === 'waiting_for_feedback' &&
+        (order.feedbackTestActive === true || order.feedbackIsTest === true) &&
+        order.feedbackTestPhone === phone
+      )
+      .sort(compareActiveSelfTestOrders);
+  }
+
+  findLatestActiveSelfTestFeedbackOrderByPhone(phone) {
+    return this.listActiveSelfTestFeedbackOrdersByPhone(phone)[0] || null;
+  }
+
   listPendingOrdersByPhone(phone) {
     const db = this.read();
     return db.orders.filter((order) => order.phone === phone && order.confirmationState === 'pending_confirmation');
@@ -149,4 +164,28 @@ export class JsonStore {
     const db = this.read();
     return db.messages.filter((msg) => msg.phone === phone);
   }
+}
+
+function compareActiveSelfTestOrders(left, right) {
+  const sentDelta = getTimestampValue(right.feedbackSentAt) - getTimestampValue(left.feedbackSentAt);
+  if (sentDelta !== 0) {
+    return sentDelta;
+  }
+
+  const requestedDelta = getTimestampValue(right.feedbackRequestedAt) - getTimestampValue(left.feedbackRequestedAt);
+  if (requestedDelta !== 0) {
+    return requestedDelta;
+  }
+
+  const updatedDelta = getTimestampValue(right.updatedAt) - getTimestampValue(left.updatedAt);
+  if (updatedDelta !== 0) {
+    return updatedDelta;
+  }
+
+  return Number(right.orderId || 0) - Number(left.orderId || 0);
+}
+
+function getTimestampValue(value) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
