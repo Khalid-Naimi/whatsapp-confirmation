@@ -1,8 +1,8 @@
 export function normalizePhone(phone) {
-  return validateMoroccanMobilePhone(phone).normalized;
+  return validatePhone(phone).normalized;
 }
 
-export function validateMoroccanMobilePhone(phone) {
+export function validatePhone(phone) {
   if (phone === undefined || phone === null || String(phone).trim() === '') {
     return {
       normalized: '',
@@ -12,12 +12,13 @@ export function validateMoroccanMobilePhone(phone) {
   }
 
   const raw = String(phone).trim();
+  const hasLeadingPlus = raw.startsWith('+');
   let digits = raw.replace(/\D/gu, '');
   if (!digits) {
     return {
       normalized: '',
       isValid: false,
-      reason: 'invalid_moroccan_mobile_number'
+      reason: 'invalid_phone'
     };
   }
 
@@ -25,16 +26,21 @@ export function validateMoroccanMobilePhone(phone) {
     digits = digits.slice(2);
   }
 
-  if (digits.startsWith('212')) {
-    const nationalNumber = digits.slice(3);
-    return buildMoroccanMobileValidationResult(nationalNumber);
+  const normalized = `+${digits}`;
+  const isInternationalDigitsOnly = !hasLeadingPlus && !raw.startsWith('00') && !raw.startsWith('0');
+  if ((hasLeadingPlus || raw.startsWith('00') || isInternationalDigitsOnly) && /^\+\d{8,15}$/u.test(normalized)) {
+    return {
+      normalized,
+      isValid: true,
+      reason: ''
+    };
   }
 
-  if (digits.startsWith('0')) {
-    digits = digits.slice(1);
-  }
-
-  return buildMoroccanMobileValidationResult(digits);
+  return {
+    normalized: '',
+    isValid: false,
+    reason: 'invalid_phone'
+  };
 }
 
 export function interpolateTemplate(template, values) {
@@ -61,29 +67,4 @@ export function summarizeOrderItems(lineItems = []) {
     .join(', ');
 
   return summary || 'Talab ma baynch';
-}
-
-function buildMoroccanMobileValidationResult(nationalNumber) {
-  const normalizedNational = String(nationalNumber || '');
-  if (!/^\d{9}$/u.test(normalizedNational)) {
-    return {
-      normalized: '',
-      isValid: false,
-      reason: 'invalid_moroccan_mobile_number'
-    };
-  }
-
-  if (!/^[67]/u.test(normalizedNational)) {
-    return {
-      normalized: '',
-      isValid: false,
-      reason: 'invalid_moroccan_mobile_number'
-    };
-  }
-
-  return {
-    normalized: `+212${normalizedNational}`,
-    isValid: true,
-    reason: ''
-  };
 }

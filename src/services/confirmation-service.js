@@ -1,4 +1,4 @@
-import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems, validateMoroccanMobilePhone } from '../utils/format.js';
+import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems, validatePhone } from '../utils/format.js';
 import { WasenderSendError } from './wasender-client.js';
 
 const WORKFLOW_META_KEYS = {
@@ -894,7 +894,7 @@ export class ConfirmationService {
 
   async sendInitialConfirmation(orderPayload, { note, now = new Date() } = {}) {
     const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
-    const phoneValidation = validateMoroccanMobilePhone(orderPayload?.billing?.phone || orderPayload?.shipping?.phone);
+    const phoneValidation = validatePhone(orderPayload?.billing?.phone || orderPayload?.shipping?.phone);
     if (phoneValidation.reason === 'missing_phone') {
       this.store.upsertOrder({
         ...normalizedOrder,
@@ -905,13 +905,13 @@ export class ConfirmationService {
     }
 
     if (!phoneValidation.isValid) {
-      this.logger.warn(`[confirmation] classified invalid_moroccan_mobile_number orderId=${normalizedOrder.orderId}`);
-      const cancelledOrder = await this.cancelOrderForInvalidMoroccanMobile(orderPayload, now);
+      this.logger.warn(`[confirmation] classified invalid_or_non_whatsapp_number orderId=${normalizedOrder.orderId} reason=invalid_phone`);
+      const cancelledOrder = await this.cancelOrderForInvalidPhone(orderPayload, now);
       return {
         status: 202,
         body: {
           ok: false,
-          reason: 'invalid_moroccan_mobile_number',
+          reason: 'invalid_or_non_whatsapp_number',
           cancelled: true,
           emailStatus: cancelledOrder.customerEmailStatus
         }
@@ -1073,14 +1073,14 @@ export class ConfirmationService {
     });
   }
 
-  async cancelOrderForInvalidMoroccanMobile(orderPayload, now = new Date()) {
+  async cancelOrderForInvalidPhone(orderPayload, now = new Date()) {
     return this.cancelOrderWithReason({
       orderPayload,
       now,
-      cancellationReason: 'invalid_moroccan_mobile_number',
-      logLabel: 'invalid moroccan mobile',
-      noteBuilder: buildInvalidMoroccanMobileCancellationNote,
-      errorMessage: 'Phone number is not a valid Moroccan mobile number'
+      cancellationReason: 'invalid_or_non_whatsapp_number',
+      logLabel: 'invalid phone',
+      noteBuilder: buildUnreachableWhatsAppCancellationNote,
+      errorMessage: 'Phone number is invalid or not reachable on WhatsApp'
     });
   }
 
@@ -2149,18 +2149,6 @@ function buildUnreachableWhatsAppCancellationNote(emailStatus) {
   }
 
   return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification failed.';
-}
-
-function buildInvalidMoroccanMobileCancellationNote(emailStatus) {
-  if (emailStatus === 'sent') {
-    return 'Order cancelled automatically because the provided phone number is not a valid Moroccan mobile number. Customer email notification sent.';
-  }
-
-  if (emailStatus === 'skipped') {
-    return 'Order cancelled automatically because the provided phone number is not a valid Moroccan mobile number. Customer email notification skipped because no billing email was available.';
-  }
-
-  return 'Order cancelled automatically because the provided phone number is not a valid Moroccan mobile number. Customer email notification failed.';
 }
 
 function safeErrorData(error) {

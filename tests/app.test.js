@@ -8,7 +8,7 @@ import { createApp } from '../src/app.js';
 import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
 import { WasenderSendError } from '../src/services/wasender-client.js';
-import { normalizePhone, validateMoroccanMobilePhone } from '../src/utils/format.js';
+import { normalizePhone, validatePhone } from '../src/utils/format.js';
 
 function createTestContext() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'woo-confirmation-'));
@@ -463,7 +463,7 @@ test('invalid or non-WhatsApp number auto-cancels the order and sends email', as
   assert.ok(logCalls.some((item) => item.includes('cancel completed orderId=1021 emailStatus=sent')));
 });
 
-test('invalid Moroccan mobile number auto-cancels before Wasender send', async () => {
+test('malformed phone auto-cancels before Wasender send', async () => {
   const { app, store, wasenderCalls, mailCalls, wooStatusCalls, wooNoteCalls, logCalls } = createTestContext();
   const payload = {
     id: 10215,
@@ -473,7 +473,7 @@ test('invalid Moroccan mobile number auto-cancels before Wasender send', async (
     billing: {
       first_name: 'Bad',
       last_name: 'Prefix',
-      phone: '0521234567',
+      phone: '123',
       email: 'badprefix@example.com',
       state: 'Rabat'
     },
@@ -491,13 +491,82 @@ test('invalid Moroccan mobile number auto-cancels before Wasender send', async (
   });
 
   assert.equal(result.statusCode, 202);
-  assert.equal(result.body.reason, 'invalid_moroccan_mobile_number');
+  assert.equal(result.body.reason, 'invalid_or_non_whatsapp_number');
   assert.equal(wasenderCalls.length, 0);
   assert.equal(mailCalls.length, 1);
   assert.deepEqual(wooStatusCalls[0], { orderId: '10215', status: 'cancelled' });
-  assert.equal(store.getOrder('10215').cancellationReason, 'invalid_moroccan_mobile_number');
-  assert.match(wooNoteCalls[0].note, /not a valid Moroccan mobile number/);
-  assert.ok(logCalls.some((item) => item.includes('classified invalid_moroccan_mobile_number orderId=10215')));
+  assert.equal(store.getOrder('10215').cancellationReason, 'invalid_or_non_whatsapp_number');
+  assert.match(wooNoteCalls[0].note, /invalid or not reachable on WhatsApp/);
+  assert.ok(logCalls.some((item) => item.includes('classified invalid_or_non_whatsapp_number orderId=10215 reason=invalid_phone')));
+});
+
+test('valid non-Moroccan E.164 number is sent without pre-cancellation', async () => {
+  const { app, store, wasenderCalls, wooStatusCalls } = createTestContext();
+  const payload = {
+    id: 10216,
+    status: 'pending',
+    total: '100.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Paris',
+      last_name: 'Customer',
+      phone: '+33612345678',
+      email: 'paris@example.com',
+      state: 'Paris'
+    },
+    line_items: [{ name: 'Produit', quantity: 1 }]
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-10216'
+    },
+    payload
+  });
+
+  assert.equal(result.statusCode, 202);
+  assert.deepEqual(result.body, { ok: true });
+  assert.equal(wasenderCalls.length, 1);
+  assert.equal(wasenderCalls[0].to, '+33612345678');
+  assert.equal(wooStatusCalls.length, 0);
+  assert.equal(store.getOrder('10216').confirmationState, 'pending_confirmation');
+});
+
+test('00-prefixed international number is normalized to E.164 before send', async () => {
+  const { app, wasenderCalls, wooStatusCalls } = createTestContext();
+  const payload = {
+    id: 10217,
+    status: 'pending',
+    total: '100.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Paris',
+      last_name: 'DialCode',
+      phone: '0033612345678',
+      email: 'dialcode@example.com',
+      state: 'Paris'
+    },
+    line_items: [{ name: 'Produit', quantity: 1 }]
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-10217'
+    },
+    payload
+  });
+
+  assert.equal(result.statusCode, 202);
+  assert.deepEqual(result.body, { ok: true });
+  assert.equal(wasenderCalls.length, 1);
+  assert.equal(wasenderCalls[0].to, '+33612345678');
+  assert.equal(wooStatusCalls.length, 0);
 });
 
 test('invalid or non-WhatsApp number still cancels when billing email is missing', async () => {
@@ -1099,7 +1168,7 @@ test('reply recovers pending order from Woo after local cache loss and blocks fo
     billing: {
       first_name: 'Recover',
       last_name: 'Cache',
-      phone: '0612345681',
+      phone: '+212612345681',
       state: 'Casablanca',
       address_1: '12 Rue Recover'
     },
@@ -1169,7 +1238,7 @@ test('Woo fallback picks the newest pending order for the same phone', async () 
       billing: {
         first_name: 'Older',
         last_name: 'Pending',
-        phone: '0612345682',
+        phone: '+212612345682',
         state: 'Casablanca'
       },
       line_items: [{ name: 'Produit Old', quantity: 1 }],
@@ -1188,7 +1257,7 @@ test('Woo fallback picks the newest pending order for the same phone', async () 
       billing: {
         first_name: 'Newer',
         last_name: 'Pending',
-        phone: '0612345682',
+        phone: '+212612345682',
         state: 'Casablanca'
       },
       line_items: [{ name: 'Produit New', quantity: 1 }],
@@ -1238,7 +1307,7 @@ test('audio reply with pending order is treated like invalid input', async () =>
     billing: {
       first_name: 'Audio',
       last_name: 'Pending',
-      phone: '0612345680',
+      phone: '+212612345680',
       state: 'Casablanca',
       address_1: '10 Rue Audio'
     },
@@ -1361,7 +1430,7 @@ test('batch payload processes confirmation and feedback independently', async ()
     billing: {
       first_name: 'Batch',
       last_name: 'Confirm',
-      phone: '0611111701',
+      phone: '+212611111701',
       state: 'Casablanca'
     },
     line_items: [{ name: 'Produit Confirm', quantity: 1 }]
@@ -1385,7 +1454,7 @@ test('batch payload processes confirmation and feedback independently', async ()
     billing: {
       first_name: 'Batch',
       last_name: 'Feedback',
-      phone: '0611111801',
+      phone: '+212611111801',
       state: 'Casablanca'
     },
     line_items: [{ name: 'Produit Feedback', quantity: 1 }],
@@ -1455,7 +1524,7 @@ test('mixed batch with one unusable message still processes the usable message',
     billing: {
       first_name: 'Mixed',
       last_name: 'Batch',
-      phone: '0611111802',
+      phone: '+212611111802',
       state: 'Casablanca'
     },
     line_items: [{ name: 'Produit Mixed', quantity: 1 }],
@@ -1504,7 +1573,7 @@ test('text feedback token updates only feedback meta', async () => {
     billing: {
       first_name: 'Text',
       last_name: 'Feedback',
-      phone: '0611111901',
+      phone: '+212611111901',
       state: 'Casablanca'
     },
     line_items: [{ name: 'Produit Text', quantity: 1 }],
@@ -1560,7 +1629,7 @@ test('image feedback with caption stores caption media url and mime type', async
     billing: {
       first_name: 'Image',
       last_name: 'Caption',
-      phone: '0611111902',
+      phone: '+212611111902',
       state: 'Casablanca'
     },
     line_items: [{ name: 'Produit Image', quantity: 1 }],
@@ -1613,7 +1682,7 @@ test('image feedback without caption falls back by unique waiting-feedback phone
     billing: {
       first_name: 'Image',
       last_name: 'Fallback',
-      phone: '0611111903',
+      phone: '+212611111903',
       state: 'Casablanca'
     },
     line_items: [{ name: 'Produit Image Fallback', quantity: 1 }],
@@ -1659,7 +1728,7 @@ for (const scenario of [
   {
     name: 'audio',
     orderId: 904,
-    phone: '0611111904',
+    phone: '+212611111904',
     message: {
       audioMessage: {
         mimetype: 'audio/ogg',
@@ -1670,7 +1739,7 @@ for (const scenario of [
   {
     name: 'video',
     orderId: 905,
-    phone: '0611111905',
+    phone: '+212611111905',
     message: {
       videoMessage: {
         caption: 'FDBK-905 video proof',
@@ -1682,7 +1751,7 @@ for (const scenario of [
   {
     name: 'document',
     orderId: 906,
-    phone: '0611111906',
+    phone: '+212611111906',
     message: {
       documentMessage: {
         caption: 'FDBK-906 invoice attached',
@@ -1694,7 +1763,7 @@ for (const scenario of [
   {
     name: 'sticker',
     orderId: 907,
-    phone: '0611111907',
+    phone: '+212611111907',
     message: {
       stickerMessage: {
         mimetype: 'image/webp',
@@ -1853,7 +1922,7 @@ test('repeated provider message id does not increment feedback reply count twice
     billing: {
       first_name: 'Repeat',
       last_name: 'Feedback',
-      phone: '0611111908',
+      phone: '+212611111908',
       state: 'Casablanca'
     },
     line_items: [{ name: 'Produit Repeat', quantity: 1 }],
@@ -1913,7 +1982,7 @@ test('ambiguous waiting-feedback phone match is skipped safely', async () => {
       billing: {
         first_name: 'Ambiguous',
         last_name: 'One',
-        phone: '0611111909',
+        phone: '+212611111909',
         state: 'Casablanca'
       },
       line_items: [{ name: 'Produit Ambiguous 1', quantity: 1 }],
@@ -1929,7 +1998,7 @@ test('ambiguous waiting-feedback phone match is skipped safely', async () => {
       billing: {
         first_name: 'Ambiguous',
         last_name: 'Two',
-        phone: '0611111909',
+        phone: '+212611111909',
         state: 'Casablanca'
       },
       line_items: [{ name: 'Produit Ambiguous 2', quantity: 1 }],
@@ -1995,7 +2064,7 @@ test('backfill sends confirmation only for processing orders without confirmatio
       billing: {
         first_name: 'Backfill',
         last_name: 'One',
-        phone: '0612345678',
+        phone: '+212612345678',
         state: 'Casablanca',
         address_1: '1 Rue Backfill'
       },
@@ -2010,7 +2079,7 @@ test('backfill sends confirmation only for processing orders without confirmatio
       billing: {
         first_name: 'Backfill',
         last_name: 'Two',
-        phone: '0612345679',
+        phone: '+212612345679',
         state: 'Rabat',
         address_1: '2 Rue Backfill'
       },
@@ -2042,7 +2111,7 @@ test('hourly maintenance sends first and second reminders then auto-cancels afte
     billing: {
       first_name: 'Reminder',
       last_name: 'One',
-      phone: '0611111111',
+      phone: '+212611111111',
       state: 'Casablanca',
       address_1: '1 Rue Reminder'
     },
@@ -2062,7 +2131,7 @@ test('hourly maintenance sends first and second reminders then auto-cancels afte
     billing: {
       first_name: 'Reminder',
       last_name: 'Two',
-      phone: '0622222222',
+      phone: '+212622222222',
       state: 'Rabat',
       address_1: '2 Rue Reminder'
     },
@@ -2082,7 +2151,7 @@ test('hourly maintenance sends first and second reminders then auto-cancels afte
     billing: {
       first_name: 'Reminder',
       last_name: 'Three',
-      phone: '0633333333',
+      phone: '+212633333333',
       state: 'Marrakech',
       address_1: '3 Rue Reminder'
     },
@@ -2116,7 +2185,7 @@ test('task endpoint runs followups with valid secret', async () => {
     billing: {
       first_name: 'Task',
       last_name: 'Run',
-      phone: '0644444444',
+      phone: '+212644444444',
       state: 'Casablanca',
       address_1: '4 Rue Task'
     },
@@ -2147,7 +2216,7 @@ test('valid reply keeps decision final and retries Woo sync silently after failu
     billing: {
       first_name: 'Retry',
       last_name: 'Sync',
-      phone: '0644444445',
+      phone: '+212644444445',
       state: 'Casablanca',
       address_1: '4 Rue Retry'
     },
@@ -2238,7 +2307,7 @@ test('internal notification failure does not block final customer flow', async (
     billing: {
       first_name: 'Notif',
       last_name: 'Fail',
-      phone: '0650000003',
+      phone: '+212650000003',
       state: 'Casablanca',
       address_1: '6 Rue Notify'
     },
@@ -2293,7 +2362,7 @@ test('manual cancelled status stops confirmed order workflow instead of restorin
     billing: {
       first_name: 'Manual',
       last_name: 'Cancel',
-      phone: '0650000001',
+      phone: '+212650000001',
       state: 'Casablanca',
       address_1: '1 Rue Manual'
     },
@@ -2336,7 +2405,7 @@ test('manual non-processing status stops pending reminder workflow', async () =>
     billing: {
       first_name: 'Manual',
       last_name: 'Pending',
-      phone: '0650000002',
+      phone: '+212650000002',
       state: 'Rabat',
       address_1: '2 Rue Manual'
     },
@@ -2365,34 +2434,29 @@ test('manual non-processing status stops pending reminder workflow', async () =>
   assert.equal(store.getOrder('502').manualOverrideStatus, 'completed');
 });
 
-test('normalizePhone converts Moroccan customer inputs to +212 format', () => {
-  assert.equal(normalizePhone('06 12 34 56 78'), '+212612345678');
-  assert.equal(normalizePhone('06-12-34-56-78'), '+212612345678');
-  assert.equal(normalizePhone('(06) 12 34 56 78'), '+212612345678');
-  assert.equal(normalizePhone('07-12-34-56-78'), '+212712345678');
+test('normalizePhone only accepts E.164-style international inputs', () => {
   assert.equal(normalizePhone('+212 6 12 34 56 78'), '+212612345678');
-  assert.equal(normalizePhone('212612345678'), '+212612345678');
+  assert.equal(normalizePhone('+33 6 12 34 56 78'), '+33612345678');
   assert.equal(normalizePhone('00212612345678'), '+212612345678');
-  assert.equal(normalizePhone('00212712345678'), '+212712345678');
-  assert.equal(normalizePhone('612345678'), '+212612345678');
+  assert.equal(normalizePhone('0033612345678'), '+33612345678');
   assert.equal(normalizePhone('123'), '');
-  assert.equal(normalizePhone('0521234567'), '');
-  assert.equal(normalizePhone('+33123456789'), '');
+  assert.equal(normalizePhone('06 12 34 56 78'), '');
+  assert.equal(normalizePhone('212612345678'), '+212612345678');
 });
 
-test('validateMoroccanMobilePhone distinguishes missing, invalid, and valid numbers', () => {
-  assert.deepEqual(validateMoroccanMobilePhone(''), {
+test('validatePhone distinguishes missing, invalid, and valid numbers', () => {
+  assert.deepEqual(validatePhone(''), {
     normalized: '',
     isValid: false,
     reason: 'missing_phone'
   });
-  assert.deepEqual(validateMoroccanMobilePhone('0521234567'), {
+  assert.deepEqual(validatePhone('0521234567'), {
     normalized: '',
     isValid: false,
-    reason: 'invalid_moroccan_mobile_number'
+    reason: 'invalid_phone'
   });
-  assert.deepEqual(validateMoroccanMobilePhone('07 12 34 56 78'), {
-    normalized: '+212712345678',
+  assert.deepEqual(validatePhone('0033612345678'), {
+    normalized: '+33612345678',
     isValid: true,
     reason: ''
   });
@@ -2411,7 +2475,7 @@ test('GET /api/orders returns live workflow stages and merged fields', async () 
       billing: {
         first_name: 'Ali',
         last_name: 'One',
-        phone: '0611111111',
+        phone: '+212611111111',
         state: 'Casablanca',
         address_1: '1 Rue Atlas'
       },
@@ -2430,7 +2494,7 @@ test('GET /api/orders returns live workflow stages and merged fields', async () 
       billing: {
         first_name: 'Sara',
         last_name: 'Two',
-        phone: '0622222222',
+        phone: '+212622222222',
         state: 'Rabat',
         address_1: '2 Rue Atlas'
       },
@@ -2450,7 +2514,7 @@ test('GET /api/orders returns live workflow stages and merged fields', async () 
       billing: {
         first_name: 'Yassine',
         last_name: 'Three',
-        phone: '0633333333',
+        phone: '+212633333333',
         state: 'Marrakech',
         address_1: '3 Rue Atlas'
       },
@@ -2470,7 +2534,7 @@ test('GET /api/orders returns live workflow stages and merged fields', async () 
       billing: {
         first_name: 'Mina',
         last_name: 'Four',
-        phone: '0644444444',
+        phone: '+212644444444',
         state: 'Casablanca',
         address_1: '4 Rue Atlas'
       },
@@ -2499,7 +2563,7 @@ test('GET /api/orders returns live workflow stages and merged fields', async () 
       billing: {
         first_name: 'Omar',
         last_name: 'Five',
-        phone: '0655555555',
+        phone: '+212655555555',
         state: 'Rabat',
         address_1: '5 Rue Atlas'
       },
@@ -2606,7 +2670,7 @@ test('GET /api/orders?status=first_reminder_sent filters by exact stage', async 
       billing: {
         first_name: 'Ali',
         last_name: 'One',
-        phone: '0611111111',
+        phone: '+212611111111',
         state: 'Casablanca',
         address_1: '1 Rue Atlas'
       },
@@ -2625,7 +2689,7 @@ test('GET /api/orders?status=first_reminder_sent filters by exact stage', async 
       billing: {
         first_name: 'Sara',
         last_name: 'Two',
-        phone: '0622222222',
+        phone: '+212622222222',
         state: 'Rabat',
         address_1: '2 Rue Atlas'
       },
@@ -2668,7 +2732,7 @@ test('GET /api/orders/summary returns counts by exact stage', async () => {
       billing: {
         first_name: 'Ali',
         last_name: 'One',
-        phone: '0611111111',
+        phone: '+212611111111',
         state: 'Casablanca',
         address_1: '1 Rue Atlas'
       },
@@ -2687,7 +2751,7 @@ test('GET /api/orders/summary returns counts by exact stage', async () => {
       billing: {
         first_name: 'Sara',
         last_name: 'Two',
-        phone: '0622222222',
+        phone: '+212622222222',
         state: 'Rabat',
         address_1: '2 Rue Atlas'
       },
@@ -2706,7 +2770,7 @@ test('GET /api/orders/summary returns counts by exact stage', async () => {
       billing: {
         first_name: 'Yassine',
         last_name: 'Three',
-        phone: '0633333333',
+        phone: '+212633333333',
         state: 'Marrakech',
         address_1: '3 Rue Atlas'
       },
