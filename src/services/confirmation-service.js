@@ -217,26 +217,17 @@ export class ConfirmationService {
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
 
-    const feedbackFallbackMatch = await this.matchFeedbackOrder(message, { explicitToken: false });
-    if (feedbackFallbackMatch.kind === 'matched') {
-      return this.processFeedbackInboundMessage(message, feedbackFallbackMatch);
-    }
-    if (feedbackFallbackMatch.kind === 'ambiguous') {
-      this.appendInboundMessage({
-        message,
-        orderId: null,
-        storedKind: `feedback_${message.kind || 'unknown'}`
-      });
-      return {
-        ok: true,
-        ignored: true,
-        duplicate: false,
-        failed: false,
-        route: 'feedback',
-        eventStatus: 'feedback_match_ambiguous'
-      };
+    const selfTestOrders = await this.findActiveSelfTestOrdersByPhone(message.senderPhone);
+    if (selfTestOrders.length > 0) {
+      this.logger.log(
+        `[feedback] token missing phoneFallbackDisabled=true selfTestContext=true matches=${selfTestOrders.map((order) => order.id).join(',')} messageKey=${message.messageKey}`
+      );
+      return this.processFeedbackMatchResult(message, { kind: 'unmatched', source: 'missing_token' });
     }
 
+    this.logger.log(
+      `[feedback] token missing phoneFallbackDisabled=true selfTestContext=false messageKey=${message.messageKey}`
+    );
     return this.routeConfirmationInboundMessage(message);
   }
 
@@ -580,47 +571,7 @@ export class ConfirmationService {
       return { kind: 'unmatched', source: 'self_test_token' };
     }
 
-    if (!message.senderPhone) {
-      return { kind: 'unmatched', source: 'phone' };
-    }
-
-    const matches = await this.findFeedbackOrdersByPhone(message.senderPhone);
-    if (matches.testPhoneMatches.length === 1) {
-      const order = matches.testPhoneMatches[0];
-      const feedbackMeta = getFeedbackMeta(order);
-      this.logger.log(
-        `[feedback] self-test phone matched phone=${message.senderPhone} orderId=${String(order.id)} runId=${feedbackMeta.testRunId || ''} wooStatus=${String(order.status || '')} messageKey=${message.messageKey}`
-      );
-      return {
-        kind: 'matched',
-        orderId: String(order.id),
-        order,
-        source: 'test_phone'
-      };
-    }
-    if (matches.testPhoneMatches.length > 1) {
-      this.logger.warn(
-        `[feedback] ambiguous self-test phone phone=${message.senderPhone} matches=${matches.testPhoneMatches.map((order) => order.id).join(',')} messageKey=${message.messageKey}`
-      );
-      return { kind: 'ambiguous', source: 'test_phone' };
-    }
-
-    if (matches.orderPhoneMatches.length === 1) {
-      return {
-        kind: 'matched',
-        orderId: String(matches.orderPhoneMatches[0].id),
-        order: matches.orderPhoneMatches[0],
-        source: 'phone'
-      };
-    }
-    if (matches.orderPhoneMatches.length > 1) {
-      this.logger.warn(
-        `[feedback] ambiguous phone fallback phone=${message.senderPhone} matches=${matches.orderPhoneMatches.map((order) => order.id).join(',')}`
-      );
-      return { kind: 'ambiguous', source: 'phone' };
-    }
-
-    return { kind: 'unmatched', source: 'phone' };
+    return { kind: 'unmatched', source: 'phone_fallback_disabled' };
   }
 
   async processFeedbackInboundMessage(message, feedbackMatch) {
@@ -729,39 +680,27 @@ export class ConfirmationService {
       .sort(compareOrdersByRecency);
   }
 
-  async findFeedbackOrdersByPhone(phone) {
-    const selfTestOrders = await this.listOrdersForStatuses(FEEDBACK_SELF_TEST_MATCH_STATUSES);
-    const normalFeedbackOrders = await this.listOrdersForStatuses(FEEDBACK_MATCH_STATUSES);
-    const testPhoneMatches = [];
-    const orderPhoneMatches = [];
-
-    for (const order of selfTestOrders) {
-      const feedbackMeta = getFeedbackMeta(order);
-      if (feedbackMeta.state !== 'waiting_for_feedback' || !isFeedbackSelfTestOrder(order)) {
-        continue;
-      }
-
-      if (feedbackMeta.testPhone && phone === feedbackMeta.testPhone) {
-        testPhoneMatches.push(order);
-      }
+  async findActiveSelfTestOrdersByPhone(phone) {
+    if (!phone) {
+      return [];
     }
 
-    for (const order of normalFeedbackOrders) {
-      const normalizedOrder = normalizeWooOrder(order, this.messages);
-      const feedbackMeta = getFeedbackMeta(order);
-      if (feedbackMeta.state !== 'waiting_for_feedback') {
-        continue;
-      }
-
-      if (normalizedOrder.phone === phone) {
-        orderPhoneMatches.push(order);
-      }
+    const normalizedPhone = normalizePhone(phone);
+    if (!normalizedPhone) {
+      return [];
     }
 
-    return {
-      testPhoneMatches: testPhoneMatches.sort(compareOrdersByRecency),
-      orderPhoneMatches: orderPhoneMatches.sort(compareOrdersByRecency)
-    };
+    const orders = await this.listOrdersForStatuses(FEEDBACK_SELF_TEST_MATCH_STATUSES);
+    return orders
+      .filter((order) => {
+        const feedbackMeta = getFeedbackMeta(order);
+        return (
+          feedbackMeta.state === 'waiting_for_feedback' &&
+          isFeedbackSelfTestOrder(order) &&
+          feedbackMeta.testPhone === normalizedPhone
+        );
+      })
+      .sort(compareOrdersByRecency);
   }
 
   async runOrderFollowups({ now = new Date(), backfillOnly = false } = {}) {
