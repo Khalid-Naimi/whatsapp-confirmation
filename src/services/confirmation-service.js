@@ -49,6 +49,7 @@ const PROCESSING_STATUS = 'processing';
 const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled', 'completed', 'failed', 'refunded'];
 const REPLY_RECOVERY_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled'];
 const FEEDBACK_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed'];
+const FEEDBACK_SELF_TEST_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed', 'cancelled'];
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
 const AUTO_CANCEL_MS = 72 * 60 * 60 * 1000;
@@ -557,7 +558,7 @@ export class ConfirmationService {
       if (orders.length === 1) {
         const feedbackMeta = getFeedbackMeta(orders[0]);
         this.logger.log(
-          `[feedback] self-test token matched token=${parsedToken.value} orderId=${String(orders[0].id)} runId=${feedbackMeta.testRunId || ''} messageKey=${message.messageKey}`
+          `[feedback] self-test token matched token=${parsedToken.value} orderId=${String(orders[0].id)} runId=${feedbackMeta.testRunId || ''} wooStatus=${String(orders[0].status || '')} messageKey=${message.messageKey}`
         );
         return {
           kind: 'matched',
@@ -574,7 +575,7 @@ export class ConfirmationService {
       }
 
       this.logger.warn(
-        `[feedback] unmatched self-test token token=${parsedToken.value} messageKey=${message.messageKey}`
+        `[feedback] unmatched self-test token token=${parsedToken.value} searchedStatuses=${FEEDBACK_SELF_TEST_MATCH_STATUSES.join(',')} messageKey=${message.messageKey}`
       );
       return { kind: 'unmatched', source: 'self_test_token' };
     }
@@ -588,7 +589,7 @@ export class ConfirmationService {
       const order = matches.testPhoneMatches[0];
       const feedbackMeta = getFeedbackMeta(order);
       this.logger.log(
-        `[feedback] self-test phone matched phone=${message.senderPhone} orderId=${String(order.id)} runId=${feedbackMeta.testRunId || ''} messageKey=${message.messageKey}`
+        `[feedback] self-test phone matched phone=${message.senderPhone} orderId=${String(order.id)} runId=${feedbackMeta.testRunId || ''} wooStatus=${String(order.status || '')} messageKey=${message.messageKey}`
       );
       return {
         kind: 'matched',
@@ -714,30 +715,41 @@ export class ConfirmationService {
   }
 
   async findFeedbackOrdersByToken(token) {
-    const orders = await this.listOrdersForStatuses(FEEDBACK_MATCH_STATUSES);
+    const orders = await this.listOrdersForStatuses(FEEDBACK_SELF_TEST_MATCH_STATUSES);
     const normalizedToken = normalizeFeedbackTokenValue(token);
     return orders
       .filter((order) => {
         const feedbackMeta = getFeedbackMeta(order);
-        return feedbackMeta.state === 'waiting_for_feedback' && normalizeFeedbackTokenValue(feedbackMeta.token) === normalizedToken;
+        return (
+          feedbackMeta.state === 'waiting_for_feedback' &&
+          isFeedbackSelfTestOrder(order) &&
+          normalizeFeedbackTokenValue(feedbackMeta.token) === normalizedToken
+        );
       })
       .sort(compareOrdersByRecency);
   }
 
   async findFeedbackOrdersByPhone(phone) {
-    const orders = await this.listOrdersForStatuses(FEEDBACK_MATCH_STATUSES);
+    const selfTestOrders = await this.listOrdersForStatuses(FEEDBACK_SELF_TEST_MATCH_STATUSES);
+    const normalFeedbackOrders = await this.listOrdersForStatuses(FEEDBACK_MATCH_STATUSES);
     const testPhoneMatches = [];
     const orderPhoneMatches = [];
 
-    for (const order of orders) {
-      const normalizedOrder = normalizeWooOrder(order, this.messages);
+    for (const order of selfTestOrders) {
       const feedbackMeta = getFeedbackMeta(order);
-      if (feedbackMeta.state !== 'waiting_for_feedback') {
+      if (feedbackMeta.state !== 'waiting_for_feedback' || !isFeedbackSelfTestOrder(order)) {
         continue;
       }
 
-      if (feedbackMeta.testPhone && phone === feedbackMeta.testPhone && isSelfTestFeedbackMeta(feedbackMeta)) {
+      if (feedbackMeta.testPhone && phone === feedbackMeta.testPhone) {
         testPhoneMatches.push(order);
+      }
+    }
+
+    for (const order of normalFeedbackOrders) {
+      const normalizedOrder = normalizeWooOrder(order, this.messages);
+      const feedbackMeta = getFeedbackMeta(order);
+      if (feedbackMeta.state !== 'waiting_for_feedback') {
         continue;
       }
 

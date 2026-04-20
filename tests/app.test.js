@@ -1732,6 +1732,56 @@ test('self-test feedback token matches case-insensitively and preserves plugin m
   assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_test_run_id'), 'selftest-20260420T094452Z-y7zngl');
 });
 
+test('cancelled self-test feedback token still records reply and does not trigger confirmation flow', async () => {
+  const { app, listedOrders, wasenderCalls, wooNoteCalls } = createTestContext();
+  listedOrders.push({
+    id: 9110,
+    status: 'cancelled',
+    total: '0.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Cancelled',
+      last_name: 'SelfTest',
+      phone: '+212611119110',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Feedback Self Test', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      token: 'FDBK-TEST-20260420T122000Z-CANCELLED',
+      testPhone: '+491729031097',
+      testActive: 'yes',
+      isTest: 'yes',
+      testRunId: 'selftest-cancelled-9110'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-cancelled-self-test-token-9110'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '491729031097',
+        fromMe: false,
+        id: 'feedback-cancelled-self-test-token-9110-message'
+      },
+      messageBody: 'FDBK-TEST-20260420T122000Z-CANCELLED all good'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.feedback, 1);
+  assert.equal(wasenderCalls.length, 0);
+  const order = listedOrders.find((item) => String(item.id) === '9110');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_text'), 'FDBK-TEST-20260420T122000Z-CANCELLED all good');
+  assert.equal(wooNoteCalls.some((note) => note.orderId === '9110' && /\[text\]/.test(note.note)), true);
+});
+
 test('unmatched self-test token stays in feedback flow and does not trigger confirmation replies', async () => {
   const { app, store, wasenderCalls } = createTestContext();
   const pendingOrder = {
@@ -1942,6 +1992,54 @@ test('media-only self-test reply matches by active test phone', async () => {
   const order = listedOrders.find((item) => String(item.id) === '9031');
   assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
   assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_media_url'), 'https://cdn.example.com/9031.jpg');
+});
+
+test('cancelled self-test phone fallback records reply without clarification message', async () => {
+  const { app, listedOrders, wasenderCalls } = createTestContext();
+  listedOrders.push({
+    id: 9032,
+    status: 'cancelled',
+    total: '0.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Cancelled',
+      last_name: 'PhoneFallback',
+      phone: '+212611119032',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Feedback Phone Fallback', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      token: 'FDBK-TEST-9032',
+      testPhone: '+491729031097',
+      testActive: 'yes',
+      testRunId: 'selftest-9032'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-cancelled-self-test-phone-9032'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '491729031097',
+        fromMe: false,
+        id: 'feedback-cancelled-self-test-phone-9032-message'
+      },
+      messageBody: 'not 1 or 2'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.feedback, 1);
+  assert.equal(wasenderCalls.length, 0);
+  const order = listedOrders.find((item) => String(item.id) === '9032');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_text'), 'not 1 or 2');
 });
 
 for (const scenario of [
@@ -2404,6 +2502,78 @@ test('self-test phone feedback takes priority over confirmation replies for the 
   assert.equal(wasenderCalls.length, 1);
   assert.equal(store.getOrder('913').confirmationState, 'pending_confirmation');
   assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '914').meta_data, 'rhymat_feedback_state'), 'reply_received');
+});
+
+test('cancelled self-test feedback still takes priority over real pending confirmation orders', async () => {
+  const { app, store, listedOrders, wasenderCalls } = createTestContext();
+  const confirmationOrder = {
+    id: 915,
+    status: 'pending',
+    total: '110.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Confirm',
+      last_name: 'Second',
+      phone: '+491729031097',
+      state: 'Berlin'
+    },
+    line_items: [{ name: 'Produit Confirm Cancelled Priority', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(confirmationOrder),
+      'x-wc-webhook-delivery-id': 'delivery-self-test-priority-915'
+    },
+    payload: confirmationOrder
+  });
+
+  listedOrders.push({
+    id: 916,
+    status: 'cancelled',
+    total: '0.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Feedback',
+      last_name: 'CancelledPriority',
+      phone: '+212611119160',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Feedback Cancelled Priority', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      testPhone: '+491729031097',
+      testActive: 'yes',
+      testRunId: 'selftest-916',
+      token: 'FDBK-TEST-916'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-cancelled-self-test-priority-915'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '491729031097',
+        fromMe: false,
+        id: 'feedback-cancelled-self-test-priority-915-message'
+      },
+      messageBody: 'not 1 or 2'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.feedback, 1);
+  assert.equal(result.body.confirmation, 0);
+  assert.equal(wasenderCalls.length, 1);
+  assert.equal(store.getOrder('915').confirmationState, 'pending_confirmation');
+  assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '916').meta_data, 'rhymat_feedback_state'), 'reply_received');
 });
 
 test('task endpoint rejects invalid task secret', async () => {
