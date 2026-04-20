@@ -427,6 +427,51 @@ test('duplicate WooCommerce webhook does not send twice', async () => {
   assert.equal(wasenderCalls.length, 1);
 });
 
+test('feedback self-test Woo order skips confirmation send and records skip status', async () => {
+  const { app, store, wasenderCalls, wooOrderUpdates, wooNoteCalls } = createTestContext();
+  const payload = {
+    id: 10201,
+    status: 'pending',
+    total: '0.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Self',
+      last_name: 'Test',
+      phone: '+491729031097',
+      state: 'Berlin'
+    },
+    line_items: [{ name: 'Feedback Self Test', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      token: 'FDBK-TEST-20260420T102451Z-BTIAIB',
+      testPhone: '+491729031097',
+      testActive: 'yes',
+      isTest: 'yes',
+      testRunId: 'selftest-20260420T102451Z-btiaib',
+      requestedAt: '2026-04-20T10:25:23Z',
+      sentAt: '2026-04-20T10:25:23Z'
+    })
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(payload),
+      'x-wc-webhook-delivery-id': 'delivery-self-test-skip-10201'
+    },
+    payload
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(result.body, { ok: true, skipped: true, reason: 'feedback_self_test' });
+  assert.equal(wasenderCalls.length, 0);
+  assert.equal(wooOrderUpdates.length, 0);
+  assert.equal(wooNoteCalls.length, 0);
+  assert.equal(store.read().events.at(-1).status, 'feedback_self_test_skipped_confirmation');
+  assert.equal(store.getOrder('10201'), null);
+});
+
 test('invalid or non-WhatsApp number auto-cancels the order and sends email', async () => {
   const { app, store, mailCalls, wooStatusCalls, wooNoteCalls, confirmationService, logCalls } = createTestContext();
   const payload = {
@@ -2420,6 +2465,45 @@ test('backfill sends confirmation only for processing orders without confirmatio
   assert.equal(wasenderCalls.length, 1);
   assert.match(wasenderCalls[0].message, /Numero dyal La commande: 201/);
   assert.equal(wooNoteCalls[0].note, 'WhatsApp confirmation backfill sent.');
+});
+
+test('backfill skips feedback self-test orders without sending confirmation', async () => {
+  const { confirmationService, wasenderCalls, listedOrders, wooNoteCalls } = createTestContext();
+  listedOrders.push({
+    id: 203,
+    status: 'processing',
+    total: '0.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Backfill',
+      last_name: 'SelfTest',
+      phone: '+491729031097',
+      state: 'Berlin',
+      address_1: '3 Rue Backfill'
+    },
+    line_items: [{ name: 'Feedback Self Test', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      token: 'FDBK-TEST-20260420T102451Z-BTIAIB',
+      testPhone: '+491729031097',
+      testActive: 'yes',
+      isTest: 'yes',
+      testRunId: 'selftest-20260420T102451Z-btiaib',
+      requestedAt: '2026-04-20T10:25:23Z',
+      sentAt: '2026-04-20T10:25:23Z'
+    })
+  });
+
+  const summary = await confirmationService.runOrderFollowups({
+    backfillOnly: true,
+    now: new Date('2026-04-20T12:00:00.000Z')
+  });
+
+  assert.equal(summary.backfilled, 0);
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.errors, 0);
+  assert.equal(wasenderCalls.length, 0);
+  assert.equal(wooNoteCalls.length, 0);
 });
 
 test('hourly maintenance sends first and second reminders then auto-cancels after 72h', async () => {

@@ -86,6 +86,18 @@ export class ConfirmationService {
       return { status: 200, body: { ok: true, duplicate: true } };
     }
 
+    if (isFeedbackSelfTestOrder(payload)) {
+      const feedbackMeta = getFeedbackMeta(payload);
+      this.logger.log(
+        `[confirmation] skipped self-test confirmation send orderId=${normalizedOrder.orderId} testPhone=${feedbackMeta.testPhone || ''} token=${feedbackMeta.token || ''} runId=${feedbackMeta.testRunId || ''}`
+      );
+      this.store.recordEvent('woocommerce', eventKey, payload, 'feedback_self_test_skipped_confirmation');
+      return {
+        status: 200,
+        body: { ok: true, skipped: true, reason: 'feedback_self_test' }
+      };
+    }
+
     const result = await this.sendInitialConfirmation(payload, {
       note: 'WhatsApp confirmation sent to customer.'
     });
@@ -834,6 +846,15 @@ export class ConfirmationService {
           }
 
           if (!workflow.confirmationSentAt) {
+            if (isFeedbackSelfTestOrder(order)) {
+              const feedbackMeta = getFeedbackMeta(order);
+              this.logger.log(
+                `[confirmation] skipped self-test confirmation backfill orderId=${String(order.id)} testPhone=${feedbackMeta.testPhone || ''} token=${feedbackMeta.token || ''} runId=${feedbackMeta.testRunId || ''}`
+              );
+              summary.skipped += 1;
+              continue;
+            }
+
             const result = await this.sendInitialConfirmation(order, {
               note: 'WhatsApp confirmation backfill sent.',
               now
@@ -2250,6 +2271,23 @@ function parseMetaBoolean(value) {
 
 function isSelfTestFeedbackMeta(feedbackMeta) {
   return feedbackMeta.testActive || feedbackMeta.isTest;
+}
+
+function isFeedbackSelfTestOrder(order) {
+  const feedbackMeta = getFeedbackMeta(order);
+  if (feedbackMeta.state !== 'waiting_for_feedback') {
+    return false;
+  }
+
+  if (!isSelfTestFeedbackMeta(feedbackMeta)) {
+    return false;
+  }
+
+  return Boolean(
+    feedbackMeta.testPhone ||
+    classifyFeedbackToken(feedbackMeta.token)?.type === 'self_test' ||
+    feedbackMeta.testRunId
+  );
 }
 
 function mergeMetaUpdates(...metaSets) {
