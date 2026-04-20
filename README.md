@@ -74,8 +74,9 @@ Backend-only Node.js service that:
   - `rhymat_feedback_payload_json`
 - `POST /webhooks/wasender` now supports batch inbound payloads and routes each inbound message independently:
   - explicit `FDBK-{orderId}` token -> feedback
-  - unique `waiting_for_feedback` phone match -> feedback
-  - active pending confirmation candidate -> confirmation
+  - unique non-self-test `waiting_for_feedback` phone match -> feedback
+  - bare `1` / `2` with an active pending confirmation candidate -> confirmation
+  - self-test feedback remains token-only
   - everything else is logged/skipped as unmatched inbound
 - Verified Wasender webhook requests return `200 OK` even if some inbound messages are skipped or feedback persistence fails.
 - Wasender payload parsing is defensive. The receiver accepts `data.messages` as an object or array and logs reduced key summaries for unknown inbound payload shapes instead of failing the whole request.

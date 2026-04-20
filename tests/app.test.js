@@ -1678,6 +1678,52 @@ test('text feedback token updates only feedback meta', async () => {
   assert.ok(wooOrderUpdates.some((update) => update.orderId === '901' && !update.fields.status));
 });
 
+test('tokenless text feedback matches a unique waiting-for-feedback phone', async () => {
+  const { app, listedOrders, wooOrderUpdates, wooNoteCalls } = createTestContext();
+  listedOrders.push({
+    id: 9011,
+    status: 'completed',
+    total: '99.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Phone',
+      last_name: 'Fallback',
+      phone: '+212611111911',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Phone Fallback', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-text-phone-9011'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '212611111911',
+        fromMe: false,
+        id: 'feedback-text-phone-9011-message'
+      },
+      messageBody: 'great service'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.feedback, 1);
+  const order = listedOrders.find((item) => String(item.id) === '9011');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_text'), 'great service');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_reply_count'), 1);
+  assert.ok(wooOrderUpdates.some((update) => update.orderId === '9011' && !update.fields.status));
+  assert.ok(wooNoteCalls.some((note) => note.orderId === '9011' && /\[text\]/.test(note.note)));
+});
+
 test('self-test feedback token matches case-insensitively and preserves plugin meta', async () => {
   const { app, listedOrders, wasenderCalls } = createTestContext();
   listedOrders.push({
@@ -1885,7 +1931,7 @@ test('image feedback with caption stores caption media url and mime type', async
   assert.ok(wooNoteCalls.some((note) => note.orderId === '902' && /\[image\]/.test(note.note)));
 });
 
-test('image feedback without token stays unmatched and is not written to Woo', async () => {
+test('image feedback without token matches a unique waiting-for-feedback phone', async () => {
   const { app, listedOrders, wooNoteCalls } = createTestContext();
   listedOrders.push({
     id: 903,
@@ -1931,10 +1977,12 @@ test('image feedback without token stays unmatched and is not written to Woo', a
   });
 
   assert.equal(result.statusCode, 200);
-  assert.equal(result.body.ignored, 1);
+  assert.equal(result.body.feedback, 1);
   const order = listedOrders.find((item) => String(item.id) === '903');
-  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'waiting_for_feedback');
-  assert.equal(wooNoteCalls.length, 0);
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_media_url'), 'https://cdn.example.com/903.jpg');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_mime_type'), 'image/jpeg');
+  assert.ok(wooNoteCalls.some((note) => note.orderId === '903' && /\[image\]/.test(note.note)));
 });
 
 test('media-only self-test reply without token stays unmatched', async () => {
@@ -1994,6 +2042,90 @@ test('media-only self-test reply without token stays unmatched', async () => {
   assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'waiting_for_feedback');
 });
 
+for (const scenario of [
+  {
+    name: 'audio',
+    orderId: 9033,
+    phone: '+212611119033',
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '212611119033',
+            fromMe: false,
+            id: 'feedback-phone-audio-9033-message'
+          },
+          message: {
+            audioMessage: {
+              mimetype: 'audio/ogg',
+              url: 'https://cdn.example.com/9033.ogg'
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    name: 'document',
+    orderId: 9034,
+    phone: '+212611119034',
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '212611119034',
+            fromMe: false,
+            id: 'feedback-phone-document-9034-message'
+          },
+          message: {
+            documentMessage: {
+              mimetype: 'application/pdf',
+              fileName: 'feedback-9034.pdf'
+            }
+          }
+        }
+      }
+    }
+  }
+]) {
+  test(`tokenless ${scenario.name} feedback matches a unique waiting-for-feedback phone`, async () => {
+    const { app, listedOrders, wooNoteCalls } = createTestContext();
+    listedOrders.push({
+      id: scenario.orderId,
+      status: 'completed',
+      total: '111.00',
+      currency: 'MAD',
+      billing: {
+        first_name: 'Media',
+        last_name: 'PhoneFallback',
+        phone: scenario.phone,
+        state: 'Casablanca'
+      },
+      line_items: [{ name: `Produit ${scenario.name}`, quantity: 1 }],
+      meta_data: buildFeedbackMeta({
+        state: 'waiting_for_feedback'
+      })
+    });
+
+    const result = await dispatch(app, {
+      method: 'POST',
+      url: '/webhooks/wasender',
+      headers: {
+        'x-wasender-signature': signWasenderPlain(),
+        'x-event-id': `feedback-phone-${scenario.name}-${scenario.orderId}`
+      },
+      payload: scenario.payload
+    });
+
+    assert.equal(result.statusCode, 200);
+    assert.equal(result.body.feedback, 1);
+    const order = listedOrders.find((item) => String(item.id) === String(scenario.orderId));
+    assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+    assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_kind'), scenario.name);
+    assert.ok(wooNoteCalls.some((note) => note.orderId === String(scenario.orderId) && new RegExp(`\\[${scenario.name}\\]`).test(note.note)));
+  });
+}
+
 test('tokenless self-test text reply stays unmatched and does not trigger clarification message', async () => {
   const { app, listedOrders, wasenderCalls } = createTestContext();
   listedOrders.push({
@@ -2039,6 +2171,66 @@ test('tokenless self-test text reply stays unmatched and does not trigger clarif
   assert.equal(wasenderCalls.length, 0);
   const order = listedOrders.find((item) => String(item.id) === '9032');
   assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'waiting_for_feedback');
+});
+
+test('tokenless feedback with multiple eligible phone matches is marked ambiguous and does not write Woo meta', async () => {
+  const { app, listedOrders, store, wooNoteCalls } = createTestContext();
+  listedOrders.push({
+    id: 9035,
+    status: 'completed',
+    total: '80.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Ambiguous',
+      last_name: 'One',
+      phone: '+212611119035',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Ambiguous One', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+  listedOrders.push({
+    id: 9036,
+    status: 'completed',
+    total: '81.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Ambiguous',
+      last_name: 'Two',
+      phone: '+212611119035',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Ambiguous Two', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-phone-ambiguous-9035'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '212611119035',
+        fromMe: false,
+        id: 'feedback-phone-ambiguous-9035-message'
+      },
+      messageBody: 'looks good'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ignored, 1);
+  assert.equal(store.read().events.at(-1).status, 'feedback_match_ambiguous');
+  assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '9035').meta_data, 'rhymat_feedback_state'), 'waiting_for_feedback');
+  assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '9036').meta_data, 'rhymat_feedback_state'), 'waiting_for_feedback');
+  assert.equal(wooNoteCalls.length, 0);
 });
 
 for (const scenario of [
@@ -2441,11 +2633,11 @@ test('tokenless self-test feedback no longer takes priority over confirmation re
   });
 
   assert.equal(result.statusCode, 200);
-  assert.equal(result.body.ignored, 1);
-  assert.equal(result.body.confirmation, 0);
-  assert.equal(store.read().events.at(-1).status, 'feedback_unmatched');
-  assert.equal(wasenderCalls.length, 1);
-  assert.equal(store.getOrder('913').confirmationState, 'pending_confirmation');
+  assert.equal(result.body.processed, 1);
+  assert.equal(result.body.confirmation, 1);
+  assert.equal(store.read().events.at(-1).status, 'confirmed');
+  assert.equal(wasenderCalls.length, 4);
+  assert.equal(store.getOrder('913').confirmationState, 'confirmed');
   assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '914').meta_data, 'rhymat_feedback_state'), 'waiting_for_feedback');
 });
 
@@ -2520,6 +2712,144 @@ test('tokenless cancelled self-test feedback no longer takes priority over real 
   assert.equal(wasenderCalls.length, 1);
   assert.equal(store.getOrder('915').confirmationState, 'pending_confirmation');
   assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '916').meta_data, 'rhymat_feedback_state'), 'waiting_for_feedback');
+});
+
+test('plain confirmation reply wins over tokenless real feedback phone fallback', async () => {
+  const { app, store, listedOrders, wasenderCalls } = createTestContext();
+  const confirmationOrder = {
+    id: 917,
+    status: 'pending',
+    total: '110.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Confirm',
+      last_name: 'Wins',
+      phone: '+212611119170',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Confirm Wins', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(confirmationOrder),
+      'x-wc-webhook-delivery-id': 'delivery-feedback-priority-917'
+    },
+    payload: confirmationOrder
+  });
+
+  listedOrders.push({
+    id: 918,
+    status: 'completed',
+    total: '120.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Feedback',
+      last_name: 'Fallback',
+      phone: '+212611119170',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Feedback Fallback', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-priority-917'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '212611119170',
+        fromMe: false,
+        id: 'feedback-priority-917-message'
+      },
+      messageBody: '1'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.confirmation, 1);
+  assert.equal(result.body.feedback, 0);
+  assert.equal(store.getOrder('917').confirmationState, 'confirmed');
+  assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '918').meta_data, 'rhymat_feedback_state'), 'waiting_for_feedback');
+  assert.equal(wasenderCalls.length, 4);
+});
+
+test('explicit feedback token wins over pending confirmation order for the same sender', async () => {
+  const { app, store, listedOrders, wasenderCalls, wooNoteCalls } = createTestContext();
+  const confirmationOrder = {
+    id: 919,
+    status: 'pending',
+    total: '110.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Pending',
+      last_name: 'Token',
+      phone: '+212611119190',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Pending Token', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(confirmationOrder),
+      'x-wc-webhook-delivery-id': 'delivery-feedback-token-919'
+    },
+    payload: confirmationOrder
+  });
+
+  listedOrders.push({
+    id: 920,
+    status: 'completed',
+    total: '121.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Feedback',
+      last_name: 'Token',
+      phone: '+212611119190',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Feedback Token', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-token-920'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '212611119190',
+        fromMe: false,
+        id: 'feedback-token-920-message'
+      },
+      messageBody: 'FDBK-920 packed great'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.feedback, 1);
+  assert.equal(result.body.confirmation, 0);
+  assert.equal(store.getOrder('919').confirmationState, 'pending_confirmation');
+  assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '920').meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '920').meta_data, 'rhymat_feedback_last_text'), 'FDBK-920 packed great');
+  assert.equal(wasenderCalls.length, 1);
+  assert.ok(wooNoteCalls.some((note) => note.orderId === '920' && /\[text\]/.test(note.note)));
 });
 
 test('task endpoint rejects invalid task secret', async () => {

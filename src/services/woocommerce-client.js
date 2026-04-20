@@ -137,12 +137,15 @@ export class WooCommerceClient {
 
         const data = await parseJsonSafe(response);
         if (response.ok) {
-          const orderStatus = data?.status ? ` orderStatus=${data.status}` : ` responseBody=${safeJson(data)}`;
-          this.logger.log(`[woo] success method=${method} path=${path} status=${response.status}${orderStatus}`);
+          this.logger.log(
+            `[woo] success method=${method} path=${path} status=${response.status}${summarizeWooSuccessResponse(data)}`
+          );
           return data;
         }
 
-        this.logger.warn(`[woo] failure method=${method} path=${path} status=${response.status} body=${safeJson(data)}`);
+        this.logger.warn(
+          `[woo] failure method=${method} path=${path} status=${response.status} body=${truncateForLog(safeJson(data))}`
+        );
         lastError = new Error(`WooCommerce request failed with ${response.status}: ${JSON.stringify(data)}`);
 
         if (shouldRetryWithQueryAuth({ method, status: response.status, authMode: strategy.mode })) {
@@ -240,4 +243,60 @@ function safeJson(value) {
   } catch {
     return '"[unserializable]"';
   }
+}
+
+function summarizeWooSuccessResponse(data) {
+  if (data === null || data === undefined) {
+    return ' response=empty';
+  }
+
+  if (Array.isArray(data)) {
+    const firstId = extractOrderId(data[0]);
+    const lastId = extractOrderId(data.at(-1));
+    const parts = [`count=${data.length}`];
+    if (firstId) {
+      parts.push(`firstOrderId=${firstId}`);
+    }
+    if (lastId && lastId !== firstId) {
+      parts.push(`lastOrderId=${lastId}`);
+    }
+    return ` ${parts.join(' ')}`;
+  }
+
+  if (typeof data === 'object') {
+    const orderId = extractOrderId(data);
+    const orderStatus = typeof data.status === 'string' ? data.status : '';
+    if (orderId || orderStatus) {
+      const parts = [];
+      if (orderId) {
+        parts.push(`orderId=${orderId}`);
+      }
+      if (orderStatus) {
+        parts.push(`orderStatus=${orderStatus}`);
+      }
+      return ` ${parts.join(' ')}`;
+    }
+
+    const keys = Object.keys(data).sort();
+    return keys.length ? ` keys=${keys.join(',')}` : ' response=empty';
+  }
+
+  return ` value=${String(data)}`;
+}
+
+function extractOrderId(value) {
+  if (!value || typeof value !== 'object' || !('id' in value)) {
+    return '';
+  }
+
+  return String(value.id || '').trim();
+}
+
+function truncateForLog(value, maxLength = 500) {
+  const text = String(value || '');
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength - 3)}...`;
 }
