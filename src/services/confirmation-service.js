@@ -35,6 +35,15 @@ const FEEDBACK_META_KEYS = {
   lastMimeType: 'rhymat_feedback_last_mime_type',
   payloadJson: 'rhymat_feedback_payload_json'
 };
+const FEEDBACK_TEST_META_KEYS = {
+  token: 'rhymat_feedback_token',
+  testPhone: 'rhymat_feedback_test_phone',
+  testActive: 'rhymat_feedback_test_active',
+  isTest: 'rhymat_feedback_is_test',
+  testRunId: 'rhymat_feedback_test_run_id',
+  requestedAt: 'rhymat_feedback_requested_at',
+  sentAt: 'rhymat_feedback_sent_at'
+};
 
 const PROCESSING_STATUS = 'processing';
 const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled', 'completed', 'failed', 'refunded'];
@@ -185,7 +194,13 @@ export class ConfirmationService {
 
     const feedbackToken = extractFeedbackToken(message.textBody, message.captionText);
     if (feedbackToken) {
-      const feedbackMatch = await this.matchFeedbackOrder(message, { orderId: feedbackToken, explicitToken: true });
+      this.logger.log(
+        `[feedback] token detected type=${feedbackToken.type} token=${feedbackToken.value} messageKey=${message.messageKey}`
+      );
+      const feedbackMatch = await this.matchFeedbackOrder(message, { token: feedbackToken.value, explicitToken: true });
+      this.logger.log(
+        `[feedback] token route isolated type=${feedbackToken.type} token=${feedbackToken.value} outcome=${feedbackMatch.kind} messageKey=${message.messageKey}`
+      );
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
 
@@ -507,35 +522,92 @@ export class ConfirmationService {
     });
   }
 
-  async matchFeedbackOrder(message, { orderId = '', explicitToken = false } = {}) {
+  async matchFeedbackOrder(message, { token = '', explicitToken = false } = {}) {
     if (explicitToken) {
-      try {
-        const order = await this.wooClient.getOrder(orderId);
-        return { kind: 'matched', orderId: String(orderId), order };
-      } catch (error) {
-        this.logger.warn(`[feedback] unable to resolve token orderId=${orderId} messageKey=${message.messageKey} error=${error.message}`);
-        return { kind: 'unmatched' };
+      const parsedToken = classifyFeedbackToken(token);
+      if (!parsedToken) {
+        return { kind: 'unmatched', source: 'token' };
       }
+
+      if (parsedToken.type === 'numeric') {
+        try {
+          const order = await this.wooClient.getOrder(parsedToken.orderId);
+          return { kind: 'matched', orderId: String(parsedToken.orderId), order, source: 'numeric_token' };
+        } catch (error) {
+          this.logger.warn(
+            `[feedback] unable to resolve numeric token orderId=${parsedToken.orderId} messageKey=${message.messageKey} error=${error.message}`
+          );
+          return { kind: 'unmatched', source: 'numeric_token' };
+        }
+      }
+
+      const orders = await this.findFeedbackOrdersByToken(parsedToken.value);
+      if (orders.length === 1) {
+        const feedbackMeta = getFeedbackMeta(orders[0]);
+        this.logger.log(
+          `[feedback] self-test token matched token=${parsedToken.value} orderId=${String(orders[0].id)} runId=${feedbackMeta.testRunId || ''} messageKey=${message.messageKey}`
+        );
+        return {
+          kind: 'matched',
+          orderId: String(orders[0].id),
+          order: orders[0],
+          source: 'self_test_token'
+        };
+      }
+      if (orders.length > 1) {
+        this.logger.warn(
+          `[feedback] ambiguous self-test token token=${parsedToken.value} matches=${orders.map((order) => order.id).join(',')} messageKey=${message.messageKey}`
+        );
+        return { kind: 'ambiguous', source: 'self_test_token' };
+      }
+
+      this.logger.warn(
+        `[feedback] unmatched self-test token token=${parsedToken.value} messageKey=${message.messageKey}`
+      );
+      return { kind: 'unmatched', source: 'self_test_token' };
     }
 
     if (!message.senderPhone) {
-      return { kind: 'unmatched' };
+      return { kind: 'unmatched', source: 'phone' };
     }
 
-    const orders = await this.findFeedbackOrdersByPhone(message.senderPhone);
-    if (orders.length === 1) {
+    const matches = await this.findFeedbackOrdersByPhone(message.senderPhone);
+    if (matches.testPhoneMatches.length === 1) {
+      const order = matches.testPhoneMatches[0];
+      const feedbackMeta = getFeedbackMeta(order);
+      this.logger.log(
+        `[feedback] self-test phone matched phone=${message.senderPhone} orderId=${String(order.id)} runId=${feedbackMeta.testRunId || ''} messageKey=${message.messageKey}`
+      );
       return {
         kind: 'matched',
-        orderId: String(orders[0].id),
-        order: orders[0]
+        orderId: String(order.id),
+        order,
+        source: 'test_phone'
       };
     }
-    if (orders.length > 1) {
-      this.logger.warn(`[feedback] ambiguous phone fallback phone=${message.senderPhone} matches=${orders.map((order) => order.id).join(',')}`);
-      return { kind: 'ambiguous' };
+    if (matches.testPhoneMatches.length > 1) {
+      this.logger.warn(
+        `[feedback] ambiguous self-test phone phone=${message.senderPhone} matches=${matches.testPhoneMatches.map((order) => order.id).join(',')} messageKey=${message.messageKey}`
+      );
+      return { kind: 'ambiguous', source: 'test_phone' };
     }
 
-    return { kind: 'unmatched' };
+    if (matches.orderPhoneMatches.length === 1) {
+      return {
+        kind: 'matched',
+        orderId: String(matches.orderPhoneMatches[0].id),
+        order: matches.orderPhoneMatches[0],
+        source: 'phone'
+      };
+    }
+    if (matches.orderPhoneMatches.length > 1) {
+      this.logger.warn(
+        `[feedback] ambiguous phone fallback phone=${message.senderPhone} matches=${matches.orderPhoneMatches.map((order) => order.id).join(',')}`
+      );
+      return { kind: 'ambiguous', source: 'phone' };
+    }
+
+    return { kind: 'unmatched', source: 'phone' };
   }
 
   async processFeedbackInboundMessage(message, feedbackMatch) {
@@ -629,15 +701,43 @@ export class ConfirmationService {
     };
   }
 
-  async findFeedbackOrdersByPhone(phone) {
+  async findFeedbackOrdersByToken(token) {
     const orders = await this.listOrdersForStatuses(FEEDBACK_MATCH_STATUSES);
+    const normalizedToken = normalizeFeedbackTokenValue(token);
     return orders
       .filter((order) => {
-        const normalizedOrder = normalizeWooOrder(order, this.messages);
         const feedbackMeta = getFeedbackMeta(order);
-        return normalizedOrder.phone === phone && feedbackMeta.state === 'waiting_for_feedback';
+        return feedbackMeta.state === 'waiting_for_feedback' && normalizeFeedbackTokenValue(feedbackMeta.token) === normalizedToken;
       })
       .sort(compareOrdersByRecency);
+  }
+
+  async findFeedbackOrdersByPhone(phone) {
+    const orders = await this.listOrdersForStatuses(FEEDBACK_MATCH_STATUSES);
+    const testPhoneMatches = [];
+    const orderPhoneMatches = [];
+
+    for (const order of orders) {
+      const normalizedOrder = normalizeWooOrder(order, this.messages);
+      const feedbackMeta = getFeedbackMeta(order);
+      if (feedbackMeta.state !== 'waiting_for_feedback') {
+        continue;
+      }
+
+      if (feedbackMeta.testPhone && phone === feedbackMeta.testPhone && isSelfTestFeedbackMeta(feedbackMeta)) {
+        testPhoneMatches.push(order);
+        continue;
+      }
+
+      if (normalizedOrder.phone === phone) {
+        orderPhoneMatches.push(order);
+      }
+    }
+
+    return {
+      testPhoneMatches: testPhoneMatches.sort(compareOrdersByRecency),
+      orderPhoneMatches: orderPhoneMatches.sort(compareOrdersByRecency)
+    };
   }
 
   async runOrderFollowups({ now = new Date(), backfillOnly = false } = {}) {
@@ -1833,8 +1933,18 @@ function isConfirmationMessageKind(kind) {
 
 function extractFeedbackToken(textBody, captionText) {
   const haystack = `${String(textBody || '')}\n${String(captionText || '')}`;
-  const match = haystack.match(/\bFDBK-(\d+)\b/iu);
-  return match ? match[1] : '';
+  const match = haystack.match(/\b(FDBK-(?:\d+|TEST-[A-Z0-9-]+))\b/iu);
+  if (!match) {
+    return null;
+  }
+
+  const value = match[1];
+  return {
+    value,
+    type: normalizeFeedbackTokenValue(value).startsWith('FDBK-TEST-')
+      ? 'self_test'
+      : 'numeric'
+  };
 }
 
 function buildReducedPayloadSnapshot(message) {
@@ -2029,7 +2139,14 @@ function getFeedbackMeta(order) {
     lastCaption: String(metaValue(FEEDBACK_META_KEYS.lastCaption) || ''),
     lastMediaUrl: String(metaValue(FEEDBACK_META_KEYS.lastMediaUrl) || ''),
     lastMimeType: String(metaValue(FEEDBACK_META_KEYS.lastMimeType) || ''),
-    payloadJson: String(metaValue(FEEDBACK_META_KEYS.payloadJson) || '')
+    payloadJson: String(metaValue(FEEDBACK_META_KEYS.payloadJson) || ''),
+    token: String(metaValue(FEEDBACK_TEST_META_KEYS.token) || ''),
+    testPhone: normalizePhone(metaValue(FEEDBACK_TEST_META_KEYS.testPhone) || ''),
+    testActive: parseMetaBoolean(metaValue(FEEDBACK_TEST_META_KEYS.testActive)),
+    isTest: parseMetaBoolean(metaValue(FEEDBACK_TEST_META_KEYS.isTest)),
+    testRunId: String(metaValue(FEEDBACK_TEST_META_KEYS.testRunId) || ''),
+    requestedAt: String(metaValue(FEEDBACK_TEST_META_KEYS.requestedAt) || ''),
+    sentAt: String(metaValue(FEEDBACK_TEST_META_KEYS.sentAt) || '')
   };
 }
 
@@ -2101,6 +2218,38 @@ function buildFeedbackMetaUpdate(order, values) {
         ? { id: existing.id, key, value }
         : { key, value };
     });
+}
+
+function normalizeFeedbackTokenValue(token) {
+  return String(token || '').trim().toUpperCase();
+}
+
+function classifyFeedbackToken(token) {
+  const normalized = normalizeFeedbackTokenValue(token);
+  if (/^FDBK-\d+$/u.test(normalized)) {
+    return {
+      value: normalized,
+      type: 'numeric',
+      orderId: normalized.slice('FDBK-'.length)
+    };
+  }
+
+  if (/^FDBK-TEST-[A-Z0-9-]+$/u.test(normalized)) {
+    return {
+      value: normalized,
+      type: 'self_test'
+    };
+  }
+
+  return null;
+}
+
+function parseMetaBoolean(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
+function isSelfTestFeedbackMeta(feedbackMeta) {
+  return feedbackMeta.testActive || feedbackMeta.isTest;
 }
 
 function mergeMetaUpdates(...metaSets) {

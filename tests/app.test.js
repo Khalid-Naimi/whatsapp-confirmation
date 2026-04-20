@@ -321,7 +321,14 @@ function buildFeedbackMeta({
   lastCaption = '',
   lastMediaUrl = '',
   lastMimeType = '',
-  payloadJson = ''
+  payloadJson = '',
+  token = '',
+  testPhone = '',
+  testActive = '',
+  isTest = '',
+  testRunId = '',
+  requestedAt = '',
+  sentAt = ''
 } = {}) {
   return [
     { key: 'rhymat_feedback_state', value: state },
@@ -334,7 +341,14 @@ function buildFeedbackMeta({
     { key: 'rhymat_feedback_last_caption', value: lastCaption },
     { key: 'rhymat_feedback_last_media_url', value: lastMediaUrl },
     { key: 'rhymat_feedback_last_mime_type', value: lastMimeType },
-    { key: 'rhymat_feedback_payload_json', value: payloadJson }
+    { key: 'rhymat_feedback_payload_json', value: payloadJson },
+    { key: 'rhymat_feedback_token', value: token },
+    { key: 'rhymat_feedback_test_phone', value: testPhone },
+    { key: 'rhymat_feedback_test_active', value: testActive },
+    { key: 'rhymat_feedback_is_test', value: isTest },
+    { key: 'rhymat_feedback_test_run_id', value: testRunId },
+    { key: 'rhymat_feedback_requested_at', value: requestedAt },
+    { key: 'rhymat_feedback_sent_at', value: sentAt }
   ].filter((item) => item.value !== '');
 }
 
@@ -1619,6 +1633,110 @@ test('text feedback token updates only feedback meta', async () => {
   assert.ok(wooOrderUpdates.some((update) => update.orderId === '901' && !update.fields.status));
 });
 
+test('self-test feedback token matches case-insensitively and preserves plugin meta', async () => {
+  const { app, listedOrders, wasenderCalls } = createTestContext();
+  listedOrders.push({
+    id: 911,
+    status: 'completed',
+    total: '109.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Self',
+      last_name: 'Test',
+      phone: '+212611111911',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Self Test', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      token: 'FDBK-TEST-20260420T094452Z-Y7ZNGL',
+      testPhone: '+491729031097',
+      testActive: 'yes',
+      isTest: 'yes',
+      testRunId: 'selftest-20260420T094452Z-y7zngl',
+      requestedAt: '2026-04-20T09:44:53Z',
+      sentAt: '2026-04-20T09:44:53Z'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-self-test-token-911'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '491729031097',
+        fromMe: false,
+        id: 'feedback-self-test-token-911-message'
+      },
+      messageBody: 'fdbk-test-20260420t094452z-y7zngl looks good'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.feedback, 1);
+  assert.equal(wasenderCalls.length, 0);
+  const order = listedOrders.find((item) => String(item.id) === '911');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_text'), 'fdbk-test-20260420t094452z-y7zngl looks good');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_token'), 'FDBK-TEST-20260420T094452Z-Y7ZNGL');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_test_phone'), '+491729031097');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_test_run_id'), 'selftest-20260420T094452Z-y7zngl');
+});
+
+test('unmatched self-test token stays in feedback flow and does not trigger confirmation replies', async () => {
+  const { app, store, wasenderCalls } = createTestContext();
+  const pendingOrder = {
+    id: 912,
+    status: 'pending',
+    total: '110.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Pending',
+      last_name: 'Confirm',
+      phone: '+491729031097',
+      state: 'Berlin'
+    },
+    line_items: [{ name: 'Produit Pending', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(pendingOrder),
+      'x-wc-webhook-delivery-id': 'delivery-self-test-unmatched-912'
+    },
+    payload: pendingOrder
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-self-test-unmatched-912'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '491729031097',
+        fromMe: false,
+        id: 'feedback-self-test-unmatched-912-message'
+      },
+      messageBody: 'FDBK-TEST-UNKNOWN'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ignored, 1);
+  assert.equal(wasenderCalls.length, 1);
+  assert.equal(store.read().events.at(-1).status, 'feedback_unmatched');
+  assert.equal(store.getOrder('912').confirmationState, 'pending_confirmation');
+});
+
 test('image feedback with caption stores caption media url and mime type', async () => {
   const { app, listedOrders, wooNoteCalls } = createTestContext();
   listedOrders.push({
@@ -1722,6 +1840,63 @@ test('image feedback without caption falls back by unique waiting-feedback phone
   assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
   assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_caption'), '');
   assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_media_url'), 'https://cdn.example.com/903.jpg');
+});
+
+test('media-only self-test reply matches by active test phone', async () => {
+  const { app, listedOrders, wasenderCalls } = createTestContext();
+  listedOrders.push({
+    id: 9031,
+    status: 'completed',
+    total: '101.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Media',
+      last_name: 'SelfTest',
+      phone: '+212611119031',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Media Self Test', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      token: 'FDBK-TEST-9031',
+      testPhone: '+491729031097',
+      testActive: 'yes',
+      testRunId: 'selftest-9031'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-self-test-phone-9031'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '491729031097',
+            fromMe: false,
+            id: 'feedback-self-test-phone-9031-message'
+          },
+          message: {
+            imageMessage: {
+              mimetype: 'image/jpeg',
+              url: 'https://cdn.example.com/9031.jpg'
+            }
+          }
+        }
+      }
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.feedback, 1);
+  assert.equal(wasenderCalls.length, 0);
+  const order = listedOrders.find((item) => String(item.id) === '9031');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_state'), 'reply_received');
+  assert.equal(workflowMetaValue(order.meta_data, 'rhymat_feedback_last_media_url'), 'https://cdn.example.com/9031.jpg');
 });
 
 for (const scenario of [
@@ -2037,6 +2212,153 @@ test('ambiguous waiting-feedback phone match is skipped safely', async () => {
   assert.equal(result.body.ignored, 1);
   assert.equal(store.read().events.at(-1).status, 'feedback_match_ambiguous');
   assert.equal(wooNoteCalls.length, 0);
+});
+
+test('ambiguous self-test phone match is skipped without falling into confirmation', async () => {
+  const { app, store, listedOrders, wasenderCalls, wooNoteCalls } = createTestContext();
+  listedOrders.push(
+    {
+      id: 9111,
+      status: 'completed',
+      total: '66.00',
+      currency: 'EUR',
+      billing: {
+        first_name: 'Self',
+        last_name: 'One',
+        phone: '+212611119111',
+        state: 'Casablanca'
+      },
+      line_items: [{ name: 'Produit Self 1', quantity: 1 }],
+      meta_data: buildFeedbackMeta({
+        state: 'waiting_for_feedback',
+        testPhone: '+491729031097',
+        testActive: 'yes',
+        testRunId: 'selftest-9111'
+      })
+    },
+    {
+      id: 9112,
+      status: 'completed',
+      total: '67.00',
+      currency: 'EUR',
+      billing: {
+        first_name: 'Self',
+        last_name: 'Two',
+        phone: '+212611119112',
+        state: 'Casablanca'
+      },
+      line_items: [{ name: 'Produit Self 2', quantity: 1 }],
+      meta_data: buildFeedbackMeta({
+        state: 'waiting_for_feedback',
+        testPhone: '+491729031097',
+        testActive: 'yes',
+        testRunId: 'selftest-9112'
+      })
+    }
+  );
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-self-test-ambiguous-9111'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            cleanedSenderPn: '491729031097',
+            fromMe: false,
+            id: 'feedback-self-test-ambiguous-9111-message'
+          },
+          message: {
+            imageMessage: {
+              mimetype: 'image/jpeg',
+              url: 'https://cdn.example.com/9111.jpg'
+            }
+          }
+        }
+      }
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ignored, 1);
+  assert.equal(store.read().events.at(-1).status, 'feedback_match_ambiguous');
+  assert.equal(wooNoteCalls.length, 0);
+  assert.equal(wasenderCalls.length, 0);
+});
+
+test('self-test phone feedback takes priority over confirmation replies for the same sender', async () => {
+  const { app, store, listedOrders, wasenderCalls } = createTestContext();
+  const confirmationOrder = {
+    id: 913,
+    status: 'pending',
+    total: '110.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Confirm',
+      last_name: 'First',
+      phone: '+491729031097',
+      state: 'Berlin'
+    },
+    line_items: [{ name: 'Produit Confirm Priority', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(confirmationOrder),
+      'x-wc-webhook-delivery-id': 'delivery-self-test-priority-913'
+    },
+    payload: confirmationOrder
+  });
+
+  listedOrders.push({
+    id: 914,
+    status: 'completed',
+    total: '120.00',
+    currency: 'EUR',
+    billing: {
+      first_name: 'Feedback',
+      last_name: 'Priority',
+      phone: '+212611119140',
+      state: 'Casablanca'
+    },
+    line_items: [{ name: 'Produit Feedback Priority', quantity: 1 }],
+    meta_data: buildFeedbackMeta({
+      state: 'waiting_for_feedback',
+      testPhone: '+491729031097',
+      testActive: 'yes',
+      testRunId: 'selftest-914'
+    })
+  });
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'feedback-self-test-priority-913'
+    },
+    payload: {
+      key: {
+        cleanedSenderPn: '491729031097',
+        fromMe: false,
+        id: 'feedback-self-test-priority-913-message'
+      },
+      messageBody: '1'
+    }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.feedback, 1);
+  assert.equal(result.body.confirmation, 0);
+  assert.equal(wasenderCalls.length, 1);
+  assert.equal(store.getOrder('913').confirmationState, 'pending_confirmation');
+  assert.equal(workflowMetaValue(listedOrders.find((item) => String(item.id) === '914').meta_data, 'rhymat_feedback_state'), 'reply_received');
 });
 
 test('task endpoint rejects invalid task secret', async () => {
