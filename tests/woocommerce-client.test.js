@@ -49,8 +49,9 @@ test('WooCommerceClient retries GET with query auth after 415 response', async (
   assert.equal(calls[1].options.headers.Authorization, undefined);
   assert.match(calls[1].url, /consumer_key=ck_test/);
   assert.match(calls[1].url, /consumer_secret=cs_test/);
-  assert.ok(logs.some((message) => message.includes('count=1')));
-  assert.ok(logs.every((message) => !message.includes('responseBody=')));
+  assert.ok(logs.some((message) => message.includes('status=415')));
+  assert.ok(logs.every((message) => !message.includes('[woo] request method=GET')));
+  assert.ok(logs.every((message) => !message.includes('count=1')));
 });
 
 test('WooCommerceClient does not retry non-retriable failures', async () => {
@@ -85,7 +86,7 @@ test('WooCommerceClient does not retry non-retriable failures', async () => {
     /WooCommerce request failed with 500/
   );
   assert.equal(attempts, 1);
-  assert.ok(logs.some((message) => message.includes('body={"message":"server_error"}')));
+  assert.ok(logs.some((message) => message.includes('bodyFormat=json body={"message":"server_error"}')));
 });
 
 test('WooCommerceClient summarizes successful single-order responses without dumping full payloads', async () => {
@@ -118,8 +119,7 @@ test('WooCommerceClient summarizes successful single-order responses without dum
   const order = await client.getOrder(123);
 
   assert.equal(order.id, 123);
-  assert.ok(logs.some((message) => message.includes('orderId=123 orderStatus=completed')));
-  assert.ok(logs.every((message) => !message.includes('"billing"')));
+  assert.equal(logs.length, 0);
 });
 
 test('WooCommerceClient truncates large failure bodies in logs', async () => {
@@ -154,4 +154,69 @@ test('WooCommerceClient truncates large failure bodies in logs', async () => {
   assert.ok(failureLog);
   assert.ok(failureLog.includes('...'));
   assert.ok(!failureLog.includes(longMessage));
+});
+
+test('WooCommerceClient reports non-JSON failure bodies with a text snippet', async () => {
+  const logs = [];
+  const client = new WooCommerceClient({
+    baseUrl: 'https://example.com',
+    consumerKey: 'ck_test',
+    consumerSecret: 'cs_test',
+    logger: {
+      log(message) {
+        logs.push(message);
+      },
+      warn(message) {
+        logs.push(message);
+      }
+    },
+    fetchImpl: async () => ({
+      ok: false,
+      status: 500,
+      async text() {
+        return '<html><body>server exploded</body></html>';
+      }
+    })
+  });
+
+  await assert.rejects(
+    client.getOrder(456),
+    /WooCommerce request failed with 500: non-JSON body/
+  );
+
+  const failureLog = logs.find((message) => message.includes('[woo] failure'));
+  assert.ok(failureLog?.includes('bodyFormat=text'));
+  assert.ok(failureLog?.includes('server exploded'));
+});
+
+test('WooCommerceClient reports empty failure bodies explicitly', async () => {
+  const logs = [];
+  const client = new WooCommerceClient({
+    baseUrl: 'https://example.com',
+    consumerKey: 'ck_test',
+    consumerSecret: 'cs_test',
+    logger: {
+      log(message) {
+        logs.push(message);
+      },
+      warn(message) {
+        logs.push(message);
+      }
+    },
+    fetchImpl: async () => ({
+      ok: false,
+      status: 500,
+      async text() {
+        return '';
+      }
+    })
+  });
+
+  await assert.rejects(
+    client.getOrder(654),
+    /WooCommerce request failed with 500: empty body/
+  );
+
+  const failureLog = logs.find((message) => message.includes('[woo] failure'));
+  assert.ok(failureLog?.includes('bodyFormat=empty'));
 });

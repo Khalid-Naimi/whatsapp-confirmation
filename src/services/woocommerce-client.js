@@ -107,7 +107,9 @@ export class WooCommerceClient {
           await sleep(1000);
         }
 
-        this.logger.log(`[woo] request method=${method} path=${path} auth=${strategy.mode}${attempt > 1 ? ` attempt=${attempt}` : ''}${summarizeWooBody(body)}`);
+        if (shouldLogWooRequest({ method })) {
+          this.logger.log(`[woo] request method=${method} path=${path} auth=${strategy.mode}${attempt > 1 ? ` attempt=${attempt}` : ''}${summarizeWooBody(body)}`);
+        }
 
         let response;
         try {
@@ -135,18 +137,21 @@ export class WooCommerceClient {
           throw networkError;
         }
 
-        const data = await parseJsonSafe(response);
+        const parsedBody = await parseResponseBody(response);
+        const data = parsedBody.data;
         if (response.ok) {
-          this.logger.log(
-            `[woo] success method=${method} path=${path} status=${response.status}${summarizeWooSuccessResponse(data)}`
-          );
+          if (shouldLogWooSuccess({ method })) {
+            this.logger.log(
+              `[woo] success method=${method} path=${path} status=${response.status}${summarizeWooSuccessResponse(data)}`
+            );
+          }
           return data;
         }
 
         this.logger.warn(
-          `[woo] failure method=${method} path=${path} status=${response.status} body=${truncateForLog(safeJson(data))}`
+          `[woo] failure method=${method} path=${path} auth=${strategy.mode} status=${response.status}${summarizeWooFailureBody(parsedBody)}`
         );
-        lastError = new Error(`WooCommerce request failed with ${response.status}: ${JSON.stringify(data)}`);
+        lastError = buildWooError(response.status, parsedBody);
 
         if (shouldRetryWithQueryAuth({ method, status: response.status, authMode: strategy.mode })) {
           break;
@@ -216,6 +221,40 @@ async function parseJsonSafe(response) {
   }
 }
 
+async function parseResponseBody(response) {
+  if (typeof response?.text === 'function') {
+    try {
+      const rawText = await response.text();
+      if (!rawText) {
+        return { data: null, rawText: '', bodyFormat: 'empty' };
+      }
+
+      try {
+        return {
+          data: JSON.parse(rawText),
+          rawText,
+          bodyFormat: 'json'
+        };
+      } catch {
+        return {
+          data: null,
+          rawText,
+          bodyFormat: 'text'
+        };
+      }
+    } catch {
+      return { data: null, rawText: '', bodyFormat: 'unreadable' };
+    }
+  }
+
+  const data = await parseJsonSafe(response);
+  return {
+    data,
+    rawText: '',
+    bodyFormat: 'json'
+  };
+}
+
 function summarizeWooBody(body) {
   if (!body) {
     return '';
@@ -243,6 +282,14 @@ function safeJson(value) {
   } catch {
     return '"[unserializable]"';
   }
+}
+
+function shouldLogWooRequest({ method }) {
+  return method !== 'GET';
+}
+
+function shouldLogWooSuccess({ method }) {
+  return method !== 'GET';
 }
 
 function summarizeWooSuccessResponse(data) {
@@ -299,4 +346,42 @@ function truncateForLog(value, maxLength = 500) {
   }
 
   return `${text.slice(0, maxLength - 3)}...`;
+}
+
+function summarizeWooFailureBody(parsedBody) {
+  const { data, rawText, bodyFormat } = parsedBody;
+
+  if (bodyFormat === 'json') {
+    return ` bodyFormat=json body=${truncateForLog(safeJson(data))}`;
+  }
+
+  if (bodyFormat === 'text') {
+    return ` bodyFormat=text bodySnippet=${JSON.stringify(truncateForLog(rawText, 200))}`;
+  }
+
+  if (bodyFormat === 'empty') {
+    return ' bodyFormat=empty';
+  }
+
+  return ' bodyFormat=unreadable';
+}
+
+function buildWooError(status, parsedBody) {
+  const { data, rawText, bodyFormat } = parsedBody;
+
+  if (bodyFormat === 'json') {
+    return new Error(`WooCommerce request failed with ${status}: ${JSON.stringify(data)}`);
+  }
+
+  if (bodyFormat === 'text') {
+    return new Error(
+      `WooCommerce request failed with ${status}: non-JSON body ${JSON.stringify(truncateForLog(rawText, 200))}`
+    );
+  }
+
+  if (bodyFormat === 'empty') {
+    return new Error(`WooCommerce request failed with ${status}: empty body`);
+  }
+
+  return new Error(`WooCommerce request failed with ${status}: unreadable response body`);
 }
