@@ -48,9 +48,9 @@ const FEEDBACK_TEST_META_KEYS = {
 const PROCESSING_STATUS = 'processing';
 const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled', 'completed', 'failed', 'refunded'];
 const REPLY_RECOVERY_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled'];
-const FEEDBACK_SELF_TEST_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed', 'cancelled'];
-const FEEDBACK_SELF_TEST_RECOVERY_PER_PAGE = 50;
-const FEEDBACK_SELF_TEST_RECOVERY_MAX_PAGES = 2;
+const FEEDBACK_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed', 'cancelled'];
+const FEEDBACK_RECOVERY_PER_PAGE = 50;
+const FEEDBACK_RECOVERY_MAX_PAGES = 2;
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
 const AUTO_CANCEL_MS = 72 * 60 * 60 * 1000;
@@ -257,8 +257,28 @@ export class ConfirmationService {
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
 
+    if (feedbackMatch.kind === 'matched' && feedbackMatch.source === 'production_phone_local') {
+      const candidateSuffix = feedbackMatch.matchedOrderIds?.length > 1
+        ? ` candidateOrderIds=${feedbackMatch.matchedOrderIds.join(',')} chosenOrderId=${feedbackMatch.orderId}`
+        : '';
+      this.logger.log(
+        `[feedback] route=production_phone_match source=local matchedOrderId=${feedbackMatch.orderId} senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
+      );
+      return this.processFeedbackMatchResult(message, feedbackMatch);
+    }
+
+    if (feedbackMatch.kind === 'matched' && feedbackMatch.source === 'production_phone_woo_recovery') {
+      const candidateSuffix = feedbackMatch.matchedOrderIds?.length > 1
+        ? ` candidateOrderIds=${feedbackMatch.matchedOrderIds.join(',')} chosenOrderId=${feedbackMatch.orderId}`
+        : '';
+      this.logger.log(
+        `[feedback] route=production_phone_match source=woo_recovery matchedOrderId=${feedbackMatch.orderId} senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
+      );
+      return this.processFeedbackMatchResult(message, feedbackMatch);
+    }
+
     this.logger.log(
-      `[feedback] route=feedback_unmatched senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} reason=no_active_self_test_candidate messageKey=${message.messageKey}`
+      `[feedback] route=feedback_unmatched senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} kind=${message.kind || 'unknown'} source=${feedbackMatch.source || 'unknown'} reason=${feedbackMatch.reason || 'no_match'} messageKey=${message.messageKey}`
     );
     return this.processFeedbackMatchResult(message, feedbackMatch);
   }
@@ -561,7 +581,7 @@ export class ConfirmationService {
   async matchFeedbackOrder(message, { token = '', explicitToken = false } = {}) {
     if (!explicitToken) {
       if (!message.senderPhone) {
-        return { kind: 'unmatched', source: 'self_test_phone' };
+        return { kind: 'unmatched', source: 'production_phone', reason: 'missing_sender_phone' };
       }
 
       const localCandidates = this.store.listActiveSelfTestFeedbackOrdersByPhone(message.senderPhone);
@@ -579,7 +599,22 @@ export class ConfirmationService {
         return recoveredMatch;
       }
 
-      return { kind: 'unmatched', source: 'self_test_phone' };
+      const localProductionCandidates = this.store.listActiveProductionFeedbackOrdersByPhone(message.senderPhone);
+      if (localProductionCandidates.length) {
+        return {
+          kind: 'matched',
+          orderId: String(localProductionCandidates[0].orderId),
+          source: 'production_phone_local',
+          matchedOrderIds: localProductionCandidates.map((order) => String(order.orderId))
+        };
+      }
+
+      const recoveredProductionMatch = await this.recoverLatestProductionFeedbackOrderByPhone(message.senderPhone);
+      if (recoveredProductionMatch) {
+        return recoveredProductionMatch;
+      }
+
+      return { kind: 'unmatched', source: 'production_phone', reason: 'no_active_feedback_candidate' };
     }
 
     if (explicitToken) {
@@ -622,7 +657,7 @@ export class ConfirmationService {
       }
 
       this.logger.warn(
-        `[feedback] unmatched self-test token token=${parsedToken.value} searchedStatuses=${FEEDBACK_SELF_TEST_MATCH_STATUSES.join(',')} messageKey=${message.messageKey}`
+        `[feedback] unmatched self-test token token=${parsedToken.value} searchedStatuses=${FEEDBACK_MATCH_STATUSES.join(',')} messageKey=${message.messageKey}`
       );
       return { kind: 'unmatched', source: 'self_test_token' };
     }
@@ -632,11 +667,11 @@ export class ConfirmationService {
     const seenOrderIds = new Set();
     const matches = [];
 
-    for (const status of FEEDBACK_SELF_TEST_MATCH_STATUSES) {
-      for (let page = 1; page <= FEEDBACK_SELF_TEST_RECOVERY_MAX_PAGES; page += 1) {
+    for (const status of FEEDBACK_MATCH_STATUSES) {
+      for (let page = 1; page <= FEEDBACK_RECOVERY_MAX_PAGES; page += 1) {
         const orders = await this.wooClient.listOrders({
           status,
-          perPage: FEEDBACK_SELF_TEST_RECOVERY_PER_PAGE,
+          perPage: FEEDBACK_RECOVERY_PER_PAGE,
           page
         });
 
@@ -659,7 +694,7 @@ export class ConfirmationService {
           matches.push(order);
         }
 
-        if (orders.length < FEEDBACK_SELF_TEST_RECOVERY_PER_PAGE) {
+        if (orders.length < FEEDBACK_RECOVERY_PER_PAGE) {
           break;
         }
       }
@@ -680,6 +715,61 @@ export class ConfirmationService {
       kind: 'matched',
       orderId: String(chosenOrder.id),
       source: 'self_test_phone_woo_recovery',
+      matchedOrderIds: sortedMatches.map((order) => String(order.id))
+    };
+  }
+
+  async recoverLatestProductionFeedbackOrderByPhone(phone) {
+    const seenOrderIds = new Set();
+    const matches = [];
+
+    for (const status of FEEDBACK_MATCH_STATUSES) {
+      for (let page = 1; page <= FEEDBACK_RECOVERY_MAX_PAGES; page += 1) {
+        const orders = await this.wooClient.listOrders({
+          status,
+          perPage: FEEDBACK_RECOVERY_PER_PAGE,
+          page
+        });
+
+        if (!orders.length) {
+          break;
+        }
+
+        for (const order of orders) {
+          const orderId = String(order.id);
+          if (seenOrderIds.has(orderId)) {
+            continue;
+          }
+          seenOrderIds.add(orderId);
+
+          if (!isProductionFeedbackOrder(order, this.messages, phone)) {
+            continue;
+          }
+
+          matches.push(order);
+        }
+
+        if (orders.length < FEEDBACK_RECOVERY_PER_PAGE) {
+          break;
+        }
+      }
+    }
+
+    if (!matches.length) {
+      return null;
+    }
+
+    const sortedMatches = matches.sort(compareFeedbackCandidates);
+    const chosenOrder = sortedMatches[0];
+    this.store.upsertOrder({
+      ...normalizeWooOrder(chosenOrder, this.messages),
+      rawOrder: chosenOrder
+    });
+
+    return {
+      kind: 'matched',
+      orderId: String(chosenOrder.id),
+      source: 'production_phone_woo_recovery',
       matchedOrderIds: sortedMatches.map((order) => String(order.id))
     };
   }
@@ -731,7 +821,9 @@ export class ConfirmationService {
         })
       );
     } catch (error) {
-      this.logger.warn(`[feedback] failed Woo meta update orderId=${normalizedOrder.orderId} messageKey=${message.messageKey} error=${error.message}`);
+      this.logger.warn(
+        `[feedback] failed Woo meta update orderId=${normalizedOrder.orderId} wooBaseUrl=${String(this.wooClient?.baseUrl || '')} senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} messageKey=${message.messageKey} error=${error.message}`
+      );
       return {
         ok: false,
         ignored: false,
@@ -776,7 +868,7 @@ export class ConfirmationService {
   }
 
   async findFeedbackOrdersByToken(token) {
-    const orders = await this.listOrdersForStatuses(FEEDBACK_SELF_TEST_MATCH_STATUSES);
+    const orders = await this.listOrdersForStatuses(FEEDBACK_MATCH_STATUSES);
     const normalizedToken = normalizeFeedbackTokenValue(token);
     return orders
       .filter((order) => {
@@ -1882,6 +1974,13 @@ function normalizeWasenderInboundMessage({ payload, eventKey, message, index }) 
     payload?.data?.senderPhone ||
     payload?.message?.from ||
     '';
+  const recipientRaw =
+    message?.to ||
+    payload?.to ||
+    payload?.recipient ||
+    payload?.data?.to ||
+    payload?.data?.recipient ||
+    '';
 
   return {
     webhookEventKey: eventKey,
@@ -1890,6 +1989,7 @@ function normalizeWasenderInboundMessage({ payload, eventKey, message, index }) 
     providerMessageId: providerMessageId || null,
     senderPhone: normalizePhone(senderRaw),
     senderRaw: String(senderRaw || ''),
+    recipientRaw: String(recipientRaw || ''),
     timestamp,
     kind: media.kind,
     textBody,
@@ -2119,7 +2219,7 @@ function extractMessageId(sendResult) {
   return sendResult?.id || sendResult?.messageId || sendResult?.data?.id || null;
 }
 
-function compareSelfTestFeedbackCandidates(left, right) {
+function compareFeedbackCandidates(left, right) {
   const sentDelta = getTimestampValue(right?.feedbackSentAt || getFeedbackMeta(right).sentAt)
     - getTimestampValue(left?.feedbackSentAt || getFeedbackMeta(left).sentAt);
   if (sentDelta !== 0) {
@@ -2139,6 +2239,10 @@ function compareSelfTestFeedbackCandidates(left, right) {
   }
 
   return Number(right?.orderId || right?.id || 0) - Number(left?.orderId || left?.id || 0);
+}
+
+function compareSelfTestFeedbackCandidates(left, right) {
+  return compareFeedbackCandidates(left, right);
 }
 
 function compareOrdersByRecency(left, right) {
@@ -2375,6 +2479,20 @@ function isFeedbackSelfTestOrder(order) {
     classifyFeedbackToken(feedbackMeta.token)?.type === 'self_test' ||
     feedbackMeta.testRunId
   );
+}
+
+function isProductionFeedbackOrder(order, messages, phone) {
+  const feedbackMeta = getFeedbackMeta(order);
+  if (feedbackMeta.state !== 'waiting_for_feedback') {
+    return false;
+  }
+
+  if (isFeedbackSelfTestOrder(order)) {
+    return false;
+  }
+
+  const normalizedOrder = normalizeWooOrder(order, messages);
+  return normalizedOrder.phone === phone;
 }
 
 function mergeMetaUpdates(...metaSets) {

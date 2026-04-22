@@ -128,6 +128,18 @@ export class JsonStore {
       .sort(compareActiveSelfTestOrders);
   }
 
+  listActiveProductionFeedbackOrdersByPhone(phone) {
+    const db = this.read();
+    return db.orders
+      .filter((order) =>
+        order.feedbackState === 'waiting_for_feedback' &&
+        order.phone === phone &&
+        order.feedbackTestActive !== true &&
+        order.feedbackIsTest !== true
+      )
+      .sort(compareActiveSelfTestOrders);
+  }
+
   findLatestActiveSelfTestFeedbackOrderByPhone(phone) {
     return this.listActiveSelfTestFeedbackOrdersByPhone(phone)[0] || null;
   }
