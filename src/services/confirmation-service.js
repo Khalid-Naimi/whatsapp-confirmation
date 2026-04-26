@@ -28,7 +28,8 @@ const DECISION_META_KEYS = {
   manualOverrideAt: 'rhymat_whatsapp_manual_override_at',
   manualOverrideStatus: 'rhymat_whatsapp_manual_override_status',
   invalidReplyCount: 'rhymat_whatsapp_invalid_reply_count',
-  manualFollowupRequired: 'rhymat_whatsapp_manual_followup_required'
+  manualFollowupRequired: 'rhymat_whatsapp_manual_followup_required',
+  lastConfirmationMessageKey: 'rhymat_whatsapp_last_confirmation_message_key'
 };
 const FEEDBACK_META_KEYS = {
   state: 'rhymat_feedback_state',
@@ -54,16 +55,19 @@ const FEEDBACK_TEST_META_KEYS = {
 };
 
 const PROCESSING_STATUS = 'processing';
+const ACTIVE_CONFIRMATION_STATUSES = ['pending', 'processing'];
 const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled', 'completed', 'failed', 'refunded'];
-const REPLY_RECOVERY_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled'];
+const REPLY_RECOVERY_STATUSES = [...ACTIVE_CONFIRMATION_STATUSES];
 const FEEDBACK_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed', 'cancelled'];
 const FEEDBACK_RECOVERY_PER_PAGE = 50;
 const FEEDBACK_RECOVERY_MAX_PAGES = 2;
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
-const AUTO_CANCEL_MS = 72 * 60 * 60 * 1000;
+const AUTO_CANCEL_AFTER_SECOND_REMINDER_MS = 24 * 60 * 60 * 1000;
 const MAX_WOO_SYNC_ATTEMPTS = 6;
 const MAX_FEEDBACK_PAYLOAD_JSON_LENGTH = 4000;
+const INBOUND_MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
+const OUTBOUND_RESERVATION_STALE_MS = 2 * 60 * 60 * 1000;
 const OUTBOUND_LOGICAL_KEYS = {
   confirmationRequest: 'customer:confirmation_request',
   reminder1: 'customer:reminder_1',
@@ -74,21 +78,55 @@ const OUTBOUND_LOGICAL_KEYS = {
   cancellationSuccess: 'customer:cancellation_success',
   autoCancellation: 'customer:auto_cancellation'
 };
+const OUTBOUND_META_KEYS = {
+  [OUTBOUND_LOGICAL_KEYS.confirmationRequest]: {
+    state: 'rhymat_whatsapp_confirmation_request_state',
+    reservedAt: 'rhymat_whatsapp_confirmation_request_reserved_at',
+    sentAt: WORKFLOW_META_KEYS.confirmationSentAt,
+    messageId: WORKFLOW_META_KEYS.confirmationMessageId
+  },
+  [OUTBOUND_LOGICAL_KEYS.reminder1]: {
+    state: 'rhymat_whatsapp_reminder_1_state',
+    reservedAt: 'rhymat_whatsapp_reminder_1_reserved_at',
+    sentAt: WORKFLOW_META_KEYS.reminder1SentAt,
+    messageId: WORKFLOW_META_KEYS.reminder1MessageId
+  },
+  [OUTBOUND_LOGICAL_KEYS.reminder2]: {
+    state: 'rhymat_whatsapp_reminder_2_state',
+    reservedAt: 'rhymat_whatsapp_reminder_2_reserved_at',
+    sentAt: WORKFLOW_META_KEYS.reminder2SentAt,
+    messageId: WORKFLOW_META_KEYS.reminder2MessageId
+  },
+  [OUTBOUND_LOGICAL_KEYS.confirmationSuccess]: {
+    state: 'rhymat_whatsapp_confirmation_success_state',
+    reservedAt: 'rhymat_whatsapp_confirmation_success_reserved_at',
+    messageId: 'rhymat_whatsapp_confirmation_success_message_id'
+  },
+  [OUTBOUND_LOGICAL_KEYS.cancellationSuccess]: {
+    state: 'rhymat_whatsapp_cancellation_success_state',
+    reservedAt: 'rhymat_whatsapp_cancellation_success_reserved_at',
+    messageId: 'rhymat_whatsapp_cancellation_success_message_id'
+  },
+  [OUTBOUND_LOGICAL_KEYS.autoCancellation]: {
+    state: 'rhymat_whatsapp_auto_cancellation_state',
+    reservedAt: 'rhymat_whatsapp_auto_cancellation_reserved_at',
+    messageId: 'rhymat_whatsapp_auto_cancellation_message_id'
+  }
+};
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, workflowRepository, mailService = null, messages, logger = console }) {
-    if (!workflowRepository) {
-      throw new Error('ConfirmationService requires a workflowRepository');
-    }
-
+  constructor({ store, wasenderClient, wooClient, mailService = null, messages, logger = console }) {
     this.store = store;
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
-    this.workflowRepository = workflowRepository;
     this.mailService = mailService;
     this.messages = messages;
     this.logger = logger;
     this.activeOrderLocks = new Map();
+    this.orderMutexes = new Map();
+    this.inFlightWooEvents = new Map();
+    this.inFlightWasenderEvents = new Map();
+    this.recentInboundMessageKeys = new Map();
   }
 
   async withOrderLock(orderId, work) {
@@ -103,61 +141,46 @@ export class ConfirmationService {
       }
     }
 
-    const lock = await this.workflowRepository.acquireLock(lockKey);
-    if (!lock.acquired) {
-      this.logger.log(`[lock] skip lockKey=${lockKey} reason=in_flight`);
-      return { locked: false };
+    while (this.orderMutexes.has(lockKey)) {
+      await this.orderMutexes.get(lockKey);
     }
 
+    let releaseLock;
+    const pendingLock = new Promise((resolve) => {
+      releaseLock = resolve;
+    });
+    this.orderMutexes.set(lockKey, pendingLock);
     this.logger.log(`[lock] acquired lockKey=${lockKey}`);
     this.activeOrderLocks.set(lockKey, 1);
     try {
       return await work();
     } finally {
       this.activeOrderLocks.delete(lockKey);
-      await this.workflowRepository.releaseLock(lockKey);
+      this.orderMutexes.delete(lockKey);
+      releaseLock();
       this.logger.log(`[lock] released lockKey=${lockKey}`);
     }
   }
 
   async processWooOrder(payload, eventKey) {
-    const eventLock = await this.workflowRepository.acquireLock(`woo_event:${eventKey}`);
-    if (!eventLock.acquired) {
+    if (this.inFlightWooEvents.has(eventKey)) {
       this.store.recordEvent('woocommerce', eventKey, payload, 'duplicate_order');
       return { status: 200, body: { ok: true, duplicate: true, reason: 'event_in_flight' } };
     }
+    this.inFlightWooEvents.set(eventKey, Date.now());
 
     try {
-      const reservation = await this.workflowRepository.reserveEvent({
-        source: 'woocommerce',
-        eventKey,
-        orderId: String(payload?.id || ''),
-        payloadHash: hashPayload(payload)
-      });
-      if (reservation.status === 'existing') {
-        this.store.recordEvent('woocommerce', eventKey, payload, 'duplicate_order');
-        return { status: 200, body: { ok: true, duplicate: true } };
-      }
-
       const workflow = getWorkflowMeta(payload);
       const normalizedOrder = normalizeWooOrder(payload, this.messages);
-      const result = await this.withOrderLock(normalizedOrder.orderId, async () => {
-        const existing = this.store.getOrder(normalizedOrder.orderId);
-        if (
-          workflow.confirmationSentAt ||
-          workflow.state === 'pending' ||
-          workflow.state === 'confirmed' ||
-          workflow.state === 'cancelled' ||
-          existing?.confirmationState === 'pending_confirmation' ||
-          existing?.confirmationState === 'confirmed' ||
-          existing?.confirmationState === 'cancelled'
-        ) {
-          return { status: 200, body: { ok: true, duplicate: true, reason: 'duplicate_order' } };
-        }
+      const existing = this.store.getOrder(normalizedOrder.orderId);
+      const workflowStarted = hasConfirmationWorkflowStarted({ workflow, localOrder: existing });
+      const isActiveStatus = ACTIVE_CONFIRMATION_STATUSES.includes(String(payload?.status || ''));
 
+      const result = await this.withOrderLock(normalizedOrder.orderId, async () => {
         if (isFeedbackSelfTestOrder(payload)) {
           const feedbackMeta = getFeedbackMeta(payload);
           this.store.upsertOrder({
+            ...existing,
             ...normalizedOrder,
             rawOrder: payload
           });
@@ -170,6 +193,41 @@ export class ConfirmationService {
           };
         }
 
+        if (!isActiveStatus) {
+          this.store.upsertOrder({
+            ...existing,
+            ...normalizedOrder,
+            rawOrder: payload
+          });
+          if (workflowStarted) {
+            await this.markManualOverride({
+              order: {
+                ...existing,
+                ...normalizedOrder,
+                rawOrder: payload
+              },
+              status: payload.status
+            });
+            return { status: 200, body: { ok: true, skipped: true, reason: 'manual_override' } };
+          }
+          return { status: 200, body: { ok: true, skipped: true, reason: 'inactive_status' } };
+        }
+
+        const cachedOrder = this.store.getOrder(normalizedOrder.orderId);
+        if (
+          workflow.confirmationSentAt ||
+          workflow.state === 'pending' ||
+          workflow.state === 'confirmed' ||
+          workflow.state === 'cancelled' ||
+          workflow.state === 'manual' ||
+          cachedOrder?.confirmationState === 'pending_confirmation' ||
+          cachedOrder?.confirmationState === 'confirmed' ||
+          cachedOrder?.confirmationState === 'cancelled' ||
+          cachedOrder?.confirmationState === 'manual'
+        ) {
+          return { status: 200, body: { ok: true, duplicate: true, reason: 'duplicate_order' } };
+        }
+
         const sendResult = await this.sendInitialConfirmation(payload, {
           note: 'WhatsApp confirmation sent to customer.'
         });
@@ -179,69 +237,35 @@ export class ConfirmationService {
         return sendResult;
       });
 
-      if (result?.locked === false) {
-        await this.workflowRepository.markEventStatus({
-          source: 'woocommerce',
-          eventKey,
-          status: 'duplicate_in_flight',
-          orderId: normalizedOrder.orderId
-        });
-        this.store.recordEvent('woocommerce', eventKey, payload, 'duplicate_in_flight');
-        return { status: 200, body: { ok: true, duplicate: true, reason: 'order_in_flight' } };
-      }
-
       const eventStatus = result.body?.duplicate
         ? 'duplicate_order'
+        : result.body?.reason === 'manual_override'
+          ? 'manual_override'
+          : result.body?.reason === 'inactive_status'
+            ? 'inactive_status'
         : result.body?.reason === 'feedback_self_test'
           ? 'feedback_self_test_skipped_confirmation'
           : (result.body?.reason || (result.body?.ok ? 'processed' : 'processing_failed'));
-      await this.workflowRepository.markEventStatus({
-        source: 'woocommerce',
-        eventKey,
-        status: eventStatus,
-        orderId: normalizedOrder.orderId
-      });
       this.store.recordEvent('woocommerce', eventKey, payload, eventStatus);
       return result;
     } catch (error) {
-      await this.workflowRepository.markEventStatus({
-        source: 'woocommerce',
-        eventKey,
-        status: 'processing_failed',
-        orderId: String(payload?.id || '')
-      });
       this.store.recordEvent('woocommerce', eventKey, payload, 'processing_failed');
       throw error;
     } finally {
-      await this.workflowRepository.releaseLock(`woo_event:${eventKey}`);
+      this.inFlightWooEvents.delete(eventKey);
     }
   }
 
   async processWasenderInbound(payload, eventKey) {
-    const eventLock = await this.workflowRepository.acquireLock(`wasender_event:${eventKey}`);
-    if (!eventLock.acquired) {
+    if (this.inFlightWasenderEvents.has(eventKey)) {
       this.store.recordEvent('wasender', eventKey, payload, 'duplicate_request');
       return { status: 200, body: { ok: true, duplicate: true } };
     }
+    this.inFlightWasenderEvents.set(eventKey, Date.now());
 
     try {
-      const requestReservation = await this.workflowRepository.reserveEvent({
-        source: 'wasender',
-        eventKey,
-        payloadHash: hashPayload(payload)
-      });
-      if (requestReservation.status === 'existing') {
-        this.store.recordEvent('wasender', eventKey, payload, 'duplicate_request');
-        return { status: 200, body: { ok: true, duplicate: true } };
-      }
-
       const inboundMessages = extractWasenderInboundMessages(payload, eventKey, this.logger);
       if (!inboundMessages.length) {
-        await this.workflowRepository.markEventStatus({
-          source: 'wasender',
-          eventKey,
-          status: 'ignored_non_message'
-        });
         this.store.recordEvent('wasender', eventKey, payload, 'ignored_non_message');
         return { status: 200, body: { ok: true, ignored: true, messageCount: 0 } };
       }
@@ -258,12 +282,8 @@ export class ConfirmationService {
       const messageStatuses = [];
 
       for (const message of inboundMessages) {
-        const messageReservation = await this.workflowRepository.reserveEvent({
-          source: 'wasender_message',
-          eventKey: message.messageKey,
-          payloadHash: hashPayload(message.rawEnvelopeSnapshot)
-        });
-        if (messageReservation.status === 'existing') {
+        this.pruneRecentInboundMessageKeys();
+        if (this.recentInboundMessageKeys.has(message.messageKey)) {
           summary.duplicates += 1;
           messageStatuses.push('duplicate_message');
           this.store.recordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, 'duplicate_message');
@@ -287,11 +307,7 @@ export class ConfirmationService {
         }
 
         const eventStatus = result.eventStatus || 'processed';
-        await this.workflowRepository.markEventStatus({
-          source: 'wasender_message',
-          eventKey: message.messageKey,
-          status: eventStatus
-        });
+        this.recentInboundMessageKeys.set(message.messageKey, Date.now());
         this.store.recordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, eventStatus);
         messageStatuses.push(eventStatus);
 
@@ -320,11 +336,6 @@ export class ConfirmationService {
       }
 
       const requestStatus = summarizeWasenderRequestStatus(messageStatuses);
-      await this.workflowRepository.markEventStatus({
-        source: 'wasender',
-        eventKey,
-        status: requestStatus
-      });
       this.store.recordEvent('wasender', eventKey, payload, requestStatus);
       return {
         status: 200,
@@ -334,15 +345,10 @@ export class ConfirmationService {
         }
       };
     } catch (error) {
-      await this.workflowRepository.markEventStatus({
-        source: 'wasender',
-        eventKey,
-        status: 'processing_failed'
-      });
       this.store.recordEvent('wasender', eventKey, payload, 'processing_failed');
       throw error;
     } finally {
-      await this.workflowRepository.releaseLock(`wasender_event:${eventKey}`);
+      this.inFlightWasenderEvents.delete(eventKey);
     }
   }
 
@@ -366,22 +372,11 @@ export class ConfirmationService {
       );
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
-
-    const localPendingOrder = message.senderPhone
-      ? this.store.findLatestPendingOrderByPhone(message.senderPhone)
-      : null;
-    if (localPendingOrder) {
-      this.logger.log(
-        `[inbound] route=confirmation_local_pending senderPhone=${message.senderPhone} pendingOrderId=${localPendingOrder.orderId} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}`
-      );
-      return this.routeConfirmationInboundMessage(message);
-    }
-
-    if (isPlainConfirmationReply(message)) {
-      this.logger.log(
-        `[inbound] route=confirmation_candidate senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}`
-      );
-      return this.routeConfirmationInboundMessage(message);
+    if (message.senderPhone && isConfirmationMessageKind(message.kind)) {
+      const confirmationRoute = await this.routeConfirmationInboundMessage(message, { allowWooRecovery: false });
+      if (confirmationRoute) {
+        return confirmationRoute;
+      }
     }
 
     const feedbackMatch = await this.matchFeedbackOrder(message);
@@ -426,12 +421,9 @@ export class ConfirmationService {
     }
 
     if (message.senderPhone && isConfirmationMessageKind(message.kind)) {
-      const recoveredPendingOrder = await this.findPendingWooOrderByPhone(message.senderPhone);
-      if (recoveredPendingOrder) {
-        this.logger.log(
-          `[inbound] route=confirmation_candidate source=woo_pending senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}`
-        );
-        return this.routeConfirmationInboundMessage(message);
+      const recoveredConfirmationRoute = await this.routeConfirmationInboundMessage(message, { allowWooRecovery: true });
+      if (recoveredConfirmationRoute) {
+        return recoveredConfirmationRoute;
       }
     }
 
@@ -464,36 +456,47 @@ export class ConfirmationService {
     };
   }
 
-  async routeConfirmationInboundMessage(message) {
+  async routeConfirmationInboundMessage(message, options = {}, replyContext = null) {
     if (!message.senderPhone || !isConfirmationMessageKind(message.kind)) {
+      return null;
+    }
+
+    const resolvedReplyContext = replyContext || await this.resolveReplyContext(
+      message.senderPhone,
+      { allowWooRecovery: options.allowWooRecovery !== false }
+    );
+    if (resolvedReplyContext.pendingOrders.length > 1) {
+      this.logger.warn(
+        `[confirmation] multiple pending orders require manual follow-up senderPhone=${message.senderPhone} candidateOrderIds=${resolvedReplyContext.pendingOrders.map((order) => order.orderId).join(',')} messageKey=${message.messageKey}`
+      );
       this.appendInboundMessage({
         message,
-        orderId: null,
-        storedKind: `unmatched_${message.kind || 'unknown'}`
+        orderId: resolvedReplyContext.latestOrder?.orderId || null,
+        storedKind: message.kind === 'audio' ? 'customer_audio_reply' : 'customer_reply'
       });
       return {
-        ok: true,
+        ok: false,
         ignored: true,
         duplicate: false,
         failed: false,
-        route: 'ignored',
-        eventStatus: 'unmatched_inbound'
+        route: 'confirmation',
+        eventStatus: 'manual_followup_required',
+        reason: 'multiple_pending_orders'
       };
     }
 
-    const replyContext = await this.resolveReplyContext(message.senderPhone);
-    if (!replyContext.pendingOrder) {
+    if (!resolvedReplyContext.pendingOrder) {
       const inbound = {
         type: message.kind,
         text: message.textBody
       };
       this.appendInboundMessage({
         message,
-        orderId: replyContext.latestOrder?.orderId || null,
+        orderId: resolvedReplyContext.latestOrder?.orderId || null,
         storedKind: message.kind === 'audio' ? 'customer_audio_reply' : 'customer_reply'
       });
 
-      if (replyContext.latestOrder && isSameFinalDecision(replyContext.latestOrder, inbound)) {
+      if (resolvedReplyContext.latestOrder && isSameFinalDecision(resolvedReplyContext.latestOrder, inbound)) {
         return {
           ok: true,
           ignored: false,
@@ -504,17 +507,13 @@ export class ConfirmationService {
         };
       }
 
-      return {
-        ok: true,
-        ignored: true,
-        duplicate: false,
-        failed: false,
-        route: 'ignored',
-        eventStatus: 'unmatched_inbound'
-      };
+      return null;
     }
 
-    return this.processConfirmationInboundMessage(message, replyContext);
+    this.logger.log(
+      `[inbound] route=confirmation_candidate senderPhone=${message.senderPhone || ''} pendingOrderId=${resolvedReplyContext.pendingOrder.orderId} kind=${message.kind || 'unknown'} messageKey=${message.messageKey} source=${resolvedReplyContext.matchedViaWooFallback ? 'woo_pending' : 'local_pending'}`
+    );
+    return this.processConfirmationInboundMessage(message, resolvedReplyContext);
   }
 
   async processConfirmationInboundMessage(message, replyContext) {
@@ -527,14 +526,10 @@ export class ConfirmationService {
       storedKind: message.kind === 'audio' ? 'customer_audio_reply' : 'customer_reply'
     });
 
-    const pendingCount = this.store.listPendingOrdersByPhone(message.senderPhone).length;
-    if (pendingCount > 1) {
-      this.logger.warn(`Multiple pending orders found for ${message.senderPhone}; using latest order ${pendingOrder.orderId}.`);
-    }
-
     const result = await this.withOrderLock(pendingOrder.orderId, async () => {
       const reply = message.kind === 'audio' ? '' : String(message.textBody || '').trim();
       const decisionMeta = getDecisionMeta(pendingOrder.rawOrder || {});
+      const lastConfirmationMessageKey = pendingOrder.lastConfirmationMessageKey || decisionMeta.lastConfirmationMessageKey || '';
       const currentInvalidReplyCount = Number(
         pendingOrder.invalidReplyCount
         ?? decisionMeta.invalidReplyCount
@@ -543,13 +538,25 @@ export class ConfirmationService {
       const currentManualFollowupRequired = pendingOrder.manualFollowupRequired === true
         || decisionMeta.manualFollowupRequired === 'yes';
 
+      if (lastConfirmationMessageKey && lastConfirmationMessageKey === message.messageKey) {
+        return {
+          ok: true,
+          ignored: false,
+          duplicate: true,
+          failed: false,
+          route: 'confirmation',
+          eventStatus: 'duplicate_confirmation_message'
+        };
+      }
+
       if (reply !== '1' && reply !== '2') {
         if (currentManualFollowupRequired) {
           this.store.upsertOrder({
             ...pendingOrder,
             invalidReplyCount: currentInvalidReplyCount,
             manualFollowupRequired: true,
-            confirmationState: 'pending_confirmation'
+            confirmationState: 'pending_confirmation',
+            lastConfirmationMessageKey: message.messageKey
           });
           return {
             ok: false,
@@ -571,7 +578,8 @@ export class ConfirmationService {
             orderPayload: pendingOrder.rawOrder || {},
             orderId: pendingOrder.orderId,
             invalidReplyCount: nextInvalidReplyCount,
-            manualFollowupRequired: nextManualFollowupRequired
+            manualFollowupRequired: nextManualFollowupRequired,
+            lastConfirmationMessageKey: message.messageKey
           });
           conversationOrder = updatedConversationOrder || conversationOrder;
         } catch (error) {
@@ -583,19 +591,20 @@ export class ConfirmationService {
           rawOrder: conversationOrder,
           invalidReplyCount: nextInvalidReplyCount,
           manualFollowupRequired: nextManualFollowupRequired,
-          confirmationState: 'pending_confirmation'
+          confirmationState: 'pending_confirmation',
+          lastConfirmationMessageKey: message.messageKey
         });
 
-        const clarificationLogicalKey = nextInvalidReplyCount === 1
-          ? OUTBOUND_LOGICAL_KEYS.clarification1
-          : OUTBOUND_LOGICAL_KEYS.clarification2;
-        await this.safeSendTrackedMessage({
-          phone: pendingOrder.phone,
-          orderId: pendingOrder.orderId,
-          logicalKey: clarificationLogicalKey,
-          kind: 'clarification',
-          message: this.messages.invalidReply
-        });
+        if (nextInvalidReplyCount === 1) {
+          await this.safeSendTrackedMessage({
+            phone: pendingOrder.phone,
+            orderId: pendingOrder.orderId,
+            kind: 'clarification',
+            message: this.messages.invalidReply
+          });
+        } else if (nextManualFollowupRequired) {
+          this.logger.warn(`[confirmation] manual follow-up required after repeated invalid replies orderId=${pendingOrder.orderId}`);
+        }
 
         return {
           ok: false,
@@ -654,7 +663,8 @@ export class ConfirmationService {
         lastSyncError: '',
         customerReplySent: customerReplySent || 'no',
         invalidReplyCount: currentInvalidReplyCount,
-        manualFollowupRequired: false
+        manualFollowupRequired: false,
+        lastConfirmationMessageKey: message.messageKey
       });
 
       try {
@@ -673,7 +683,8 @@ export class ConfirmationService {
             lastSyncError: '',
             customerReplySent: customerReplySent || 'no',
             invalidReplyCount: currentInvalidReplyCount,
-            manualFollowupRequired: 'no'
+            manualFollowupRequired: 'no',
+            lastConfirmationMessageKey: message.messageKey
           }
         });
         nextOrderState = this.store.upsertOrder({
@@ -685,44 +696,16 @@ export class ConfirmationService {
       }
 
       if ((nextOrderState.customerReplySent || 'no') !== 'yes') {
-        nextOrderState = this.store.upsertOrder({
-          ...nextOrderState,
-          customerReplySent: 'yes'
-        });
-        try {
-          const updatedOrder = await this.persistWorkflowAndDecisionMeta({
-            orderPayload: nextOrderState.rawOrder || pendingOrder.rawOrder || {},
-            orderId: pendingOrder.orderId,
-            workflowValues: {
-              state: nextState,
-              cancelledAt: nextState === 'cancelled' ? nowIso : ''
-            },
-            decisionValues: {
-              decision: nextState,
-              decisionAt: nowIso,
-              customerReplySent: 'yes',
-              wooSyncStatus: nextOrderState.wooSyncStatus || 'pending_retry',
-              wooSyncAttempts: nextOrderState.wooSyncAttempts || 0,
-              lastSyncError: nextOrderState.lastSyncError || '',
-              invalidReplyCount: currentInvalidReplyCount,
-              manualFollowupRequired: 'no'
-            }
-          });
-          nextOrderState = this.store.upsertOrder({
-            ...nextOrderState,
-            rawOrder: updatedOrder || nextOrderState.rawOrder
-          });
-        } catch (error) {
-          this.logger.warn(`Unable to mark customer reply as sent for order ${pendingOrder.orderId}: ${error.message}`);
-        }
-
-        await this.safeSendTrackedMessage({
+        nextOrderState = await this.sendCustomerDecisionReply({
+          order: nextOrderState,
+          decisionOrderPayload: nextOrderState.rawOrder || pendingOrder.rawOrder || {},
           phone: pendingOrder.phone,
-          orderId: pendingOrder.orderId,
           logicalKey: reply === '1'
             ? OUTBOUND_LOGICAL_KEYS.confirmationSuccess
             : OUTBOUND_LOGICAL_KEYS.cancellationSuccess,
-          kind: reply === '1' ? 'confirmation_success' : 'cancellation_success',
+          nextState,
+          nowIso,
+          currentInvalidReplyCount,
           message: followUpMessage
         });
       }
@@ -755,17 +738,6 @@ export class ConfirmationService {
             : reconciliation.syncStatus
       };
     });
-
-    if (result?.locked === false) {
-      return {
-        ok: true,
-        ignored: true,
-        duplicate: true,
-        failed: false,
-        route: 'confirmation',
-        eventStatus: 'duplicate_in_flight'
-      };
-    }
 
     return result;
   }
@@ -1077,17 +1049,6 @@ export class ConfirmationService {
       };
     });
 
-    if (result?.locked === false) {
-      return {
-        ok: true,
-        ignored: true,
-        duplicate: true,
-        failed: false,
-        route: 'feedback',
-        eventStatus: 'feedback_duplicate'
-      };
-    }
-
     return result;
   }
 
@@ -1111,29 +1072,26 @@ export class ConfirmationService {
       backfilled: 0,
       remindersSent: 0,
       autoCancelled: 0,
-      repaired: 0,
+      ambiguous: 0,
       skipped: 0,
       errors: 0
     };
 
-    const repairCandidates = await this.workflowRepository.listRepairableOutboundMessages();
-    for (const reservation of repairCandidates) {
-      try {
-        const repairResult = await this.withOrderLock(reservation.orderId, async () => this.repairAcceptedOutboundMessage(reservation));
-        if (repairResult?.locked === false) {
-          summary.skipped += 1;
-          continue;
-        }
-        if (repairResult) {
-          summary.repaired += 1;
-        }
-      } catch (error) {
-        this.logger.error(error);
-        summary.errors += 1;
-      }
-    }
-
     const orders = await this.listOrdersForStatuses(RECONCILIATION_STATUSES);
+
+    for (const order of orders) {
+      if (!hasAmbiguousCustomerOutboundState(order, now)) {
+        continue;
+      }
+      const normalizedOrder = normalizeWooOrder(order, this.messages);
+      this.logger.warn(`[task][order-followups] ambiguous_send_state orderId=${normalizedOrder.orderId}`);
+      this.store.upsertOrder({
+        ...normalizedOrder,
+        rawOrder: order,
+        lastError: 'ambiguous_send_state'
+      });
+      summary.ambiguous += 1;
+    }
 
     for (const order of orders) {
       const workflow = getWorkflowMeta(order);
@@ -1143,6 +1101,18 @@ export class ConfirmationService {
 
       try {
         const action = await this.withOrderLock(orderId, async () => {
+          if (hasAmbiguousCustomerOutboundState(order, now)) {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              action: 'skip_ambiguous_send_state'
+            });
+            return 'skipped';
+          }
+
           const effectiveDecision = decisionMeta.decision || localOrder?.decision || '';
           const manualOverride = decisionMeta.manualOverride || localOrder?.manualOverride || '';
           if (manualOverride === 'yes') {
@@ -1160,19 +1130,28 @@ export class ConfirmationService {
           if (effectiveDecision) {
             const targetWooStatus = effectiveDecision === 'confirmed' ? 'on-hold' : 'cancelled';
             const currentSyncStatus = decisionMeta.wooSyncStatus || localOrder?.wooSyncStatus || '';
+            let nextOrderState = {
+              ...localOrder,
+              ...normalizeWooOrder(order, this.messages),
+              rawOrder: order,
+              decision: effectiveDecision,
+              decisionAt: decisionMeta.decisionAt || localOrder?.decisionAt || ''
+            };
+            const alreadyNotified = effectiveDecision === 'confirmed'
+              ? (decisionMeta.internalNotifiedConfirmed || localOrder?.internalNotifiedConfirmed || 'no') === 'yes'
+              : (decisionMeta.internalNotifiedCancelled || localOrder?.internalNotifiedCancelled || 'no') === 'yes';
+            nextOrderState = await this.sendInternalDecisionNotifications({
+              order: nextOrderState,
+              decision: effectiveDecision,
+              alreadyNotified
+            });
             if (currentSyncStatus === 'manual') {
               return 'skipped';
             }
 
             if (order.status !== targetWooStatus && currentSyncStatus !== 'pending_retry') {
               await this.markManualOverride({
-                order: {
-                  ...localOrder,
-                  ...normalizeWooOrder(order, this.messages),
-                  rawOrder: order,
-                  decision: effectiveDecision,
-                  decisionAt: decisionMeta.decisionAt || localOrder?.decisionAt || ''
-                },
+                order: nextOrderState,
                 status: order.status
               });
               return 'skipped';
@@ -1180,11 +1159,7 @@ export class ConfirmationService {
 
             if (currentSyncStatus === 'pending_retry') {
               const reconciliation = await this.reconcileWooDecision({
-                order: {
-                  ...localOrder,
-                  ...normalizeWooOrder(order, this.messages),
-                  rawOrder: order
-                },
+                order: nextOrderState,
                 targetState: effectiveDecision,
                 targetWooStatus,
                 note: effectiveDecision === 'confirmed'
@@ -1198,7 +1173,7 @@ export class ConfirmationService {
             return 'skipped';
           }
 
-          if (order.status !== PROCESSING_STATUS) {
+          if (!ACTIVE_CONFIRMATION_STATUSES.includes(String(order.status || ''))) {
             if (workflow.confirmationSentAt) {
               await this.markManualOverride({
                 order: {
@@ -1216,7 +1191,7 @@ export class ConfirmationService {
                   workflowState: workflow.state,
                   confirmationSentAt: workflow.confirmationSentAt,
                   reminderCount: workflow.reminderCount,
-                  action: 'skip_not_processing'
+                  action: 'skip_not_active'
                 });
                 return 'skipped';
               }
@@ -1227,7 +1202,7 @@ export class ConfirmationService {
               workflowState: workflow.state,
               confirmationSentAt: workflow.confirmationSentAt,
               reminderCount: workflow.reminderCount,
-              action: 'skip_not_processing'
+              action: 'skip_not_active'
             });
             return 'skipped';
           }
@@ -1295,20 +1270,6 @@ export class ConfirmationService {
 
           const ageMs = now.getTime() - confirmationSentAt.getTime();
 
-          if (ageMs >= AUTO_CANCEL_MS && workflow.reminderCount >= 2) {
-            this.logFollowupDecision({
-              orderId,
-              orderStatus: order.status,
-              workflowState: workflow.state,
-              confirmationSentAt: workflow.confirmationSentAt,
-              reminderCount: workflow.reminderCount,
-              ageMs,
-              action: 'auto_cancel'
-            });
-            await this.autoCancelPendingOrder(order, now);
-            return 'autoCancelled';
-          }
-
           if (ageMs >= SECOND_REMINDER_MS && workflow.reminderCount === 1) {
             this.logFollowupDecision({
               orderId,
@@ -1335,6 +1296,36 @@ export class ConfirmationService {
             return await this.sendReminder(order, 1, now) ? 'reminderSent' : 'skipped';
           }
 
+          if (workflow.reminderCount >= 2) {
+            const reminder2SentAt = new Date(workflow.reminder2SentAt || '');
+            if (Number.isNaN(reminder2SentAt.getTime())) {
+              this.logFollowupDecision({
+                orderId,
+                orderStatus: order.status,
+                workflowState: workflow.state,
+                confirmationSentAt: workflow.confirmationSentAt,
+                reminderCount: workflow.reminderCount,
+                action: 'skip_invalid_timestamp'
+              });
+              return 'skipped';
+            }
+
+            const afterSecondReminderMs = now.getTime() - reminder2SentAt.getTime();
+            if (afterSecondReminderMs >= AUTO_CANCEL_AFTER_SECOND_REMINDER_MS) {
+              this.logFollowupDecision({
+                orderId,
+                orderStatus: order.status,
+                workflowState: workflow.state,
+                confirmationSentAt: workflow.confirmationSentAt,
+                reminderCount: workflow.reminderCount,
+                ageMs: afterSecondReminderMs,
+                action: 'auto_cancel'
+              });
+              await this.autoCancelPendingOrder(order, now);
+              return 'autoCancelled';
+            }
+          }
+
           this.logFollowupDecision({
             orderId,
             orderStatus: order.status,
@@ -1347,9 +1338,7 @@ export class ConfirmationService {
           return 'skipped';
         });
 
-        if (action?.locked === false) {
-          summary.skipped += 1;
-        } else if (action === 'backfilled') {
+        if (action === 'backfilled') {
           summary.backfilled += 1;
         } else if (action === 'reminderSent') {
           summary.remindersSent += 1;
@@ -1376,36 +1365,52 @@ export class ConfirmationService {
     );
   }
 
-  async reserveAndSendLogicalMessage({
+  pruneRecentInboundMessageKeys() {
+    const cutoff = Date.now() - INBOUND_MESSAGE_DEDUPE_TTL_MS;
+    for (const [messageKey, timestamp] of this.recentInboundMessageKeys.entries()) {
+      if (timestamp < cutoff) {
+        this.recentInboundMessageKeys.delete(messageKey);
+      }
+    }
+  }
+
+  async sendLogicalMessageWithWooReservation({
+    orderPayload,
     orderId,
     phone,
     logicalKey,
     kind,
     message,
     persistAfterSend = null,
-    repairAfterAccepted = null
+    now = new Date()
   }) {
-    const reservation = await this.workflowRepository.reserveOutboundMessage({
-      orderId,
-      logicalKey,
-      recipientPhone: phone,
-      messageBody: message
-    });
+    const outboundMeta = getOutboundReservationMeta(orderPayload, logicalKey);
+    const nowIso = now.toISOString();
+    const reservedAtMs = Date.parse(outboundMeta.reservedAt || '');
 
-    if (reservation.status === 'in_progress') {
-      return { ok: true, duplicate: true, inProgress: true, record: reservation.record };
+    if (outboundMeta.state === 'sent') {
+      return { ok: true, duplicate: true, orderPayload };
     }
 
-    if (reservation.status === 'send_accepted' || reservation.status === 'persisted') {
-      if (repairAfterAccepted) {
-        await repairAfterAccepted({ reservation: reservation.record });
+    if (outboundMeta.state === 'reserved') {
+      if (!Number.isNaN(reservedAtMs) && (now.getTime() - reservedAtMs) < OUTBOUND_RESERVATION_STALE_MS) {
+        return { ok: true, duplicate: true, inProgress: true, orderPayload };
       }
-      return { ok: true, duplicate: true, record: reservation.record };
+
+      this.logger.warn(
+        `[outbound] ambiguous_send_state orderId=${orderId} logicalKey=${logicalKey} reservedAt=${outboundMeta.reservedAt || ''}`
+      );
+      return { ok: false, duplicate: true, ambiguous: true, orderPayload };
     }
 
-    if (reservation.status !== 'reserved') {
-      throw new Error(`Unexpected outbound reservation status: ${reservation.status}`);
-    }
+    const reservedOrder = await this.wooClient.updateOrderMeta(
+      orderId,
+      buildLogicalSendMetaUpdate(orderPayload, logicalKey, {
+        state: 'reserved',
+        reservedAt: nowIso
+      })
+    );
+    const reservationOrder = reservedOrder || orderPayload;
 
     let sendResult;
     try {
@@ -1414,23 +1419,22 @@ export class ConfirmationService {
         message
       });
     } catch (error) {
-      await this.workflowRepository.markOutboundFailed({
-        orderId,
-        logicalKey,
-        error: error.message
-      });
+      try {
+        await this.wooClient.updateOrderMeta(
+          orderId,
+          buildLogicalSendMetaUpdate(reservationOrder, logicalKey, {
+            state: '',
+            reservedAt: ''
+          })
+        );
+      } catch (clearError) {
+        this.logger.warn(`[outbound] unable to clear failed reservation orderId=${orderId} logicalKey=${logicalKey} error=${clearError.message}`);
+      }
       throw error;
     }
 
     const acceptedAt = new Date().toISOString();
     const providerMessageId = extractMessageId(sendResult) || '';
-    await this.workflowRepository.markOutboundAccepted({
-      orderId,
-      logicalKey,
-      providerMessageId,
-      acceptedAt,
-      providerPayload: sendResult
-    });
     this.store.appendMessage({
       source: 'outbound',
       orderId,
@@ -1445,9 +1449,10 @@ export class ConfirmationService {
         const persistResult = await persistAfterSend({
           acceptedAt,
           providerMessageId,
-          sendResult
+          sendResult,
+          reservedAt: nowIso,
+          reservationOrder
         });
-        await this.workflowRepository.markOutboundPersisted({ orderId, logicalKey });
         return {
           ok: true,
           duplicate: false,
@@ -1465,6 +1470,7 @@ export class ConfirmationService {
           ok: true,
           duplicate: false,
           persisted: false,
+          ambiguous: true,
           acceptedAt,
           providerMessageId,
           sendResult,
@@ -1473,15 +1479,39 @@ export class ConfirmationService {
       }
     }
 
-    await this.workflowRepository.markOutboundPersisted({ orderId, logicalKey });
-    return {
-      ok: true,
-      duplicate: false,
-      persisted: true,
-      acceptedAt,
-      providerMessageId,
-      sendResult
-    };
+    try {
+      await this.wooClient.updateOrderMeta(
+        orderId,
+        buildLogicalSendMetaUpdate(reservationOrder, logicalKey, {
+          state: 'sent',
+          reservedAt: nowIso,
+          sentAt: acceptedAt,
+          messageId: providerMessageId
+        })
+      );
+      return {
+        ok: true,
+        duplicate: false,
+        persisted: true,
+        acceptedAt,
+        providerMessageId,
+        sendResult
+      };
+    } catch (error) {
+      this.logger.warn(
+        `[outbound] accepted_not_persisted orderId=${orderId} logicalKey=${logicalKey} error=${error.message}`
+      );
+      return {
+        ok: true,
+        duplicate: false,
+        persisted: false,
+        ambiguous: true,
+        acceptedAt,
+        providerMessageId,
+        sendResult,
+        error
+      };
+    }
   }
 
   async persistWorkflowAndDecisionMeta({ orderPayload, orderId, workflowValues = {}, decisionValues = {} }) {
@@ -1494,82 +1524,98 @@ export class ConfirmationService {
     );
   }
 
-  async repairAcceptedOutboundMessage(reservation) {
-    if (!reservation) {
-      return false;
-    }
-
-    const order = await this.wooClient.getOrder(reservation.orderId);
-    const normalizedOrder = normalizeWooOrder(order, this.messages);
-
-    if (reservation.logicalKey === OUTBOUND_LOGICAL_KEYS.confirmationRequest) {
-      await this.persistInitialConfirmationMeta({
-        orderPayload: order,
-        normalizedOrder,
-        acceptedAt: reservation.acceptedAt || new Date().toISOString(),
-        providerMessageId: reservation.providerMessageId || ''
-      });
-      await this.workflowRepository.markOutboundPersisted({
-        orderId: reservation.orderId,
-        logicalKey: reservation.logicalKey
-      });
-      return true;
-    }
-
-    if (reservation.logicalKey === OUTBOUND_LOGICAL_KEYS.reminder1 || reservation.logicalKey === OUTBOUND_LOGICAL_KEYS.reminder2) {
-      const reminderCount = reservation.logicalKey === OUTBOUND_LOGICAL_KEYS.reminder1 ? 1 : 2;
-      await this.persistReminderMeta({
-        orderPayload: order,
-        normalizedOrder,
-        reminderCount,
-        acceptedAt: reservation.acceptedAt || new Date().toISOString(),
-        providerMessageId: reservation.providerMessageId || ''
-      });
-      await this.workflowRepository.markOutboundPersisted({
-        orderId: reservation.orderId,
-        logicalKey: reservation.logicalKey
-      });
-      return true;
-    }
-
-    await this.workflowRepository.markOutboundPersisted({
-      orderId: reservation.orderId,
-      logicalKey: reservation.logicalKey
-    });
-    this.store.upsertOrder({
-      ...normalizedOrder,
-      rawOrder: order
-    });
-    return true;
-  }
-
-  async persistInitialConfirmationMeta({ orderPayload, normalizedOrder, acceptedAt, providerMessageId }) {
-    const updatedOrder = await this.persistWorkflowAndDecisionMeta({
-      orderPayload,
-      orderId: normalizedOrder.orderId,
-      workflowValues: {
-        state: 'pending',
-        confirmationSentAt: acceptedAt,
-        reminderCount: 0,
-        lastReminderAt: '',
-        cancelledAt: '',
-        confirmationMessageId: providerMessageId || ''
-      },
-      decisionValues: {
-        decision: '',
-        decisionAt: '',
-        wooSyncStatus: '',
-        wooSyncAttempts: 0,
-        lastSyncError: '',
-        customerReplySent: 'no',
-        internalNotifiedConfirmed: 'no',
-        internalNotifiedCancelled: 'no',
-        invalidReplyCount: 0,
-        manualFollowupRequired: 'no'
+  async sendCustomerDecisionReply({ order, decisionOrderPayload, phone, logicalKey, nextState, nowIso, currentInvalidReplyCount, message }) {
+    const sendOutcome = await this.sendLogicalMessageWithWooReservation({
+      orderPayload: decisionOrderPayload,
+      orderId: order.orderId,
+      phone,
+      logicalKey,
+      kind: logicalKey === OUTBOUND_LOGICAL_KEYS.confirmationSuccess ? 'confirmation_success' : 'cancellation_success',
+      message,
+      now: new Date(nowIso),
+      persistAfterSend: async ({ providerMessageId, reservedAt, reservationOrder }) => {
+        const updatedOrder = await this.persistWorkflowAndDecisionMeta({
+          orderPayload: reservationOrder || decisionOrderPayload,
+          orderId: order.orderId,
+          workflowValues: {
+            state: nextState,
+            cancelledAt: nextState === 'cancelled' ? nowIso : ''
+          },
+          decisionValues: {
+            decision: nextState,
+            decisionAt: nowIso,
+            customerReplySent: 'yes',
+            wooSyncStatus: order.wooSyncStatus || 'pending_retry',
+            wooSyncAttempts: order.wooSyncAttempts || 0,
+            lastSyncError: order.lastSyncError || '',
+            invalidReplyCount: currentInvalidReplyCount,
+            manualFollowupRequired: 'no',
+            lastConfirmationMessageKey: order.lastConfirmationMessageKey || ''
+          }
+        });
+        const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
+          order.orderId,
+          buildLogicalSendMetaUpdate(updatedOrder || reservationOrder || decisionOrderPayload, logicalKey, {
+            state: 'sent',
+            reservedAt,
+            messageId: providerMessageId
+          })
+        );
+        return metaUpdatedOrder || updatedOrder;
       }
     });
 
-    const persistedOrder = updatedOrder || orderPayload;
+    if (sendOutcome.persisted) {
+      return this.store.upsertOrder({
+        ...order,
+        rawOrder: sendOutcome.persistResult || order.rawOrder,
+        customerReplySent: 'yes'
+      });
+    }
+
+    return this.store.upsertOrder({
+      ...order,
+      rawOrder: decisionOrderPayload,
+      customerReplySent: order.customerReplySent || 'no',
+      lastError: sendOutcome.ambiguous ? 'ambiguous_send_state' : (order.lastError || '')
+    });
+  }
+
+  async persistInitialConfirmationMeta({ orderPayload, normalizedOrder, acceptedAt, providerMessageId, reservedAt }) {
+    const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
+      normalizedOrder.orderId,
+      mergeMetaUpdates(
+        buildWorkflowMetaUpdate(orderPayload, {
+          state: 'pending',
+          confirmationSentAt: acceptedAt,
+          reminderCount: 0,
+          lastReminderAt: '',
+          cancelledAt: '',
+          confirmationMessageId: providerMessageId || ''
+        }),
+        buildDecisionMetaUpdate(orderPayload, {
+          decision: '',
+          decisionAt: '',
+          wooSyncStatus: '',
+          wooSyncAttempts: 0,
+          lastSyncError: '',
+          customerReplySent: 'no',
+          internalNotifiedConfirmed: 'no',
+          internalNotifiedCancelled: 'no',
+          invalidReplyCount: 0,
+          manualFollowupRequired: 'no',
+          lastConfirmationMessageKey: ''
+        }),
+        buildLogicalSendMetaUpdate(orderPayload, OUTBOUND_LOGICAL_KEYS.confirmationRequest, {
+          state: 'sent',
+          reservedAt,
+          sentAt: acceptedAt,
+          messageId: providerMessageId || ''
+        })
+      )
+    );
+
+    const persistedOrder = metaUpdatedOrder || orderPayload;
     this.store.upsertOrder({
       ...normalizedOrder,
       rawOrder: persistedOrder,
@@ -1583,27 +1629,38 @@ export class ConfirmationService {
     return persistedOrder;
   }
 
-  async persistReminderMeta({ orderPayload, normalizedOrder, reminderCount, acceptedAt, providerMessageId }) {
+  async persistReminderMeta({ orderPayload, normalizedOrder, reminderCount, acceptedAt, providerMessageId, reservedAt }) {
     const decisionMeta = getDecisionMeta(orderPayload);
-    const updatedOrder = await this.persistWorkflowAndDecisionMeta({
-      orderPayload,
-      orderId: normalizedOrder.orderId,
-      workflowValues: {
-        state: 'pending',
-        reminderCount,
-        lastReminderAt: acceptedAt,
-        reminder1SentAt: reminderCount === 1 ? acceptedAt : undefined,
-        reminder1MessageId: reminderCount === 1 ? (providerMessageId || '') : undefined,
-        reminder2SentAt: reminderCount === 2 ? acceptedAt : undefined,
-        reminder2MessageId: reminderCount === 2 ? (providerMessageId || '') : undefined
-      },
-      decisionValues: {
-        invalidReplyCount: decisionMeta.invalidReplyCount,
-        manualFollowupRequired: decisionMeta.manualFollowupRequired || 'no'
-      }
-    });
+    const logicalKey = reminderCount === 1
+      ? OUTBOUND_LOGICAL_KEYS.reminder1
+      : OUTBOUND_LOGICAL_KEYS.reminder2;
+    const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
+      normalizedOrder.orderId,
+      mergeMetaUpdates(
+        buildWorkflowMetaUpdate(orderPayload, {
+          state: 'pending',
+          reminderCount,
+          lastReminderAt: acceptedAt,
+          reminder1SentAt: reminderCount === 1 ? acceptedAt : undefined,
+          reminder1MessageId: reminderCount === 1 ? (providerMessageId || '') : undefined,
+          reminder2SentAt: reminderCount === 2 ? acceptedAt : undefined,
+          reminder2MessageId: reminderCount === 2 ? (providerMessageId || '') : undefined
+        }),
+        buildDecisionMetaUpdate(orderPayload, {
+          invalidReplyCount: decisionMeta.invalidReplyCount,
+          manualFollowupRequired: decisionMeta.manualFollowupRequired || 'no',
+          lastConfirmationMessageKey: decisionMeta.lastConfirmationMessageKey || ''
+        }),
+        buildLogicalSendMetaUpdate(orderPayload, logicalKey, {
+          state: 'sent',
+          reservedAt,
+          sentAt: acceptedAt,
+          messageId: providerMessageId || ''
+        })
+      )
+    );
 
-    const persistedOrder = updatedOrder || orderPayload;
+    const persistedOrder = metaUpdatedOrder || orderPayload;
     this.store.upsertOrder({
       ...normalizedOrder,
       rawOrder: persistedOrder,
@@ -1617,13 +1674,14 @@ export class ConfirmationService {
     return persistedOrder;
   }
 
-  async persistConversationState({ orderPayload, orderId, invalidReplyCount, manualFollowupRequired }) {
+  async persistConversationState({ orderPayload, orderId, invalidReplyCount, manualFollowupRequired, lastConfirmationMessageKey }) {
     return this.persistWorkflowAndDecisionMeta({
       orderPayload,
       orderId,
       decisionValues: {
         invalidReplyCount,
-        manualFollowupRequired: manualFollowupRequired ? 'yes' : 'no'
+        manualFollowupRequired: manualFollowupRequired ? 'yes' : 'no',
+        lastConfirmationMessageKey
       }
     });
   }
@@ -1693,35 +1751,50 @@ export class ConfirmationService {
     return [...mergedOrders.values()].sort(compareApiOrdersByRecency);
   }
 
-  async resolveReplyContext(phone) {
-    const localPendingOrder = this.store.findLatestPendingOrderByPhone(phone);
+  async resolveReplyContext(phone, { allowWooRecovery = true } = {}) {
+    const localPendingOrders = this.store.listPendingOrdersByPhone(phone).sort(compareOrdersByRecency);
+    const localPendingOrder = localPendingOrders[0] || null;
     const localLatestOrder = localPendingOrder || this.store.findLatestOrderByPhone(phone);
-    if (localPendingOrder) {
+    if (localPendingOrders.length) {
       return {
+        pendingOrders: localPendingOrders,
         pendingOrder: localPendingOrder,
         latestOrder: localLatestOrder,
         matchedViaWooFallback: false
       };
     }
 
-    const recoveredOrder = await this.findPendingWooOrderByPhone(phone);
-    if (!recoveredOrder) {
+    if (!allowWooRecovery) {
       return {
+        pendingOrders: [],
         pendingOrder: null,
         latestOrder: localLatestOrder,
         matchedViaWooFallback: false
       };
     }
 
-    const storedRecoveredOrder = this.store.upsertOrder({
+    const recoveredOrders = await this.findPendingWooOrdersByPhone(phone);
+    if (!recoveredOrders.length) {
+      return {
+        pendingOrders: [],
+        pendingOrder: null,
+        latestOrder: localLatestOrder,
+        matchedViaWooFallback: false
+      };
+    }
+
+    const storedRecoveredOrders = recoveredOrders.map((recoveredOrder) => this.store.upsertOrder({
       ...normalizeWooOrder(recoveredOrder, this.messages),
       rawOrder: recoveredOrder,
       confirmationState: 'pending_confirmation',
       invalidReplyCount: getDecisionMeta(recoveredOrder).invalidReplyCount,
-      manualFollowupRequired: getDecisionMeta(recoveredOrder).manualFollowupRequired === 'yes'
-    });
+      manualFollowupRequired: getDecisionMeta(recoveredOrder).manualFollowupRequired === 'yes',
+      lastConfirmationMessageKey: getDecisionMeta(recoveredOrder).lastConfirmationMessageKey || ''
+    }));
+    const storedRecoveredOrder = storedRecoveredOrders[0];
 
     return {
+      pendingOrders: storedRecoveredOrders,
       pendingOrder: storedRecoveredOrder,
       latestOrder: storedRecoveredOrder,
       matchedViaWooFallback: true
@@ -1758,37 +1831,29 @@ export class ConfirmationService {
     const acceptedAtFallback = now.toISOString();
 
     try {
-      const sendOutcome = await this.reserveAndSendLogicalMessage({
+      const sendOutcome = await this.sendLogicalMessageWithWooReservation({
+        orderPayload,
         orderId: normalizedOrder.orderId,
         phone: normalizedOrder.phone,
         logicalKey: OUTBOUND_LOGICAL_KEYS.confirmationRequest,
         kind: 'confirmation_request',
         message,
-        repairAfterAccepted: async ({ reservation }) => {
-          await this.repairAcceptedOutboundMessage(reservation);
-        },
-        persistAfterSend: async ({ acceptedAt, providerMessageId }) => {
+        now,
+        persistAfterSend: async ({ acceptedAt, providerMessageId, reservedAt }) => {
           const persistedOrder = await this.persistInitialConfirmationMeta({
             orderPayload,
             normalizedOrder,
             acceptedAt: acceptedAt || acceptedAtFallback,
-            providerMessageId
+            providerMessageId,
+            reservedAt
           });
           await this.safeAddOrderNote(normalizedOrder.orderId, note);
           return persistedOrder;
         }
       });
 
-      if (sendOutcome.inProgress) {
+      if (sendOutcome.inProgress || sendOutcome.duplicate) {
         return { status: 202, body: { ok: true, duplicate: true, reason: 'confirmation_in_flight' } };
-      }
-
-      if (sendOutcome.duplicate) {
-        const currentReservation = sendOutcome.record
-          || await this.workflowRepository.getOutboundMessage(normalizedOrder.orderId, OUTBOUND_LOGICAL_KEYS.confirmationRequest);
-        if (currentReservation) {
-          await this.repairAcceptedOutboundMessage(currentReservation);
-        }
       }
 
       if (!sendOutcome.persisted) {
@@ -1799,8 +1864,10 @@ export class ConfirmationService {
           confirmationSentAt: sendOutcome.acceptedAt || acceptedAtFallback,
           invalidReplyCount: 0,
           manualFollowupRequired: false,
-          wasenderMessageId: sendOutcome.providerMessageId || ''
+          wasenderMessageId: sendOutcome.providerMessageId || '',
+          lastError: sendOutcome.ambiguous ? 'ambiguous_send_state' : ''
         });
+        return { status: 202, body: { ok: true, reason: 'ambiguous_send_state' } };
       }
 
       this.logger.log(`[confirmation] initial send accepted orderId=${normalizedOrder.orderId} phone=${normalizedOrder.phone}`);
@@ -1842,22 +1909,22 @@ export class ConfirmationService {
     const logicalKey = reminderCount === 1
       ? OUTBOUND_LOGICAL_KEYS.reminder1
       : OUTBOUND_LOGICAL_KEYS.reminder2;
-    const sendOutcome = await this.reserveAndSendLogicalMessage({
+    const sendOutcome = await this.sendLogicalMessageWithWooReservation({
+      orderPayload,
       orderId: normalizedOrder.orderId,
       phone: normalizedOrder.phone,
       logicalKey,
       kind: `reminder_${reminderCount}`,
       message,
-      repairAfterAccepted: async ({ reservation }) => {
-        await this.repairAcceptedOutboundMessage(reservation);
-      },
-      persistAfterSend: async ({ acceptedAt, providerMessageId }) => {
+      now,
+      persistAfterSend: async ({ acceptedAt, providerMessageId, reservedAt }) => {
         const persistedOrder = await this.persistReminderMeta({
           orderPayload,
           normalizedOrder,
           reminderCount,
           acceptedAt: acceptedAt || now.toISOString(),
-          providerMessageId
+          providerMessageId,
+          reservedAt
         });
         await this.safeAddOrderNote(normalizedOrder.orderId, `WhatsApp reminder #${reminderCount} sent.`);
         return persistedOrder;
@@ -1877,37 +1944,64 @@ export class ConfirmationService {
         reminderCount,
         lastReminderAt: sendOutcome.acceptedAt || now.toISOString(),
         invalidReplyCount: decisionMeta.invalidReplyCount,
-        manualFollowupRequired: decisionMeta.manualFollowupRequired === 'yes'
+        manualFollowupRequired: decisionMeta.manualFollowupRequired === 'yes',
+        lastError: sendOutcome.ambiguous ? 'ambiguous_send_state' : ''
       });
     }
 
-    return true;
+    return sendOutcome.persisted === true;
   }
 
   async autoCancelPendingOrder(orderPayload, now) {
     const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
+    const nowIso = now.toISOString();
     const statusUpdatedOrder = await this.wooClient.updateOrderStatus(normalizedOrder.orderId, 'cancelled');
     const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
       normalizedOrder.orderId,
-      buildWorkflowMetaUpdate(statusUpdatedOrder || orderPayload, {
-        state: 'cancelled',
-        cancelledAt: now.toISOString()
-      })
+      mergeMetaUpdates(
+        buildWorkflowMetaUpdate(statusUpdatedOrder || orderPayload, {
+          state: 'cancelled',
+          cancelledAt: nowIso
+        }),
+        buildDecisionMetaUpdate(statusUpdatedOrder || orderPayload, {
+          decision: 'cancelled',
+          decisionAt: nowIso,
+          wooSyncStatus: 'synced',
+          wooSyncAttempts: 0,
+          lastSyncError: '',
+          customerReplySent: 'no'
+        })
+      )
     );
-    await this.safeAddOrderNote(normalizedOrder.orderId, 'Order auto-cancelled after 72h without WhatsApp confirmation.');
-    await this.safeSendTrackedMessage({
+    await this.safeAddOrderNote(normalizedOrder.orderId, 'Order auto-cancelled 24h after the second WhatsApp reminder without confirmation.');
+    const sendOutcome = await this.sendLogicalMessageWithWooReservation({
+      orderPayload: metaUpdatedOrder || statusUpdatedOrder || orderPayload,
       phone: normalizedOrder.phone,
       orderId: normalizedOrder.orderId,
       logicalKey: OUTBOUND_LOGICAL_KEYS.autoCancellation,
       kind: 'auto_cancellation',
-      message: this.messages.cancelledReply
+      message: this.messages.cancelledReply,
+      now,
+      persistAfterSend: async ({ providerMessageId, reservedAt, reservationOrder }) => {
+        return this.wooClient.updateOrderMeta(
+          normalizedOrder.orderId,
+          buildLogicalSendMetaUpdate(reservationOrder || metaUpdatedOrder || statusUpdatedOrder || orderPayload, OUTBOUND_LOGICAL_KEYS.autoCancellation, {
+            state: 'sent',
+            reservedAt,
+            messageId: providerMessageId
+          })
+        );
+      }
     });
     this.store.upsertOrder({
       ...normalizedOrder,
-      rawOrder: metaUpdatedOrder || statusUpdatedOrder || orderPayload,
+      rawOrder: sendOutcome.persistResult || metaUpdatedOrder || statusUpdatedOrder || orderPayload,
       confirmationState: 'cancelled',
       wooStatus: 'cancelled',
-      finalReply: 'timeout'
+      finalReply: 'timeout',
+      decision: 'cancelled',
+      decisionAt: nowIso,
+      lastError: sendOutcome.ambiguous ? 'ambiguous_send_state' : ''
     });
   }
 
@@ -1990,16 +2084,21 @@ export class ConfirmationService {
     }
   }
 
-  async safeSendTrackedMessage({ phone, orderId, logicalKey, kind, message }) {
+  async safeSendTrackedMessage({ phone, orderId, kind, message }) {
     try {
-      const result = await this.reserveAndSendLogicalMessage({
-        orderId,
-        phone,
-        logicalKey: logicalKey || `internal:${kind}:${phone}`,
-        kind,
+      const result = await this.wasenderClient.sendMessage({
+        to: phone,
         message
       });
-      return result.sendResult || result.record || null;
+      this.store.appendMessage({
+        source: 'outbound',
+        orderId,
+        phone,
+        kind,
+        payload: result,
+        text: message
+      });
+      return result;
     } catch (error) {
       this.logger.warn(`Unable to send WhatsApp follow-up for order ${orderId}: ${error.message}`);
       return null;
@@ -2043,20 +2142,35 @@ export class ConfirmationService {
       ? this.messages.internalConfirmedTemplate
       : this.messages.internalCancelledTemplate;
     const message = interpolateTemplate(template, buildTemplateValues(order));
+    const failedPhones = [];
 
     for (const phone of this.messages.internalNotifyPhones || []) {
       try {
-        const result = await this.reserveAndSendLogicalMessage({
-          orderId: order.orderId,
-          phone,
-          logicalKey: `internal:${decision}:${phone}`,
-          kind: decision === 'confirmed' ? 'internal_confirmed_notification' : 'internal_cancelled_notification',
+        const result = await this.wasenderClient.sendMessage({
+          to: phone,
           message
         });
-        void result;
+        this.store.appendMessage({
+          source: 'outbound',
+          orderId: order.orderId,
+          phone,
+          kind: decision === 'confirmed' ? 'internal_confirmed_notification' : 'internal_cancelled_notification',
+          payload: result,
+          text: message
+        });
       } catch (error) {
         this.logger.warn(`Unable to send internal ${decision} notification for order ${order.orderId} to ${phone}: ${error.message}`);
+        failedPhones.push(phone);
       }
+    }
+
+    if (failedPhones.length) {
+      this.logger.warn(`[confirmation] internal ${decision} notifications incomplete orderId=${order.orderId} failedPhones=${failedPhones.join(',')}`);
+      return this.store.upsertOrder({
+        ...order,
+        internalNotifiedConfirmed: decision === 'confirmed' ? 'no' : order.internalNotifiedConfirmed || 'no',
+        internalNotifiedCancelled: decision === 'cancelled' ? 'no' : order.internalNotifiedCancelled || 'no'
+      });
     }
 
     const nextOrder = this.store.upsertOrder({
@@ -2172,7 +2286,7 @@ export class ConfirmationService {
     return allOrders;
   }
 
-  async findPendingWooOrderByPhone(phone) {
+  async findPendingWooOrdersByPhone(phone) {
     const candidateOrders = await this.listOrdersForStatuses(REPLY_RECOVERY_STATUSES);
 
     return candidateOrders
@@ -2186,7 +2300,7 @@ export class ConfirmationService {
           && Boolean(workflow.confirmationSentAt)
           && !decisionMeta.decision;
       })
-      .sort(compareOrdersByRecency)[0] || null;
+      .sort(compareOrdersByRecency);
   }
 
   async persistDecisionMeta({
@@ -2212,7 +2326,8 @@ export class ConfirmationService {
           wooSyncStatus,
           wooSyncAttempts,
           lastSyncError,
-          customerReplySent
+          customerReplySent,
+          lastConfirmationMessageKey: getDecisionMeta(orderPayload).lastConfirmationMessageKey || ''
         })
       )
     );
@@ -2994,7 +3109,8 @@ function getDecisionMeta(order) {
     invalidReplyCount: metaItem(DECISION_META_KEYS.invalidReplyCount)
       ? Number(metaValue(DECISION_META_KEYS.invalidReplyCount) || 0)
       : undefined,
-    manualFollowupRequired: String(metaValue(DECISION_META_KEYS.manualFollowupRequired) || '')
+    manualFollowupRequired: String(metaValue(DECISION_META_KEYS.manualFollowupRequired) || ''),
+    lastConfirmationMessageKey: String(metaValue(DECISION_META_KEYS.lastConfirmationMessageKey) || '')
   };
 }
 
@@ -3068,9 +3184,57 @@ function buildDecisionMetaUpdate(order, values) {
     [DECISION_META_KEYS.manualOverrideAt]: values.manualOverrideAt,
     [DECISION_META_KEYS.manualOverrideStatus]: values.manualOverrideStatus,
     [DECISION_META_KEYS.invalidReplyCount]: values.invalidReplyCount,
-    [DECISION_META_KEYS.manualFollowupRequired]: values.manualFollowupRequired
+    [DECISION_META_KEYS.manualFollowupRequired]: values.manualFollowupRequired,
+    [DECISION_META_KEYS.lastConfirmationMessageKey]: values.lastConfirmationMessageKey
   })
     .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => {
+      const existing = existingMeta.find((item) => item.key === key);
+      return existing?.id
+        ? { id: existing.id, key, value }
+        : { key, value };
+    });
+}
+
+function getOutboundReservationMeta(order, logicalKey) {
+  const metaData = Array.isArray(order?.meta_data) ? order.meta_data : [];
+  const keys = OUTBOUND_META_KEYS[logicalKey];
+  if (!keys) {
+    return {
+      state: '',
+      reservedAt: '',
+      sentAt: '',
+      messageId: ''
+    };
+  }
+
+  const metaValue = (key) => {
+    const metaItem = metaData.find((item) => item.key === key);
+    return metaItem?.value ?? '';
+  };
+
+  return {
+    state: String(metaValue(keys.state) || ''),
+    reservedAt: String(metaValue(keys.reservedAt) || ''),
+    sentAt: keys.sentAt ? String(metaValue(keys.sentAt) || '') : '',
+    messageId: keys.messageId ? String(metaValue(keys.messageId) || '') : ''
+  };
+}
+
+function buildLogicalSendMetaUpdate(order, logicalKey, values) {
+  const keys = OUTBOUND_META_KEYS[logicalKey];
+  if (!keys) {
+    return [];
+  }
+
+  const existingMeta = Array.isArray(order?.meta_data) ? order.meta_data : [];
+  return Object.entries({
+    [keys.state]: values.state,
+    [keys.reservedAt]: values.reservedAt,
+    [keys.sentAt]: values.sentAt,
+    [keys.messageId]: values.messageId
+  })
+    .filter(([key, value]) => key && value !== undefined)
     .map(([key, value]) => {
       const existing = existingMeta.find((item) => item.key === key);
       return existing?.id
@@ -3175,6 +3339,32 @@ function mergeMetaUpdates(...metaSets) {
     }
   }
   return [...merged.values()];
+}
+
+function hasConfirmationWorkflowStarted({ workflow, localOrder }) {
+  return Boolean(
+    workflow.confirmationSentAt ||
+    ['pending', 'confirmed', 'cancelled', 'manual'].includes(String(workflow.state || '')) ||
+    ['pending_confirmation', 'confirmed', 'cancelled', 'manual'].includes(String(localOrder?.confirmationState || ''))
+  );
+}
+
+function hasAmbiguousCustomerOutboundState(order, now = new Date()) {
+  return [
+    OUTBOUND_LOGICAL_KEYS.confirmationRequest,
+    OUTBOUND_LOGICAL_KEYS.reminder1,
+    OUTBOUND_LOGICAL_KEYS.reminder2,
+    OUTBOUND_LOGICAL_KEYS.confirmationSuccess,
+    OUTBOUND_LOGICAL_KEYS.cancellationSuccess,
+    OUTBOUND_LOGICAL_KEYS.autoCancellation
+  ].some((logicalKey) => {
+    const outboundMeta = getOutboundReservationMeta(order, logicalKey);
+    if (outboundMeta.state !== 'reserved') {
+      return false;
+    }
+    const reservedAtMs = Date.parse(outboundMeta.reservedAt || '');
+    return !Number.isNaN(reservedAtMs) && (now.getTime() - reservedAtMs) >= OUTBOUND_RESERVATION_STALE_MS;
+  });
 }
 
 function isWhatsAppContactabilityFailure(error) {

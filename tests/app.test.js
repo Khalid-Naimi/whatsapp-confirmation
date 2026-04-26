@@ -8,14 +8,12 @@ import { createApp } from '../src/app.js';
 import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
 import { WasenderSendError } from '../src/services/wasender-client.js';
-import { InMemoryWorkflowRepository } from '../src/services/workflow-repository.js';
 import { normalizePhone, validatePhone } from '../src/utils/format.js';
 
 function createTestContext() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'woo-confirmation-'));
   const dataFile = path.join(tmpDir, 'db.json');
   const store = new JsonStore(dataFile);
-  const workflowRepository = new InMemoryWorkflowRepository();
 
   const wasenderCalls = [];
   const mailCalls = [];
@@ -125,7 +123,6 @@ function createTestContext() {
     store,
     wasenderClient,
     wooClient,
-    workflowRepository,
     mailService,
     messages: {
       confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
@@ -175,8 +172,7 @@ function createTestContext() {
     wooOrderUpdates,
     listedOrders,
     confirmationService,
-    logCalls,
-    workflowRepository
+    logCalls
   };
 }
 
@@ -396,8 +392,8 @@ test('new WooCommerce order sends one confirmation message and writes workflow m
   assert.match(wasenderCalls[0].message, /Lmdina: Casablanca/);
   assert.match(wasenderCalls[0].message, /Tawsil: 24h/);
   assert.match(wasenderCalls[0].message, /Ila 3endek chi question, seft la question dyalk l had numero: \+212 708-357533/);
-  assert.equal(wooOrderUpdates.length, 1);
-  const metaUpdate = wooOrderUpdates[0].fields.meta_data;
+  assert.equal(wooOrderUpdates.length, 2);
+  const metaUpdate = wooOrderUpdates.at(-1).fields.meta_data;
   assert.equal(workflowMetaValue(metaUpdate, 'rhymat_whatsapp_state'), 'pending');
   assert.equal(workflowMetaValue(metaUpdate, 'rhymat_whatsapp_reminder_count'), 0);
   assert.ok(workflowMetaValue(metaUpdate, 'rhymat_whatsapp_confirmation_sent_at'));
@@ -774,8 +770,8 @@ test('generic Wasender failure still uses send_failed without auto-cancelling', 
   assert.ok(logCalls.some((item) => item.includes('classified send_failed orderId=1024')));
 });
 
-test('accepted confirmation send is repaired from outbox without resending', async () => {
-  const { app, listedOrders, wasenderCalls, confirmationService, workflowRepository, store } = createTestContext();
+test('accepted confirmation send becomes ambiguous without resending when Woo meta finalization fails', async () => {
+  const { app, listedOrders, wasenderCalls, confirmationService, store } = createTestContext();
   const orderPayload = {
     id: 1025,
     status: 'processing',
@@ -793,11 +789,11 @@ test('accepted confirmation send is repaired from outbox without resending', asy
   };
   listedOrders.push(structuredClone(orderPayload));
 
-  let failMeta = true;
+  let metaCallCount = 0;
   const originalUpdateOrderMeta = confirmationService.wooClient.updateOrderMeta.bind(confirmationService.wooClient);
   confirmationService.wooClient.updateOrderMeta = async (orderId, metaData) => {
-    if (failMeta) {
-      failMeta = false;
+    metaCallCount += 1;
+    if (metaCallCount === 2) {
       throw new Error('temporary meta failure');
     }
     return originalUpdateOrderMeta(orderId, metaData);
@@ -814,25 +810,22 @@ test('accepted confirmation send is repaired from outbox without resending', asy
   });
 
   assert.equal(result.statusCode, 202);
+  assert.equal(result.body.reason, 'ambiguous_send_state');
   assert.equal(wasenderCalls.length, 1);
   assert.equal(store.getOrder('1025').confirmationState, 'pending_confirmation');
   assert.equal(
     workflowMetaValue(listedOrders.find((item) => String(item.id) === '1025').meta_data, 'rhymat_whatsapp_confirmation_sent_at'),
     undefined
   );
-
-  const reservedOutbound = await workflowRepository.getOutboundMessage('1025', 'customer:confirmation_request');
-  assert.equal(reservedOutbound?.state, 'send_accepted');
-
-  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
-
-  assert.equal(summary.repaired, 1);
-  assert.equal(wasenderCalls.length, 1);
-  assert.ok(
-    workflowMetaValue(listedOrders.find((item) => String(item.id) === '1025').meta_data, 'rhymat_whatsapp_confirmation_sent_at')
+  assert.equal(
+    workflowMetaValue(listedOrders.find((item) => String(item.id) === '1025').meta_data, 'rhymat_whatsapp_confirmation_request_state'),
+    'reserved'
   );
-  const repairedOutbound = await workflowRepository.getOutboundMessage('1025', 'customer:confirmation_request');
-  assert.equal(repairedOutbound?.state, 'persisted');
+
+  const summary = await confirmationService.runOrderFollowups({ now: new Date(Date.now() + (3 * 60 * 60 * 1000)) });
+
+  assert.equal(summary.ambiguous, 1);
+  assert.equal(wasenderCalls.length, 1);
 });
 
 test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
@@ -1092,7 +1085,7 @@ test('duplicate inbound confirmation without provider message id is deduped by c
   assert.equal(wasenderCalls.length, 4);
 });
 
-test('invalid reply sends clarification twice then goes manual', async () => {
+test('invalid reply sends one clarification then goes manual on the second invalid reply', async () => {
   const { app, wasenderCalls, store } = createTestContext();
   const orderPayload = {
     id: 105,
@@ -1178,17 +1171,13 @@ test('invalid reply sends clarification twice then goes manual', async () => {
     payload: thirdReplyPayload
   });
 
-  assert.equal(wasenderCalls.length, 3);
+  assert.equal(wasenderCalls.length, 2);
   assert.equal(store.getOrder('105').confirmationState, 'pending_confirmation');
   assert.equal(store.getOrder('105').invalidReplyCount, 2);
   assert.equal(store.getOrder('105').manualFollowupRequired, true);
   assert.equal(thirdResult.body.ignored, 1);
   assert.equal(
     wasenderCalls[1].message,
-    '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533'
-  );
-  assert.equal(
-    wasenderCalls[2].message,
     '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533'
   );
 });
@@ -1266,7 +1255,7 @@ test('invalid reply state survives restart via Woo recovery', async () => {
 
   assert.equal(secondResult.statusCode, 200);
   assert.equal(secondResult.body.ignored, 1);
-  assert.equal(second.wasenderCalls.length, 1);
+  assert.equal(second.wasenderCalls.length, 0);
   assert.equal(second.store.getOrder('1052').invalidReplyCount, 2);
   assert.equal(second.store.getOrder('1052').manualFollowupRequired, true);
   assert.equal(
@@ -1514,7 +1503,7 @@ test('reply recovers pending order from Woo after local cache loss and blocks fo
   assert.equal(restartedContext.wasenderCalls.length, 3);
 });
 
-test('Woo fallback picks the newest pending order for the same phone', async () => {
+test('Woo fallback requires manual follow-up when multiple pending orders share the same phone', async () => {
   const { app, store, listedOrders, wooOrderUpdates } = createTestContext();
 
   listedOrders.push(
@@ -1578,11 +1567,11 @@ test('Woo fallback picks the newest pending order for the same phone', async () 
   });
 
   assert.equal(replyResult.statusCode, 200);
-  const fallbackStatusUpdate = wooOrderUpdates.find((u) => u.fields.status);
-  assert.equal(fallbackStatusUpdate?.orderId, '502');
-  assert.equal(fallbackStatusUpdate?.fields.status, 'cancelled');
-  assert.equal(store.getOrder('502').confirmationState, 'cancelled');
-  assert.equal(store.getOrder('501'), null);
+  assert.equal(replyResult.body.ignored, 1);
+  assert.equal(store.read().events.at(-1).status, 'manual_followup_required');
+  assert.equal(wooOrderUpdates.find((u) => u.fields.status), undefined);
+  assert.equal(store.getOrder('502')?.confirmationState, 'pending_confirmation');
+  assert.equal(store.getOrder('501')?.confirmationState, 'pending_confirmation');
 });
 
 test('audio reply with pending order is treated like invalid input', async () => {
@@ -3526,7 +3515,7 @@ test('backfill skips feedback self-test orders without sending confirmation', as
   assert.equal(wooNoteCalls.length, 0);
 });
 
-test('hourly maintenance sends first and second reminders then auto-cancels after 72h', async () => {
+test('hourly maintenance sends first and second reminders then auto-cancels 24h after the second reminder', async () => {
   const { confirmationService, wasenderCalls, listedOrders, wooStatusCalls, wooNoteCalls } = createTestContext();
 
   listedOrders.push({
@@ -3585,7 +3574,8 @@ test('hourly maintenance sends first and second reminders then auto-cancels afte
     meta_data: [
       { key: 'rhymat_whatsapp_state', value: 'pending' },
       { key: 'rhymat_whatsapp_confirmation_sent_at', value: '2026-03-15T08:00:00.000Z' },
-      { key: 'rhymat_whatsapp_reminder_count', value: 2 }
+      { key: 'rhymat_whatsapp_reminder_count', value: 2 },
+      { key: 'rhymat_whatsapp_reminder_2_sent_at', value: '2026-03-17T09:00:00.000Z' }
     ]
   });
 
@@ -3598,7 +3588,7 @@ test('hourly maintenance sends first and second reminders then auto-cancels afte
   assert.match(wasenderCalls[1].message, /mazal ma jawbtinach 3la la commande dyalk numero 302/);
   assert.equal(wasenderCalls[2].message, 'La commande dyalk t annulat.');
   assert.deepEqual(wooStatusCalls[0], { orderId: '303', status: 'cancelled' });
-  assert.equal(wooNoteCalls.at(-1).note, 'Order auto-cancelled after 72h without WhatsApp confirmation.');
+  assert.equal(wooNoteCalls.at(-1).note, 'Order auto-cancelled 24h after the second WhatsApp reminder without confirmation.');
 });
 
 test('task endpoint runs followups with valid secret', async () => {
@@ -3634,7 +3624,7 @@ test('task endpoint runs followups with valid secret', async () => {
   assert.ok(logCalls.some((item) => item.includes('[task][order-followups] started')));
   assert.ok(
     logCalls.some((item) =>
-      item.includes('[task][order-followups] completed backfilled=1 remindersSent=0 autoCancelled=0 repaired=0 skipped=0 errors=0')
+      item.includes('[task][order-followups] completed backfilled=1 remindersSent=0 autoCancelled=0 ambiguous=0 skipped=0 errors=0')
     )
   );
 });
@@ -3818,7 +3808,7 @@ test('internal notification failure does not block final customer flow', async (
   assert.equal(result.statusCode, 200);
   assert.equal(store.getOrder('601').confirmationState, 'confirmed');
   assert.equal(store.getOrder('601').customerReplySent, 'yes');
-  assert.equal(store.getOrder('601').internalNotifiedConfirmed, 'yes');
+  assert.equal(store.getOrder('601').internalNotifiedConfirmed, 'no');
   assert.equal(wasenderCalls[1].message, 'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.');
 });
 

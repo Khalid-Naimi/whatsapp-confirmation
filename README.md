@@ -30,9 +30,6 @@ Backend-only Node.js service that:
 - `PORT`: HTTP port
 - `DATA_FILE`: JSON storage file path
 - `TASK_SECRET`: secret required by `POST /tasks/order-followups`
-- `DATABASE_URL`: PostgreSQL connection string used for cross-instance locks, inbound idempotency, and outbound send reservations
-- `WORKFLOW_LOCK_TTL_SECONDS`: lease duration for shared workflow locks, defaults to `60`
-- `OUTBOUND_REPAIR_BATCH_SIZE`: maximum number of accepted-but-unpersisted outbound sends to repair per follow-up run, defaults to `100`
 - `WOOCOMMERCE_BASE_URL`: WooCommerce store URL
 - `WOOCOMMERCE_CONSUMER_KEY`: WooCommerce REST consumer key
 - `WOOCOMMERCE_CONSUMER_SECRET`: WooCommerce REST consumer secret
@@ -61,9 +58,9 @@ Backend-only Node.js service that:
 ## Notes
 
 - Persistence is file-backed JSON for easy local setup and debug history.
-- PostgreSQL is required in all environments for cross-instance locking, webhook/message idempotency, and outbound send reservations.
+- Production is designed for a single app instance plus an external hourly task caller.
 - Confirmation/reminder state is stored on WooCommerce orders using `rhymat_whatsapp_*` meta keys.
-- Shared outbound reservations prevent customer-facing messages from being resent when WhatsApp accepts a send but WooCommerce meta persistence fails afterward.
+- Customer-facing send reservations are stored on WooCommerce orders so ambiguous post-send failures do not automatically resend messages.
 - Feedback replies are stored on WooCommerce orders using `rhymat_feedback_*` meta keys:
   - `rhymat_feedback_state`
   - `rhymat_feedback_reply_at`
@@ -89,3 +86,7 @@ Backend-only Node.js service that:
 - Contactability failures from Wasender that indicate an invalid or non-WhatsApp number now auto-cancel the order and attempt a customer email using the WooCommerce billing email.
 - Self-test and production feedback candidates are cached locally when their Woo webhook arrives, and tokenless replies can recover after restart/deploy using bounded recent Woo reads instead of a full-store scan.
 - Use a Render Cron Job to call `POST /tasks/order-followups` every hour with header `x-task-secret: <TASK_SECRET>`.
+- Reminder cadence:
+  - first reminder 24h after the initial confirmation send
+  - second reminder 24h after the first reminder window
+  - auto-cancel 24h after `rhymat_whatsapp_reminder_2_sent_at` if there is still no final reply
