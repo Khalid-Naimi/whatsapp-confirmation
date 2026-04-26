@@ -3388,7 +3388,7 @@ test('hourly maintenance sends first and second reminders then auto-cancels afte
 });
 
 test('task endpoint runs followups with valid secret', async () => {
-  const { app, listedOrders } = createTestContext();
+  const { app, listedOrders, logCalls } = createTestContext();
   listedOrders.push({
     id: 401,
     status: 'processing',
@@ -3416,6 +3416,50 @@ test('task endpoint runs followups with valid secret', async () => {
 
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.summary.backfilled, 1);
+  assert.equal(result.body.summary.remindersSent, 0);
+  assert.ok(logCalls.some((item) => item.includes('[task][order-followups] started')));
+  assert.ok(
+    logCalls.some((item) =>
+      item.includes('[task][order-followups] completed backfilled=1 remindersSent=0 autoCancelled=0 skipped=0 errors=0')
+    )
+  );
+});
+
+test('runOrderFollowups logs per-order reminder decision when a reminder is due', async () => {
+  const { confirmationService, listedOrders, wasenderCalls, logCalls } = createTestContext();
+  listedOrders.push({
+    id: 403,
+    status: 'processing',
+    total: '210.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Task',
+      last_name: 'Reminder',
+      phone: '+212655555555',
+      state: 'Casablanca',
+      address_1: '5 Rue Task'
+    },
+    line_items: [{ name: 'Produit Reminder', quantity: 1 }],
+    meta_data: [
+      { key: 'rhymat_whatsapp_state', value: 'pending' },
+      { key: 'rhymat_whatsapp_confirmation_sent_at', value: '2026-03-17T10:00:00.000Z' },
+      { key: 'rhymat_whatsapp_reminder_count', value: 0 }
+    ]
+  });
+
+  const result = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
+
+  assert.equal(result.remindersSent, 1);
+  assert.equal(wasenderCalls.length, 1);
+  assert.match(wasenderCalls[0].message, /mazal ma jawbtinach 3la la commande dyalk numero 403/);
+  assert.ok(
+    logCalls.some((item) =>
+      item.includes('[task][order-followups] orderId=403')
+      && item.includes('reminderCount=0')
+      && item.includes('ageHours=24.00')
+      && item.includes('action=send_reminder_1')
+    )
+  );
 });
 
 test('valid reply keeps decision final and retries Woo sync silently after failure', async () => {

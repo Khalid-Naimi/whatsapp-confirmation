@@ -120,7 +120,9 @@ export function createApp({ config, confirmationService, store, logger = console
 
         logger.log('[task][order-followups] started');
         const result = await confirmationService.runOrderFollowups();
-        logger.log(`[task][order-followups] completed pending=${result.pending || 0} reminded=${result.reminded || 0} cancelled=${result.cancelled || 0} errors=${result.errors || 0}`);
+        logger.log(
+          `[task][order-followups] completed backfilled=${result.backfilled || 0} remindersSent=${result.remindersSent || 0} autoCancelled=${result.autoCancelled || 0} skipped=${result.skipped || 0} errors=${result.errors || 0}`
+        );
         return sendJson(res, 200, { ok: true, summary: result });
       }
 

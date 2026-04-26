@@ -897,11 +897,20 @@ export class ConfirmationService {
         const workflow = getWorkflowMeta(order);
         const decisionMeta = getDecisionMeta(order);
         const localOrder = this.store.getOrder(String(order.id));
+        const orderId = String(order.id);
 
         try {
           const effectiveDecision = decisionMeta.decision || localOrder?.decision || '';
           const manualOverride = decisionMeta.manualOverride || localOrder?.manualOverride || '';
           if (manualOverride === 'yes') {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              action: 'skip_manual_override'
+            });
             summary.skipped += 1;
             continue;
           }
@@ -967,10 +976,26 @@ export class ConfirmationService {
               });
               const updatedLocalOrder = this.store.getOrder(String(order.id));
               if (updatedLocalOrder) {
+                this.logFollowupDecision({
+                  orderId,
+                  orderStatus: order.status,
+                  workflowState: workflow.state,
+                  confirmationSentAt: workflow.confirmationSentAt,
+                  reminderCount: workflow.reminderCount,
+                  action: 'skip_not_processing'
+                });
                 summary.skipped += 1;
                 continue;
               }
             }
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              action: 'skip_not_processing'
+            });
             summary.skipped += 1;
             continue;
           }
@@ -985,6 +1010,14 @@ export class ConfirmationService {
               continue;
             }
 
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              action: 'backfill_initial'
+            });
             const result = await this.sendInitialConfirmation(order, {
               note: 'WhatsApp confirmation backfill sent.',
               now
@@ -998,17 +1031,41 @@ export class ConfirmationService {
           }
 
           if (backfillOnly) {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              action: 'skip_not_due'
+            });
             summary.skipped += 1;
             continue;
           }
 
           if (workflow.state === 'confirmed' || workflow.state === 'cancelled') {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              action: 'skip_final_state'
+            });
             summary.skipped += 1;
             continue;
           }
 
           const confirmationSentAt = new Date(workflow.confirmationSentAt);
           if (Number.isNaN(confirmationSentAt.getTime())) {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              action: 'skip_invalid_timestamp'
+            });
             summary.skipped += 1;
             continue;
           }
@@ -1016,23 +1073,59 @@ export class ConfirmationService {
           const ageMs = now.getTime() - confirmationSentAt.getTime();
 
           if (ageMs >= AUTO_CANCEL_MS && workflow.reminderCount >= 2) {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              ageMs,
+              action: 'auto_cancel'
+            });
             await this.autoCancelPendingOrder(order, now);
             summary.autoCancelled += 1;
             continue;
           }
 
           if (ageMs >= SECOND_REMINDER_MS && workflow.reminderCount === 1) {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              ageMs,
+              action: 'send_reminder_2'
+            });
             await this.sendReminder(order, 2, now);
             summary.remindersSent += 1;
             continue;
           }
 
           if (ageMs >= FIRST_REMINDER_MS && workflow.reminderCount === 0) {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              ageMs,
+              action: 'send_reminder_1'
+            });
             await this.sendReminder(order, 1, now);
             summary.remindersSent += 1;
             continue;
           }
 
+          this.logFollowupDecision({
+            orderId,
+            orderStatus: order.status,
+            workflowState: workflow.state,
+            confirmationSentAt: workflow.confirmationSentAt,
+            reminderCount: workflow.reminderCount,
+            ageMs,
+            action: 'skip_not_due'
+          });
           summary.skipped += 1;
         } catch (error) {
           this.logger.error(error);
@@ -1041,6 +1134,13 @@ export class ConfirmationService {
       }
 
     return summary;
+  }
+
+  logFollowupDecision({ orderId, orderStatus, workflowState, confirmationSentAt, reminderCount, ageMs = null, action }) {
+    const ageHours = Number.isFinite(ageMs) ? (ageMs / (60 * 60 * 1000)).toFixed(2) : 'n/a';
+    this.logger.log(
+      `[task][order-followups] orderId=${orderId} status=${String(orderStatus || '')} workflowState=${String(workflowState || '')} confirmationSentAt=${String(confirmationSentAt || '')} reminderCount=${Number(reminderCount || 0)} ageHours=${ageHours} action=${action}`
+    );
   }
 
   async listOrdersForApi({ status } = {}) {
