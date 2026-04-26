@@ -49,6 +49,11 @@ export function loadConfig() {
     tasks: {
       secret: process.env.TASK_SECRET || ''
     },
+    workflow: {
+      databaseUrl: process.env.DATABASE_URL || '',
+      lockTtlSeconds: Number(process.env.WORKFLOW_LOCK_TTL_SECONDS || 60),
+      outboundRepairBatchSize: Number(process.env.OUTBOUND_REPAIR_BATCH_SIZE || 100)
+    },
     woo: {
       baseUrl: process.env.WOOCOMMERCE_BASE_URL || '',
       consumerKey: process.env.WOOCOMMERCE_CONSUMER_KEY || '',

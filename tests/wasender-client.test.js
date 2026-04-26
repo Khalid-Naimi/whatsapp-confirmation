@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WasenderClient } from '../src/services/wasender-client.js';
+import { WasenderSendError } from '../src/services/wasender-client.js';
 
 test('WasenderClient spaces consecutive sends to respect account protection', async () => {
   const callTimes = [];
@@ -72,4 +73,31 @@ test('WasenderClient retries after 429 using retry_after delay', async () => {
   assert.equal(attempts, 2);
   assert.deepEqual(sleepCalls, [2000]);
   assert.deepEqual(result, { ok: true });
+});
+
+test('WasenderClient throws after exhausting 429 retries', async () => {
+  let attempts = 0;
+
+  const client = new WasenderClient({
+    baseUrl: 'https://example.com/api',
+    apiToken: 'token',
+    maxRetries: 3,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1;
+      return {
+        ok: false,
+        status: 429,
+        async json() {
+          return { retry_after: 1 };
+        }
+      };
+    }
+  });
+
+  await assert.rejects(
+    () => client.sendMessage({ to: '+212612345678', message: 'hello' }),
+    WasenderSendError
+  );
+  assert.equal(attempts, 3);
 });

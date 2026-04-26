@@ -28,9 +28,7 @@ export class WasenderClient {
   }
 
   async sendMessageWithRetries({ to, message }) {
-    let attempt = 0;
-
-    while (attempt < this.maxRetries) {
+    for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
       await this.waitForAvailability();
       this.logger.log(`[wasender] send attempt=${attempt + 1} to=${maskPhone(to)}`);
 
@@ -55,11 +53,10 @@ export class WasenderClient {
 
       this.logger.warn(`[wasender] send rejected to=${maskPhone(to)} status=${response.status} body=${safeJson(data)}`);
 
-      if (response.status === 429 && attempt < this.maxRetries) {
+      if (response.status === 429 && attempt < this.maxRetries - 1) {
         const retryMs = resolveRetryDelayMs(data, this.minIntervalMs);
         this.nextAvailableAt = Math.max(this.nextAvailableAt, this.now() + retryMs);
         await this.sleep(retryMs);
-        attempt += 1;
         continue;
       }
 
@@ -69,6 +66,12 @@ export class WasenderClient {
         message: `Wasender send-message failed with ${response.status}: ${JSON.stringify(data)}`
       });
     }
+
+    throw new WasenderSendError({
+      status: 429,
+      data: null,
+      message: 'Wasender send-message exhausted retry attempts without a successful response'
+    });
   }
 
   async waitForAvailability() {

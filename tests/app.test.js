@@ -8,12 +8,14 @@ import { createApp } from '../src/app.js';
 import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
 import { WasenderSendError } from '../src/services/wasender-client.js';
+import { InMemoryWorkflowRepository } from '../src/services/workflow-repository.js';
 import { normalizePhone, validatePhone } from '../src/utils/format.js';
 
 function createTestContext() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'woo-confirmation-'));
   const dataFile = path.join(tmpDir, 'db.json');
   const store = new JsonStore(dataFile);
+  const workflowRepository = new InMemoryWorkflowRepository();
 
   const wasenderCalls = [];
   const mailCalls = [];
@@ -123,6 +125,7 @@ function createTestContext() {
     store,
     wasenderClient,
     wooClient,
+    workflowRepository,
     mailService,
     messages: {
       confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
@@ -172,7 +175,8 @@ function createTestContext() {
     wooOrderUpdates,
     listedOrders,
     confirmationService,
-    logCalls
+    logCalls,
+    workflowRepository
   };
 }
 
@@ -770,6 +774,67 @@ test('generic Wasender failure still uses send_failed without auto-cancelling', 
   assert.ok(logCalls.some((item) => item.includes('classified send_failed orderId=1024')));
 });
 
+test('accepted confirmation send is repaired from outbox without resending', async () => {
+  const { app, listedOrders, wasenderCalls, confirmationService, workflowRepository, store } = createTestContext();
+  const orderPayload = {
+    id: 1025,
+    status: 'processing',
+    total: '210.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Repair',
+      last_name: 'Later',
+      phone: '+212600000250',
+      state: 'Casablanca',
+      address_1: '25 Rue Repair'
+    },
+    line_items: [{ name: 'Produit Repair', quantity: 1 }],
+    meta_data: []
+  };
+  listedOrders.push(structuredClone(orderPayload));
+
+  let failMeta = true;
+  const originalUpdateOrderMeta = confirmationService.wooClient.updateOrderMeta.bind(confirmationService.wooClient);
+  confirmationService.wooClient.updateOrderMeta = async (orderId, metaData) => {
+    if (failMeta) {
+      failMeta = false;
+      throw new Error('temporary meta failure');
+    }
+    return originalUpdateOrderMeta(orderId, metaData);
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-1025'
+    },
+    payload: orderPayload
+  });
+
+  assert.equal(result.statusCode, 202);
+  assert.equal(wasenderCalls.length, 1);
+  assert.equal(store.getOrder('1025').confirmationState, 'pending_confirmation');
+  assert.equal(
+    workflowMetaValue(listedOrders.find((item) => String(item.id) === '1025').meta_data, 'rhymat_whatsapp_confirmation_sent_at'),
+    undefined
+  );
+
+  const reservedOutbound = await workflowRepository.getOutboundMessage('1025', 'customer:confirmation_request');
+  assert.equal(reservedOutbound?.state, 'send_accepted');
+
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
+
+  assert.equal(summary.repaired, 1);
+  assert.equal(wasenderCalls.length, 1);
+  assert.ok(
+    workflowMetaValue(listedOrders.find((item) => String(item.id) === '1025').meta_data, 'rhymat_whatsapp_confirmation_sent_at')
+  );
+  const repairedOutbound = await workflowRepository.getOutboundMessage('1025', 'customer:confirmation_request');
+  assert.equal(repairedOutbound?.state, 'persisted');
+});
+
 test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
   const { app, wooStatusCalls, store, wasenderCalls, wooOrderUpdates } = createTestContext();
   const orderPayload = {
@@ -960,6 +1025,73 @@ test('replayed final reply does not send duplicate customer follow-up', async ()
   assert.equal(replayResult.body.duplicates, 1);
 });
 
+test('duplicate inbound confirmation without provider message id is deduped by canonical fingerprint', async () => {
+  const { app, wasenderCalls, store } = createTestContext();
+  const orderPayload = {
+    id: 1051,
+    status: 'pending',
+    total: '95.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Canonical',
+      last_name: 'Reply',
+      phone: '212600000051',
+      state: 'Rabat'
+    },
+    line_items: [{ name: 'Savon', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-canonical-1051'
+    },
+    payload: orderPayload
+  });
+
+  const replyPayload = {
+    data: {
+      messages: {
+        key: {
+          remoteJid: '212600000051@s.whatsapp.net',
+          fromMe: false,
+          messageTimestamp: '1711111111'
+        },
+        messageBody: '1'
+      }
+    }
+  };
+
+  const firstResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'canonical-1'
+    },
+    payload: replyPayload
+  });
+
+  const secondResult = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'canonical-2'
+    },
+    payload: replyPayload
+  });
+
+  assert.equal(firstResult.statusCode, 200);
+  assert.equal(firstResult.body.confirmation, 1);
+  assert.equal(secondResult.statusCode, 200);
+  assert.equal(secondResult.body.duplicates, 1);
+  assert.equal(store.getOrder('1051').confirmationState, 'confirmed');
+  assert.equal(wasenderCalls.length, 4);
+});
+
 test('invalid reply sends clarification twice then goes manual', async () => {
   const { app, wasenderCalls, store } = createTestContext();
   const orderPayload = {
@@ -1058,6 +1190,88 @@ test('invalid reply sends clarification twice then goes manual', async () => {
   assert.equal(
     wasenderCalls[2].message,
     '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533'
+  );
+});
+
+test('invalid reply state survives restart via Woo recovery', async () => {
+  const first = createTestContext();
+  const orderPayload = {
+    id: 1052,
+    status: 'pending',
+    total: '75.00',
+    currency: 'MAD',
+    billing: {
+      first_name: 'Restart',
+      last_name: 'State',
+      phone: '212600000052',
+      state: 'Rabat'
+    },
+    line_items: [{ name: 'Produit Restart', quantity: 1 }],
+    meta_data: []
+  };
+  first.listedOrders.push(structuredClone(orderPayload));
+
+  await dispatch(first.app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-restart-1052'
+    },
+    payload: orderPayload
+  });
+
+  await dispatch(first.app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'restart-invalid-1'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            remoteJid: '212600000052@s.whatsapp.net',
+            fromMe: false
+          },
+          messageBody: 'yes'
+        }
+      }
+    }
+  });
+
+  const second = createTestContext();
+  second.listedOrders.push(structuredClone(first.listedOrders.find((item) => String(item.id) === '1052')));
+
+  const secondResult = await dispatch(second.app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: {
+      'x-wasender-signature': signWasenderPlain(),
+      'x-event-id': 'restart-invalid-2'
+    },
+    payload: {
+      data: {
+        messages: {
+          key: {
+            remoteJid: '212600000052@s.whatsapp.net',
+            fromMe: false
+          },
+          messageBody: 'safi'
+        }
+      }
+    }
+  });
+
+  assert.equal(secondResult.statusCode, 200);
+  assert.equal(secondResult.body.ignored, 1);
+  assert.equal(second.wasenderCalls.length, 1);
+  assert.equal(second.store.getOrder('1052').invalidReplyCount, 2);
+  assert.equal(second.store.getOrder('1052').manualFollowupRequired, true);
+  assert.equal(
+    workflowMetaValue(second.listedOrders.find((item) => String(item.id) === '1052').meta_data, 'rhymat_whatsapp_invalid_reply_count'),
+    2
   );
 });
 
@@ -3420,7 +3634,7 @@ test('task endpoint runs followups with valid secret', async () => {
   assert.ok(logCalls.some((item) => item.includes('[task][order-followups] started')));
   assert.ok(
     logCalls.some((item) =>
-      item.includes('[task][order-followups] completed backfilled=1 remindersSent=0 autoCancelled=0 skipped=0 errors=0')
+      item.includes('[task][order-followups] completed backfilled=1 remindersSent=0 autoCancelled=0 repaired=0 skipped=0 errors=0')
     )
   );
 });

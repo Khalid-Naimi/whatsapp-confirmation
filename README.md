@@ -30,6 +30,9 @@ Backend-only Node.js service that:
 - `PORT`: HTTP port
 - `DATA_FILE`: JSON storage file path
 - `TASK_SECRET`: secret required by `POST /tasks/order-followups`
+- `DATABASE_URL`: PostgreSQL connection string used for cross-instance locks, inbound idempotency, and outbound send reservations
+- `WORKFLOW_LOCK_TTL_SECONDS`: lease duration for shared workflow locks, defaults to `60`
+- `OUTBOUND_REPAIR_BATCH_SIZE`: maximum number of accepted-but-unpersisted outbound sends to repair per follow-up run, defaults to `100`
 - `WOOCOMMERCE_BASE_URL`: WooCommerce store URL
 - `WOOCOMMERCE_CONSUMER_KEY`: WooCommerce REST consumer key
 - `WOOCOMMERCE_CONSUMER_SECRET`: WooCommerce REST consumer secret
@@ -57,9 +60,10 @@ Backend-only Node.js service that:
 
 ## Notes
 
-- Persistence is file-backed JSON for easy local setup.
-- In production, consider replacing `JsonStore` with a real database.
+- Persistence is file-backed JSON for easy local setup and debug history.
+- PostgreSQL is required in all environments for cross-instance locking, webhook/message idempotency, and outbound send reservations.
 - Confirmation/reminder state is stored on WooCommerce orders using `rhymat_whatsapp_*` meta keys.
+- Shared outbound reservations prevent customer-facing messages from being resent when WhatsApp accepts a send but WooCommerce meta persistence fails afterward.
 - Feedback replies are stored on WooCommerce orders using `rhymat_feedback_*` meta keys:
   - `rhymat_feedback_state`
   - `rhymat_feedback_reply_at`
