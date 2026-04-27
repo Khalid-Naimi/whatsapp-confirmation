@@ -9,8 +9,9 @@ import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
 import { WasenderSendError } from '../src/services/wasender-client.js';
 import { normalizePhone, validatePhone } from '../src/utils/format.js';
+import { buildOptOutKeywords } from '../src/utils/opt-out.js';
 
-function createTestContext() {
+function createTestContext({ optOutKeywords = null } = {}) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'woo-confirmation-'));
   const dataFile = path.join(tmpDir, 'db.json');
   const store = new JsonStore(dataFile);
@@ -124,6 +125,7 @@ function createTestContext() {
     wasenderClient,
     wooClient,
     mailService,
+    optOutKeywords,
     messages: {
       confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       invalidReply: '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
@@ -4329,4 +4331,329 @@ test('API endpoints return CORS headers', async () => {
   await app(req, res);
 
   assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
+});
+
+// ── WhatsApp opt-out integration tests ────────────────────────────────────────
+
+test('inbound STOP message is detected as opt-out and contact is saved', async () => {
+  const { app, store } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-001',
+          remoteJid: '212600000090@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP'
+      }
+    }
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.optOut, 1);
+  assert.equal(result.body.processed, 1);
+  assert.equal(result.body.confirmation, 0);
+  assert.equal(store.isPhoneOptedOut('+212600000090'), true);
+  assert.equal(store.getContact('+212600000090').marketingStatus, 'opted_out');
+  assert.equal(store.getContact('+212600000090').optOutSource, 'inbound_whatsapp');
+  assert.equal(store.getContact('+212600000090').lastMessageText, 'STOP');
+});
+
+test('inbound stop (lowercase) is also detected as opt-out', async () => {
+  const { app, store } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-002',
+          remoteJid: '212600000091@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'stop'
+      }
+    }
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(store.isPhoneOptedOut('+212600000091'), true);
+});
+
+test('inbound Arabic opt-out keyword خرجني is detected correctly', async () => {
+  const { app, store } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-003',
+          remoteJid: '212600000092@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'خرجني'
+      }
+    }
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(store.isPhoneOptedOut('+212600000092'), true);
+  assert.equal(store.getContact('+212600000092').lastMessageText, 'خرجني');
+});
+
+test('opt-out does not send any reply message to the customer', async () => {
+  const { app, wasenderCalls } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-004',
+          remoteJid: '212600000093@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP'
+      }
+    }
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(wasenderCalls.length, 0);
+});
+
+test('STOP from phone with pending order opts out instead of triggering confirmation routing', async () => {
+  const { app, store, wasenderCalls } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  const orderPayload = {
+    id: 9001,
+    status: 'pending',
+    total: '100.00',
+    currency: 'MAD',
+    billing: { first_name: 'Test', last_name: 'User', phone: '212600000094', state: 'Casablanca' },
+    line_items: [{ name: 'Item', quantity: 1 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-9001'
+    },
+    payload: orderPayload
+  });
+
+  assert.equal(wasenderCalls.length, 1); // confirmation request sent
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-005',
+          remoteJid: '212600000094@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP'
+      }
+    }
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(result.body.optOut, 1);
+  assert.equal(result.body.confirmation, 0);
+  assert.equal(wasenderCalls.length, 1); // no additional send for the opt-out
+  assert.equal(store.isPhoneOptedOut('+212600000094'), true);
+  assert.equal(store.getOrder('9001').confirmationState, 'pending_confirmation'); // order untouched
+});
+
+test('normal reply 1 is not intercepted by opt-out guard when optOutKeywords is active', async () => {
+  const { app, store, wasenderCalls, wooOrderUpdates } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  const orderPayload = {
+    id: 9002,
+    status: 'pending',
+    total: '80.00',
+    currency: 'MAD',
+    billing: { first_name: 'OK', last_name: 'User', phone: '212600000095', state: 'Casablanca' },
+    line_items: [{ name: 'Produit', quantity: 2 }]
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': 'delivery-9002'
+    },
+    payload: orderPayload
+  });
+
+  const replyPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-confirm-9002',
+          remoteJid: '212600000095@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: '1'
+      }
+    }
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: replyPayload
+  });
+
+  assert.equal(result.body.confirmation, 1);
+  assert.equal(result.body.optOut, 0);
+  assert.equal(store.getOrder('9002').confirmationState, 'confirmed');
+  assert.equal(store.isPhoneOptedOut('+212600000095'), false);
+  const confirmUpdate = wooOrderUpdates.find((u) => u.fields.status);
+  assert.equal(confirmUpdate?.fields.status, 'on-hold');
+});
+
+test('opt-out guard is inactive when optOutKeywords is null and message passes to normal routing', async () => {
+  // default createTestContext has no optOutKeywords — guard should be a no-op
+  const { app, store } = createTestContext();
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-null-guard',
+          remoteJid: '212600000096@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP'
+      }
+    }
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  // With no optOutKeywords, the guard never fires so contact is never saved
+  assert.equal(store.isPhoneOptedOut('+212600000096'), false);
+});
+
+// ── GET /api/contacts/opted-out ────────────────────────────────────────────────
+
+test('GET /api/contacts/opted-out returns empty list when no one has opted out', async () => {
+  const { app } = createTestContext();
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/contacts/opted-out',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.ok, true);
+  assert.deepEqual(result.body.contacts, []);
+  assert.equal(result.body.note, 'local_cache_only');
+});
+
+test('GET /api/contacts/opted-out returns opted-out contacts after a STOP message', async () => {
+  const { app, store } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-api-001',
+          remoteJid: '212600000097@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP'
+      }
+    }
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/contacts/opted-out',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.contacts.length, 1);
+  assert.equal(result.body.contacts[0].phone, '+212600000097');
+  assert.equal(result.body.contacts[0].marketingStatus, 'opted_out');
+  assert.equal(result.body.contacts[0].optOutSource, 'inbound_whatsapp');
+});
+
+test('GET /api/contacts/opted-out returns 401 without task secret', async () => {
+  const { app } = createTestContext();
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/contacts/opted-out',
+    headers: {}
+  });
+
+  assert.equal(result.statusCode, 401);
+});
+
+test('GET /api/contacts/opted-out only returns opted-out contacts not all contacts', async () => {
+  const { app, store } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  store.upsertContact({ phone: '+212600000098', marketingStatus: 'opted_in' });
+  store.upsertContact({ phone: '+212600000099', marketingStatus: 'opted_out', optOutSource: 'inbound_whatsapp', optedOutAt: new Date().toISOString() });
+
+  const result = await dispatch(app, {
+    method: 'GET',
+    url: '/api/contacts/opted-out',
+    headers: { 'x-task-secret': 'task-secret' }
+  });
+
+  assert.equal(result.body.contacts.length, 1);
+  assert.equal(result.body.contacts[0].phone, '+212600000099');
 });
