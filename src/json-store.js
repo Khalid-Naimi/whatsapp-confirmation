@@ -5,7 +5,8 @@ import path from 'node:path';
 const EMPTY_DB = {
   orders: [],
   messages: [],
-  events: []
+  events: [],
+  contacts: []
 };
 
 export class JsonStore {
@@ -175,6 +176,44 @@ export class JsonStore {
   getMessagesByPhone(phone) {
     const db = this.read();
     return db.messages.filter((msg) => msg.phone === phone);
+  }
+
+  upsertContact(contact) {
+    return this.transaction((db) => {
+      if (!db.contacts) {
+        db.contacts = [];
+      }
+      const index = db.contacts.findIndex((c) => c.phone === contact.phone);
+      const now = new Date().toISOString();
+      const next = {
+        ...db.contacts[index],
+        ...contact,
+        updatedAt: now
+      };
+      if (!next.createdAt) {
+        next.createdAt = now;
+      }
+      if (index >= 0) {
+        db.contacts[index] = next;
+      } else {
+        db.contacts.push(next);
+      }
+      return next;
+    });
+  }
+
+  getContact(phone) {
+    const db = this.read();
+    return (db.contacts || []).find((c) => c.phone === phone) || null;
+  }
+
+  listOptedOutContacts() {
+    const db = this.read();
+    return (db.contacts || []).filter((c) => c.marketingStatus === 'opted_out');
+  }
+
+  isPhoneOptedOut(phone) {
+    return Boolean(this.getContact(phone)?.marketingStatus === 'opted_out');
   }
 }
 

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems, validatePhone } from '../utils/format.js';
+import { isOptOutMessage } from '../utils/opt-out.js';
 import { WasenderSendError } from './wasender-client.js';
 
 const WORKFLOW_META_KEYS = {
@@ -115,11 +116,13 @@ const OUTBOUND_META_KEYS = {
 };
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, mailService = null, messages, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, messages, logger = console }) {
     this.store = store;
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
     this.mailService = mailService;
+    this.wordpressClient = wordpressClient;
+    this.optOutKeywords = optOutKeywords;
     this.messages = messages;
     this.logger = logger;
     this.activeOrderLocks = new Map();
@@ -277,7 +280,8 @@ export class ConfirmationService {
         duplicates: 0,
         failed: 0,
         feedback: 0,
-        confirmation: 0
+        confirmation: 0,
+        optOut: 0
       };
       const messageStatuses = [];
 
@@ -333,6 +337,9 @@ export class ConfirmationService {
         if (result.route === 'confirmation') {
           summary.confirmation += 1;
         }
+        if (result.route === 'opt_out') {
+          summary.optOut += 1;
+        }
       }
 
       const requestStatus = summarizeWasenderRequestStatus(messageStatuses);
@@ -362,6 +369,10 @@ export class ConfirmationService {
         route: 'ignored',
         eventStatus: 'ignored_non_message'
       };
+    }
+
+    if (message.senderPhone && this.optOutKeywords && isOptOutMessage(message.textBody, message.captionText, this.optOutKeywords)) {
+      return this.handleOptOut(message);
     }
 
     const feedbackToken = extractFeedbackToken(message.textBody, message.captionText);
@@ -431,6 +442,51 @@ export class ConfirmationService {
       `[feedback] route=feedback_unmatched senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} kind=${message.kind || 'unknown'} source=${feedbackMatch.source || 'unknown'} reason=${feedbackMatch.reason || 'no_match'} messageKey=${message.messageKey}`
     );
     return this.processFeedbackMatchResult(message, feedbackMatch);
+  }
+
+  async handleOptOut(message) {
+    const phone = message.senderPhone;
+    const now = new Date().toISOString();
+    const lastMessageText = message.textBody || message.captionText || '';
+
+    this.store.upsertContact({
+      phone,
+      marketingStatus: 'opted_out',
+      optedOutAt: now,
+      optOutSource: 'inbound_whatsapp',
+      lastMessageText,
+      lastMessageAt: message.timestamp || now
+    });
+
+    if (!this.wordpressClient?.isConfigured) {
+      this.logger.warn(
+        `[opt-out] Opt-out saved only locally; durable WordPress storage is not configured. phone=${phone} messageKey=${message.messageKey}`
+      );
+    } else {
+      this.wordpressClient
+        .optOutContact(phone, {
+          optOutSource: 'inbound_whatsapp',
+          lastMessageText,
+          providerMessageId: message.providerMessageId || null,
+          messageKey: message.messageKey
+        })
+        .catch((err) => {
+          this.logger.warn(`[opt-out] wordpress_sync_failed phone=${phone} messageKey=${message.messageKey} error=${err.message}`);
+        });
+    }
+
+    this.logger.log(
+      `[opt-out] phone=${phone} messageKey=${message.messageKey} source=inbound_whatsapp text=${JSON.stringify(lastMessageText)}`
+    );
+
+    return {
+      ok: true,
+      ignored: false,
+      duplicate: false,
+      failed: false,
+      route: 'opt_out',
+      eventStatus: 'opt_out'
+    };
   }
 
   async processFeedbackMatchResult(message, feedbackMatch) {
