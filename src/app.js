@@ -46,6 +46,11 @@ export function createApp({ config, confirmationService, store, logger = console
           return sendCorsJson(res, 200, { ok: true, phone, messageCount: messages.length, messages });
         }
 
+        if (pathname === '/api/contacts/opted-out') {
+          const contacts = store.listOptedOutContacts();
+          return sendCorsJson(res, 200, { ok: true, contacts, note: 'local_cache_only' });
+        }
+
         return sendCorsJson(res, 404, { ok: false, error: 'Not found' });
       }
 

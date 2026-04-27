@@ -6,10 +6,27 @@ import { ConfirmationService } from './services/confirmation-service.js';
 import { MailService } from './services/mail-service.js';
 import { WasenderClient } from './services/wasender-client.js';
 import { WooCommerceClient } from './services/woocommerce-client.js';
+import { WordPressClient } from './services/wordpress-client.js';
+import { buildOptOutKeywords } from './utils/opt-out.js';
 
 const config = loadConfig();
 const store = new JsonStore(config.dataFile);
 const logger = console;
+
+const optOutKeywords = buildOptOutKeywords(config.optOut.keywords);
+logger.log(`Opt-out keywords loaded: ${optOutKeywords.size} configured exact-match keywords.`);
+
+if (!config.wordpress.baseUrl) {
+  logger.warn(
+    'WARNING: WhatsApp opt-out persistence is not durable. Configure WP_BASE_URL and WP_API_KEY for WordPress REST storage before running production broadcasts.'
+  );
+}
+
+const wordpressClient = new WordPressClient({
+  baseUrl: config.wordpress.baseUrl,
+  apiKey: config.wordpress.apiKey,
+  logger
+});
 
 const wasenderClient = new WasenderClient({
   baseUrl: config.wasender.baseUrl,
@@ -31,6 +48,8 @@ const confirmationService = new ConfirmationService({
   wasenderClient,
   wooClient,
   mailService,
+  wordpressClient,
+  optOutKeywords,
   messages: config.messages,
   logger
 });

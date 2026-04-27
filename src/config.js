@@ -69,6 +69,13 @@ export function loadConfig() {
       pass: process.env.SMTP_PASS || '',
       from: process.env.MAIL_FROM || process.env.SMTP_USER || ''
     },
+    wordpress: {
+      baseUrl: process.env.WP_BASE_URL || '',
+      apiKey: process.env.WP_API_KEY || ''
+    },
+    optOut: {
+      keywords: process.env.OPT_OUT_KEYWORDS || ''
+    },
     messages: {
       internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),
       confirmationTemplate: process.env.CONFIRMATION_MESSAGE_TEMPLATE ||
