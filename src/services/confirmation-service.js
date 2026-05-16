@@ -458,6 +458,13 @@ export class ConfirmationService {
       lastMessageAt: message.timestamp || now
     });
 
+    await this.persistOptOutToLatestWooOrder({
+      phone,
+      replyText: lastMessageText,
+      optedOutAt: now,
+      messageKey: message.messageKey
+    });
+
     if (!this.wordpressClient?.isConfigured) {
       this.logger.warn(
         `[opt-out] Opt-out saved only locally; durable WordPress storage is not configured. phone=${phone} messageKey=${message.messageKey}`
@@ -487,6 +494,30 @@ export class ConfirmationService {
       route: 'opt_out',
       eventStatus: 'opt_out'
     };
+  }
+
+  async persistOptOutToLatestWooOrder({ phone, replyText, optedOutAt, messageKey }) {
+    try {
+      const orders = await this.listOrdersForStatuses(RECONCILIATION_STATUSES);
+      const matches = orders
+        .filter((order) => normalizeWooOrder(order, this.messages).phone === phone)
+        .sort(compareOrdersByRecency);
+
+      const latestOrder = matches[0];
+      if (!latestOrder) {
+        this.logger.warn(`[opt-out] no_matching_woo_order phone=${phone} messageKey=${messageKey}`);
+        return;
+      }
+
+      const note = buildOptOutWooOrderNote({
+        replyText,
+        optedOutAt
+      });
+      await this.safeAddOrderNote(String(latestOrder.id), note);
+      this.logger.log(`[opt-out] woo_marker_saved phone=${phone} orderId=${latestOrder.id} messageKey=${messageKey}`);
+    } catch (error) {
+      this.logger.warn(`[opt-out] woo_marker_failed phone=${phone} messageKey=${messageKey} error=${error.message}`);
+    }
   }
 
   async processFeedbackMatchResult(message, feedbackMatch) {
@@ -3021,6 +3052,17 @@ function buildFeedbackNote(message) {
   }
 
   return `Feedback reply received via WhatsApp [${kind}]`;
+}
+
+function buildOptOutWooOrderNote({ replyText, optedOutAt }) {
+  return `RHYMAT_OPT_OUT=YES; source=whatsapp; reply=${sanitizeOptOutNoteValue(replyText)}; at=${sanitizeOptOutNoteValue(optedOutAt)}`;
+}
+
+function sanitizeOptOutNoteValue(value) {
+  return String(value || '')
+    .replace(/[;\r\n]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
 function truncateForNote(value, maxLength = 160) {

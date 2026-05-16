@@ -87,7 +87,7 @@ export class WooCommerceClient {
   async addOrderNote(orderId, note) {
     return this.request(`/wp-json/wc/v3/orders/${orderId}/notes`, {
       method: 'POST',
-      body: { note }
+      body: { note, customer_note: false }
     });
   }
 

@@ -4448,8 +4448,170 @@ test('opt-out does not send any reply message to the customer', async () => {
   assert.equal(wasenderCalls.length, 0);
 });
 
+test('inbound STOP writes opt-out marker note to latest matching WooCommerce order', async () => {
+  const { app, store, listedOrders, wooNoteCalls } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  listedOrders.push({
+    id: 9100,
+    status: 'completed',
+    date_created_gmt: '2026-03-18T08:00:00',
+    billing: { phone: '212600000100' },
+    line_items: []
+  });
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-note-001',
+          remoteJid: '212600000100@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP'
+      }
+    }
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(result.body.optOut, 1);
+  assert.equal(store.isPhoneOptedOut('+212600000100'), true);
+  assert.equal(wooNoteCalls.length, 1);
+  assert.equal(wooNoteCalls[0].orderId, '9100');
+  assert.match(wooNoteCalls[0].note, /^RHYMAT_OPT_OUT=YES; source=whatsapp; reply=STOP; at=/);
+});
+
+test('inbound STOP writes opt-out marker to newest matching WooCommerce order', async () => {
+  const { app, listedOrders, wooNoteCalls } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  listedOrders.push(
+    {
+      id: 9101,
+      status: 'completed',
+      date_created_gmt: '2026-03-18T08:00:00',
+      billing: { phone: '212600000101' },
+      line_items: []
+    },
+    {
+      id: 9102,
+      status: 'processing',
+      date_created_gmt: '2026-03-19T08:00:00',
+      billing: { phone: '212600000101' },
+      line_items: []
+    },
+    {
+      id: 9103,
+      status: 'completed',
+      date_created_gmt: '2026-03-20T08:00:00',
+      billing: { phone: '212600000102' },
+      line_items: []
+    }
+  );
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-note-002',
+          remoteJid: '212600000101@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP'
+      }
+    }
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(wooNoteCalls.length, 1);
+  assert.equal(wooNoteCalls[0].orderId, '9102');
+  assert.match(wooNoteCalls[0].note, /^RHYMAT_OPT_OUT=YES; source=whatsapp; reply=STOP; at=/);
+});
+
+test('inbound STOP still opts out locally when no WooCommerce order matches', async () => {
+  const { app, store, listedOrders, wooNoteCalls } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+
+  listedOrders.push({
+    id: 9104,
+    status: 'completed',
+    date_created_gmt: '2026-03-18T08:00:00',
+    billing: { phone: '212600000104' },
+    line_items: []
+  });
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-note-003',
+          remoteJid: '212600000103@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP'
+      }
+    }
+  };
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.optOut, 1);
+  assert.equal(store.isPhoneOptedOut('+212600000103'), true);
+  assert.equal(wooNoteCalls.length, 0);
+});
+
+test('opt-out marker note sanitizes semicolons and newlines from reply text', async () => {
+  const { app, listedOrders, wooNoteCalls } = createTestContext({ optOutKeywords: buildOptOutKeywords('STOP\nNOW') });
+
+  listedOrders.push({
+    id: 9105,
+    status: 'completed',
+    date_created_gmt: '2026-03-18T08:00:00',
+    billing: { phone: '212600000105' },
+    line_items: []
+  });
+
+  const stopPayload = {
+    data: {
+      messages: {
+        key: {
+          id: 'msg-optout-note-004',
+          remoteJid: '212600000105@s.whatsapp.net',
+          fromMe: false
+        },
+        messageBody: 'STOP\nNOW'
+      }
+    }
+  };
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: stopPayload
+  });
+
+  assert.equal(wooNoteCalls.length, 1);
+  assert.match(wooNoteCalls[0].note, /^RHYMAT_OPT_OUT=YES; source=whatsapp; reply=STOP NOW; at=/);
+});
+
 test('STOP from phone with pending order opts out instead of triggering confirmation routing', async () => {
-  const { app, store, wasenderCalls } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
+  const { app, store, wasenderCalls, listedOrders, wooNoteCalls } = createTestContext({ optOutKeywords: buildOptOutKeywords('') });
 
   const orderPayload = {
     id: 9001,
@@ -4459,6 +4621,7 @@ test('STOP from phone with pending order opts out instead of triggering confirma
     billing: { first_name: 'Test', last_name: 'User', phone: '212600000094', state: 'Casablanca' },
     line_items: [{ name: 'Item', quantity: 1 }]
   };
+  listedOrders.push(orderPayload);
 
   await dispatch(app, {
     method: 'POST',
@@ -4497,6 +4660,10 @@ test('STOP from phone with pending order opts out instead of triggering confirma
   assert.equal(wasenderCalls.length, 1); // no additional send for the opt-out
   assert.equal(store.isPhoneOptedOut('+212600000094'), true);
   assert.equal(store.getOrder('9001').confirmationState, 'pending_confirmation'); // order untouched
+  assert.ok(wooNoteCalls.some((note) =>
+    note.orderId === '9001' &&
+    /^RHYMAT_OPT_OUT=YES; source=whatsapp; reply=STOP; at=/.test(note.note)
+  ));
 });
 
 test('normal reply 1 is not intercepted by opt-out guard when optOutKeywords is active', async () => {
