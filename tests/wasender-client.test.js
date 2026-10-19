@@ -101,3 +101,29 @@ test('WasenderClient throws after exhausting 429 retries', async () => {
   );
   assert.equal(attempts, 3);
 });
+
+test('WasenderClient throws when a 200 response reports success:false (disconnected session)', async () => {
+  let attempts = 0;
+
+  const client = new WasenderClient({
+    baseUrl: 'https://example.com/api',
+    apiToken: 'token',
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { success: false, message: 'Your Whatsapp Session is not connected please connect your session first.' };
+        }
+      };
+    }
+  });
+
+  await assert.rejects(
+    () => client.sendMessage({ to: '+212612345678', message: 'hello' }),
+    (error) => error instanceof WasenderSendError && error.status === 200 && error.data?.success === false
+  );
+  assert.equal(attempts, 1);
+});

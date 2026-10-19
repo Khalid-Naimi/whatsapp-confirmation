@@ -45,6 +45,16 @@ export class WasenderClient {
       });
 
       const data = await parseJsonSafe(response);
+      if (response.ok && data?.success === false) {
+        // Wasender answers 200 with success:false when the session is disconnected; nothing was sent.
+        this.logger.warn(`[wasender] send rejected to=${maskPhone(to)} status=${response.status} body=${safeJson(data)}`);
+        throw new WasenderSendError({
+          status: response.status,
+          data,
+          message: `Wasender send-message was not delivered: ${JSON.stringify(data)}`
+        });
+      }
+
       if (response.ok) {
         this.logger.log(`[wasender] send accepted to=${maskPhone(to)} status=${response.status} body=${safeJson(data)}`);
         this.nextAvailableAt = this.now() + this.minIntervalMs;
