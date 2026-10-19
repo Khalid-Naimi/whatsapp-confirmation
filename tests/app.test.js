@@ -3896,6 +3896,66 @@ test('manual non-processing status stops pending reminder workflow', async () =>
   assert.equal(store.getOrder('502').manualOverrideStatus, 'completed');
 });
 
+test('followups never send internal alerts for historical decisions that lack a notified flag', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const historicalCancelled = (id, extraMeta = []) => ({
+    id,
+    status: 'cancelled',
+    total: '200.00',
+    currency: 'MAD',
+    billing: { first_name: 'Old', last_name: `Cancelled${id}`, phone: '+212650000009', state: 'Rabat', address_1: 'Old street' },
+    line_items: [{ name: 'Produit Old', quantity: 1 }],
+    meta_data: [
+      { key: 'rhymat_whatsapp_decision', value: 'cancelled' },
+      { key: 'rhymat_whatsapp_decision_at', value: '2026-03-01T08:00:00.000Z' },
+      { key: 'rhymat_whatsapp_woo_sync_status', value: 'synced' },
+      ...extraMeta
+    ]
+  });
+
+  // auto-cancelled / invalid-phone orders set a decision but never an internal-notified flag
+  listedOrders.push(historicalCancelled(701, [{ key: 'rhymat_whatsapp_cancellation_reason', value: 'invalid_or_non_whatsapp_number' }]));
+  listedOrders.push(historicalCancelled(702));
+  listedOrders.push({
+    ...historicalCancelled(703),
+    status: 'on-hold',
+    meta_data: [
+      { key: 'rhymat_whatsapp_decision', value: 'confirmed' },
+      { key: 'rhymat_whatsapp_decision_at', value: '2026-03-01T08:00:00.000Z' },
+      { key: 'rhymat_whatsapp_woo_sync_status', value: 'synced' }
+    ]
+  });
+
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-22T10:00:00.000Z') });
+
+  assert.equal(summary.errors, 0);
+  assert.equal(wasenderCalls.length, 0);
+});
+
+test('followup backfill never first-contacts customers about old orders', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const makeOrder = (id, status, createdGmt) => ({
+    id,
+    status,
+    date_created_gmt: createdGmt,
+    total: '120.00',
+    currency: 'MAD',
+    billing: { first_name: 'Late', last_name: `Order${id}`, phone: `+2126500001${id % 100}`, state: 'Rabat', address_1: 'Rue' },
+    line_items: [{ name: 'Produit', quantity: 1 }],
+    meta_data: []
+  });
+
+  listedOrders.push(makeOrder(801, 'pending', '2026-02-01T08:00:00'));
+  listedOrders.push(makeOrder(802, 'processing', '2026-02-10T08:00:00'));
+  listedOrders.push(makeOrder(803, 'processing', '2026-03-22T09:00:00'));
+
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-22T10:00:00.000Z') });
+
+  assert.equal(summary.backfilled, 1);
+  assert.equal(wasenderCalls.length, 1);
+  assert.match(wasenderCalls[0].message, /Numero dyal La commande: 803/);
+});
+
 test('normalizePhone only accepts E.164-style international inputs', () => {
   assert.equal(normalizePhone('+212 6 12 34 56 78'), '+212612345678');
   assert.equal(normalizePhone('+33 6 12 34 56 78'), '+33612345678');

@@ -62,6 +62,7 @@ const REPLY_RECOVERY_STATUSES = [...ACTIVE_CONFIRMATION_STATUSES];
 const FEEDBACK_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed', 'cancelled'];
 const FEEDBACK_RECOVERY_PER_PAGE = 50;
 const FEEDBACK_RECOVERY_MAX_PAGES = 2;
+const BACKFILL_MAX_ORDER_AGE_MS = 72 * 60 * 60 * 1000;
 const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
 const AUTO_CANCEL_AFTER_SECOND_REMINDER_MS = 24 * 60 * 60 * 1000;
@@ -1217,21 +1218,15 @@ export class ConfirmationService {
           if (effectiveDecision) {
             const targetWooStatus = effectiveDecision === 'confirmed' ? 'on-hold' : 'cancelled';
             const currentSyncStatus = decisionMeta.wooSyncStatus || localOrder?.wooSyncStatus || '';
-            let nextOrderState = {
+            // Internal alerts are sent once, when the customer decides (reply path). Never from here:
+            // old orders (auto-cancelled, invalid phone, pre-flag) have no notified flag and would be re-alerted.
+            const nextOrderState = {
               ...localOrder,
               ...normalizeWooOrder(order, this.messages),
               rawOrder: order,
               decision: effectiveDecision,
               decisionAt: decisionMeta.decisionAt || localOrder?.decisionAt || ''
             };
-            const alreadyNotified = effectiveDecision === 'confirmed'
-              ? (decisionMeta.internalNotifiedConfirmed || localOrder?.internalNotifiedConfirmed || 'no') === 'yes'
-              : (decisionMeta.internalNotifiedCancelled || localOrder?.internalNotifiedCancelled || 'no') === 'yes';
-            nextOrderState = await this.sendInternalDecisionNotifications({
-              order: nextOrderState,
-              decision: effectiveDecision,
-              alreadyNotified
-            });
             if (currentSyncStatus === 'manual') {
               return 'skipped';
             }
@@ -1300,6 +1295,19 @@ export class ConfirmationService {
               this.logger.log(
                 `[confirmation] skipped self-test confirmation backfill orderId=${String(order.id)} testPhone=${feedbackMeta.testPhone || ''} token=${feedbackMeta.token || ''} runId=${feedbackMeta.testRunId || ''}`
               );
+              return 'skipped';
+            }
+
+            // Never first-contact a customer about an old order (abandoned checkouts, pre-service orders).
+            if (isOrderOlderThan(order, now, BACKFILL_MAX_ORDER_AGE_MS)) {
+              this.logFollowupDecision({
+                orderId,
+                orderStatus: order.status,
+                workflowState: workflow.state,
+                confirmationSentAt: workflow.confirmationSentAt,
+                reminderCount: workflow.reminderCount,
+                action: 'skip_backfill_too_old'
+              });
               return 'skipped';
             }
 
@@ -3445,6 +3453,16 @@ function hasConfirmationWorkflowStarted({ workflow, localOrder }) {
     ['pending', 'confirmed', 'cancelled', 'manual'].includes(String(workflow.state || '')) ||
     ['pending_confirmation', 'confirmed', 'cancelled', 'manual'].includes(String(localOrder?.confirmationState || ''))
   );
+}
+
+function isOrderOlderThan(order, now, maxAgeMs) {
+  const raw = String(order?.date_created_gmt || '').trim();
+  if (!raw) {
+    return false;
+  }
+
+  const createdAtMs = Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/u.test(raw) ? raw : `${raw}Z`);
+  return !Number.isNaN(createdAtMs) && (now.getTime() - createdAtMs) > maxAgeMs;
 }
 
 function hasAmbiguousCustomerOutboundState(order, now = new Date()) {
