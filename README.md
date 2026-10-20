@@ -49,7 +49,7 @@ Backend-only Node.js service that:
 - `DELIVERY_ETA_OTHER_CITIES`: ETA used for every other city or missing city
 - `DEFAULT_DELIVERY_CITY_LABEL`: fallback city label when no city is available
 - `DROP_ALERT_MESSAGE_TEMPLATE`: early-access drop notice (`{{productName}}`, `{{productUrl}}`, `{{earlyMinutes}}`); a French default is built in. Sent through `POST /tasks/stock-alerts` with `"kind": "drop"` on each item.
-- `STOCK_ALERT_MESSAGE_TEMPLATE`: back-in-stock alert text (`{{size}}`, `{{productName}}`, `{{productUrl}}`); a Darija default is built in
+- `STOCK_ALERT_MESSAGE_TEMPLATE`: back-in-stock alert text (`{{size}}`, `{{productName}}`, `{{productUrl}}`); a French default is built in
 - `CONFIRMATION_MESSAGE_TEMPLATE`: outbound message template
 - `INVALID_REPLY_MESSAGE`: invalid-reply follow-up message
 - `REMINDER_MESSAGE`: 24h/48h reminder template

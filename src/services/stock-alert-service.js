@@ -1,7 +1,7 @@
 import { interpolateTemplate, validatePhone } from '../utils/format.js';
 
 const DEFAULT_TEMPLATE =
-  'Salam! \u{1F525} Taille {{size}} dyal {{productName}} rj3at f stock.\nKhodha qbel ma tsali: {{productUrl}}\n\nBach ma twslekch mssajat dyal drops, jawb b "STOP".';
+  'Salut ! \u{1F525} La taille {{size}} de {{productName}} est de retour en stock.\nFonce avant qu\u2019elle ne parte : {{productUrl}}\n\nPour ne plus recevoir nos messages, r\u00e9ponds "STOP".';
 
 const DEFAULT_DROP_TEMPLATE =
   'Salut ! \u{1F525} Nouveau drop Rhymat : {{productName}}.\nTu y acc\u00e8des {{earlyMinutes}} min avant tout le monde : {{productUrl}}\n\nPour ne plus recevoir nos drops, r\u00e9ponds "STOP".';

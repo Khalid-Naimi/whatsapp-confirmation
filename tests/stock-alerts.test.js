@@ -77,7 +77,7 @@ test('queued stock alert is sent once with size, product and link', async () => 
 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].to, '+212612345678');
-  assert.match(sent[0].message, /Taille L dyal Rhymat Baggy Military Cargo/u);
+  assert.match(sent[0].message, /taille L de Rhymat Baggy Military Cargo/u);
   assert.match(sent[0].message, /https:\/\/rhymat\.ma\/product\/rhymat-baggy-military-cargo\//u);
   assert.match(sent[0].message, /STOP/u);
   assert.equal(store.read().stockAlerts[0].status, 'sent');
@@ -150,5 +150,5 @@ test('a drop notice uses the drop template and is separate from a size alert for
   assert.equal(sent.length, 2);
   assert.match(sent[0].message, /Nouveau drop Rhymat/u);
   assert.match(sent[0].message, /15 min avant/u);
-  assert.match(sent[1].message, /Taille L/u);
+  assert.match(sent[1].message, /taille L/u);
 });
