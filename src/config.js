@@ -97,6 +97,7 @@ export function loadConfig() {
       internalCancelledTemplate: process.env.INTERNAL_CANCELLED_TEMPLATE ||
         'Commande annulat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       stockAlertTemplate: process.env.STOCK_ALERT_MESSAGE_TEMPLATE || '',
+      dropAlertTemplate: process.env.DROP_ALERT_MESSAGE_TEMPLATE || '',
       deliveryEtaCasablanca: process.env.DELIVERY_ETA_CASABLANCA || '24h',
       deliveryEtaOtherCities: process.env.DELIVERY_ETA_OTHER_CITIES || '2 a 3 jours ouvrables',
       defaultCityLabel: process.env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'

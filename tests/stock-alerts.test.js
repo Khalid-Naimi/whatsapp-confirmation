@@ -140,3 +140,15 @@ test('POST /tasks/stock-alerts needs the task secret and answers 202 right away'
   assert.deepEqual(ok.body.accepted, ['11']);
   assert.equal(store.read().stockAlerts.length, 1);
 });
+
+test('a drop notice uses the drop template and is separate from a size alert for the same product', async () => {
+  const { service, sent } = context();
+  const drop = alert({ id: 'drop-5-1', kind: 'drop', size: '', earlyMinutes: 15 });
+  const result = service.accept([drop, alert({ id: '12' })]);
+  assert.deepEqual(result.accepted, ['drop-5-1', '12']);
+  await service.processQueue();
+  assert.equal(sent.length, 2);
+  assert.match(sent[0].message, /Nouveau drop Rhymat/u);
+  assert.match(sent[0].message, /15 min avant/u);
+  assert.match(sent[1].message, /Taille L/u);
+});

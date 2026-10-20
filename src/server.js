@@ -59,6 +59,7 @@ const stockAlertService = new StockAlertService({
   store,
   wasenderClient,
   template: config.messages.stockAlertTemplate,
+  dropTemplate: config.messages.dropAlertTemplate,
   logger
 });
 

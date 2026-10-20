@@ -3,6 +3,9 @@ import { interpolateTemplate, validatePhone } from '../utils/format.js';
 const DEFAULT_TEMPLATE =
   'Salam! \u{1F525} Taille {{size}} dyal {{productName}} rj3at f stock.\nKhodha qbel ma tsali: {{productUrl}}\n\nBach ma twslekch mssajat dyal drops, jawb b "STOP".';
 
+const DEFAULT_DROP_TEMPLATE =
+  'Salut ! \u{1F525} Nouveau drop Rhymat : {{productName}}.\nTu y acc\u00e8des {{earlyMinutes}} min avant tout le monde : {{productUrl}}\n\nPour ne plus recevoir nos drops, r\u00e9ponds "STOP".';
+
 /**
  * "Back in stock" WhatsApp alerts for a specific size.
  *
@@ -11,10 +14,11 @@ const DEFAULT_TEMPLATE =
  * after another in the background. The caller gets its answer straight away, because Wasender is rate limited.
  */
 export class StockAlertService {
-  constructor({ store, wasenderClient, template, logger = console, autoProcess = true }) {
+  constructor({ store, wasenderClient, template, dropTemplate, logger = console, autoProcess = true }) {
     this.store = store;
     this.wasenderClient = wasenderClient;
     this.template = template || DEFAULT_TEMPLATE;
+    this.dropTemplate = dropTemplate || DEFAULT_DROP_TEMPLATE;
     this.logger = logger;
     this.autoProcess = autoProcess;
     this.processing = null;
@@ -35,6 +39,8 @@ export class StockAlertService {
       const productName = String(raw?.productName || '').trim();
       const productUrl = String(raw?.productUrl || '').trim();
       const size = String(raw?.size || '').trim();
+      const kind = raw?.kind === 'drop' ? 'drop' : 'stock';
+      const earlyMinutes = String(Math.max(0, Math.round(Number(raw?.earlyMinutes) || 0)));
 
       if (!id) {
         skipped.push({ id: '', reason: 'missing_id' });
@@ -49,7 +55,7 @@ export class StockAlertService {
         continue;
       }
 
-      const dedupeKey = `${phone.normalized}|${productUrl}|${size}`;
+      const dedupeKey = `${kind}|${phone.normalized}|${productUrl}|${size}`;
       if (seen.has(dedupeKey)) {
         skipped.push({ id, reason: 'duplicate' });
         continue;
@@ -73,6 +79,8 @@ export class StockAlertService {
           productName,
           productUrl,
           size,
+          kind,
+          earlyMinutes,
           status: 'queued',
           attempts: 0,
           createdAt: new Date().toISOString()
@@ -110,17 +118,19 @@ export class StockAlertService {
         return;
       }
 
-      const message = interpolateTemplate(this.template, {
+      const isDrop = next.kind === 'drop';
+      const message = interpolateTemplate(isDrop ? this.dropTemplate : this.template, {
         size: next.size,
         productName: next.productName,
-        productUrl: next.productUrl
+        productUrl: next.productUrl,
+        earlyMinutes: next.earlyMinutes || '15'
       });
 
       try {
         const result = await this.wasenderClient.sendMessage({ to: next.phone, message });
-        this.store.appendMessage({ source: 'outbound', phone: next.phone, kind: 'stock_alert', payload: result, text: message });
+        this.store.appendMessage({ source: 'outbound', phone: next.phone, kind: isDrop ? 'drop_alert' : 'stock_alert', payload: result, text: message });
         this.setStatus(next.id, { status: 'sent', sentAt: new Date().toISOString() });
-        this.logger.log(`[stock-alert] sent id=${next.id} size=${next.size}`);
+        this.logger.log(`[stock-alert] sent id=${next.id} kind=${next.kind || 'stock'}`);
       } catch (error) {
         const attempts = (next.attempts || 0) + 1;
         // Failed alerts are not retried in a loop (a broken Wasender session would only spin). WordPress hands the same
