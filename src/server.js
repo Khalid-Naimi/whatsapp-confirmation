@@ -4,6 +4,7 @@ import { loadConfig } from './config.js';
 import { JsonStore } from './json-store.js';
 import { ConfirmationService } from './services/confirmation-service.js';
 import { MailService } from './services/mail-service.js';
+import { StockAlertService } from './services/stock-alert-service.js';
 import { WasenderClient } from './services/wasender-client.js';
 import { WooCommerceClient } from './services/woocommerce-client.js';
 import { WordPressClient } from './services/wordpress-client.js';
@@ -54,10 +55,18 @@ const confirmationService = new ConfirmationService({
   logger
 });
 
+const stockAlertService = new StockAlertService({
+  store,
+  wasenderClient,
+  template: config.messages.stockAlertTemplate,
+  logger
+});
+
 const app = createApp({
   config,
   confirmationService,
   store,
+  stockAlertService,
   logger
 });
 

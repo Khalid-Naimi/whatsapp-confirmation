@@ -12,6 +12,7 @@ Backend-only Node.js service that:
 - `POST /webhooks/woocommerce`
 - `POST /webhooks/wasender`
 - `POST /tasks/order-followups`
+- `POST /tasks/stock-alerts` (back-in-stock WhatsApp alerts per size, sent by the WordPress theme)
 - `GET /health`
 
 ## Quick start
@@ -47,6 +48,7 @@ Backend-only Node.js service that:
 - `DELIVERY_ETA_CASABLANCA`: ETA used when city is exactly `Casablanca`
 - `DELIVERY_ETA_OTHER_CITIES`: ETA used for every other city or missing city
 - `DEFAULT_DELIVERY_CITY_LABEL`: fallback city label when no city is available
+- `STOCK_ALERT_MESSAGE_TEMPLATE`: back-in-stock alert text (`{{size}}`, `{{productName}}`, `{{productUrl}}`); a Darija default is built in
 - `CONFIRMATION_MESSAGE_TEMPLATE`: outbound message template
 - `INVALID_REPLY_MESSAGE`: invalid-reply follow-up message
 - `REMINDER_MESSAGE`: 24h/48h reminder template
@@ -90,3 +92,16 @@ Backend-only Node.js service that:
   - first reminder 24h after the initial confirmation send
   - second reminder 24h after the first reminder window
   - auto-cancel 24h after `rhymat_whatsapp_reminder_2_sent_at` if there is still no final reply
+
+## Size back-in-stock alerts
+
+The WordPress theme keeps the subscriptions (phone + product + size). When a size is back in stock it posts a batch to
+`POST /tasks/stock-alerts` with header `x-task-secret: <TASK_SECRET>` and body:
+
+```json
+{ "alerts": [ { "id": "123", "phone": "+212612345678", "productName": "Rhymat Cap", "size": "L", "productUrl": "https://rhymat.ma/product/..." } ] }
+```
+
+The answer is `202 { ok, accepted: [ids], skipped: [{ id, reason }] }` straight away. Messages are then sent one by one in the
+background (Wasender is rate limited). Opted-out numbers are skipped, every alert id is remembered so a retry never sends
+twice, and a failed alert is queued again when WordPress hands the same id over again.

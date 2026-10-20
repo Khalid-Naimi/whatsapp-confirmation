@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 
-export function createApp({ config, confirmationService, store, logger = console }) {
+export function createApp({ config, confirmationService, store, stockAlertService = null, logger = console }) {
   return async function handler(req, res) {
     try {
       const parsedUrl = new URL(req.url, 'http://localhost');
@@ -129,6 +129,29 @@ export function createApp({ config, confirmationService, store, logger = console
           `[task][order-followups] completed backfilled=${result.backfilled || 0} remindersSent=${result.remindersSent || 0} autoCancelled=${result.autoCancelled || 0} ambiguous=${result.ambiguous || 0} skipped=${result.skipped || 0} errors=${result.errors || 0}`
         );
         return sendJson(res, 200, { ok: true, summary: result });
+      }
+
+      if (pathname === '/tasks/stock-alerts') {
+        const providedSecret = req.headers['x-task-secret'];
+        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
+          logger.warn('[task][stock-alerts] invalid task secret');
+          return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        }
+        if (!stockAlertService) {
+          return sendJson(res, 503, { ok: false, error: 'Stock alerts are not enabled' });
+        }
+
+        const body = parseJsonBody(rawBody);
+        if (body === null || !Array.isArray(body.alerts)) {
+          return sendJson(res, 400, { ok: false, error: 'Body must be {"alerts": [...]}' });
+        }
+        if (body.alerts.length > 200) {
+          return sendJson(res, 413, { ok: false, error: 'At most 200 alerts per request' });
+        }
+
+        const result = stockAlertService.accept(body.alerts);
+        logger.log(`[task][stock-alerts] accepted=${result.accepted.length} skipped=${result.skipped.length}`);
+        return sendJson(res, 202, { ok: true, ...result });
       }
 
       return sendJson(res, 404, { ok: false, error: 'Not found' });
