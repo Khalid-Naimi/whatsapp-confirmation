@@ -102,6 +102,23 @@ export class StockAlertService {
     return { accepted, skipped };
   }
 
+  /**
+   * Where each alert stands, so WordPress can mark it done or hand it over again.
+   * @param {string[]} ids
+   * @returns {Record<string,'queued'|'sent'|'failed'|'unknown'>}
+   */
+  statuses(ids) {
+    const known = new Map((this.store.read().stockAlerts || []).map((alert) => [alert.id, alert.status]));
+    const result = {};
+    for (const raw of Array.isArray(ids) ? ids : []) {
+      const id = String(raw).trim();
+      if (id) {
+        result[id] = known.get(id) || 'unknown';
+      }
+    }
+    return result;
+  }
+
   processQueue() {
     if (!this.processing) {
       this.processing = this.runQueue().finally(() => {

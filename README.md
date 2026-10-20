@@ -12,6 +12,7 @@ Backend-only Node.js service that:
 - `POST /webhooks/woocommerce`
 - `POST /webhooks/wasender`
 - `POST /tasks/order-followups`
+- `GET /tasks/stock-alerts/status?ids=1,2` (same secret; says `queued`, `sent`, `failed` or `unknown` per alert id, so WordPress can close or retry its list)
 - `POST /tasks/stock-alerts` (back-in-stock WhatsApp alerts per size, sent by the WordPress theme)
 - `GET /health`
 

@@ -69,6 +69,12 @@ function dispatch(app, { headers = {}, payload = {} }) {
   return app(req, res).then(() => ({ statusCode: res.statusCode, body: JSON.parse(res.body) }));
 }
 
+function dispatchGet(app, { headers = {}, url }) {
+  const req = { method: 'GET', url, headers, on(event, callback) { if (event === 'end') { callback(); } } };
+  const res = { statusCode: 200, writeHead(code) { this.statusCode = code; }, end(text) { this.body = text; } };
+  return app(req, res).then(() => ({ statusCode: res.statusCode, body: JSON.parse(res.body) }));
+}
+
 test('queued stock alert is sent once with size, product and link', async () => {
   const { service, sent, store } = context();
   const result = service.accept([alert()]);
@@ -151,4 +157,15 @@ test('a drop notice uses the drop template and is separate from a size alert for
   assert.match(sent[0].message, /Nouveau drop Rhymat/u);
   assert.match(sent[0].message, /15 min avant/u);
   assert.match(sent[1].message, /taille L/u);
+});
+
+test('status endpoint reports queued, sent and unknown alerts', async () => {
+  const { service, app } = context();
+  service.accept([alert({ id: '21' }), alert({ id: '22', phone: '+212611111111' })]);
+  await service.processQueue();
+  const res = await dispatchGet(app, { headers: { 'x-task-secret': 'task-secret' }, url: '/tasks/stock-alerts/status?ids=21,22,99' });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.statuses, { 21: 'sent', 22: 'sent', 99: 'unknown' });
+  const denied = await dispatchGet(app, { headers: {}, url: '/tasks/stock-alerts/status?ids=21' });
+  assert.equal(denied.statusCode, 401);
 });

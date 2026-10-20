@@ -54,6 +54,22 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         return sendCorsJson(res, 404, { ok: false, error: 'Not found' });
       }
 
+      if (req.method === 'GET' && pathname === '/tasks/stock-alerts/status') {
+        const providedSecret = req.headers['x-task-secret'];
+        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
+          return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        }
+        if (!stockAlertService) {
+          return sendJson(res, 503, { ok: false, error: 'Stock alerts are not enabled' });
+        }
+        const ids = String(parsedUrl.searchParams.get('ids') || '')
+          .split(',')
+          .map((id) => id.trim())
+          .filter(Boolean)
+          .slice(0, 200);
+        return sendJson(res, 200, { ok: true, statuses: stockAlertService.statuses(ids) });
+      }
+
       if (req.method !== 'POST') {
         return sendJson(res, 404, { ok: false, error: 'Not found' });
       }
