@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -11,7 +11,7 @@ import { WasenderSendError } from '../src/services/wasender-client.js';
 import { normalizePhone, validatePhone } from '../src/utils/format.js';
 import { buildOptOutKeywords } from '../src/utils/opt-out.js';
 
-function createTestContext({ optOutKeywords = null, pollEnabled = false, failPoll = false } = {}) {
+function createTestContext({ optOutKeywords = null, pollEnabled = false, failPoll = false, confirmationDelayMs = 0 } = {}) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'woo-confirmation-'));
   const dataFile = path.join(tmpDir, 'db.json');
   const store = new JsonStore(dataFile);
@@ -135,6 +135,7 @@ function createTestContext({ optOutKeywords = null, pollEnabled = false, failPol
     mailService,
     optOutKeywords,
     messages: {
+      confirmationDelayMs,
       confirmationPollEnabled: pollEnabled,
       confirmationPollQuestion: 'Confirmer votre commande ?',
       confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
@@ -436,6 +437,49 @@ test('a failed poll send does not break the confirmation', async () => {
   assert.equal(wasenderCalls.length, 1);
   assert.equal(store.getOrder('403').confirmationState, 'pending_confirmation');
   assert.ok(logCalls.some((line) => line.includes('poll send failed')));
+});
+
+async function flushAsync() {
+  for (let i = 0; i < 20; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+test('confirmation waits for the configured delay before sending', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const { app, wasenderCalls, store } = createTestContext({ confirmationDelayMs: 30000 });
+    await placePollTestOrder(app, 501, '212600000051');
+
+    assert.equal(wasenderCalls.length, 0);
+
+    mock.timers.tick(29000);
+    await flushAsync();
+    assert.equal(wasenderCalls.length, 0);
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(wasenderCalls.length, 1);
+    assert.match(wasenderCalls[0].message, /twsselna b la commande/);
+    assert.equal(store.getOrder('501').confirmationState, 'pending_confirmation');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('a second webhook during the delay does not schedule a second confirmation', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const { app, wasenderCalls } = createTestContext({ confirmationDelayMs: 30000 });
+    await placePollTestOrder(app, 502, '212600000052');
+    await placePollTestOrder(app, 502, '212600000052');
+
+    mock.timers.tick(30000);
+    await flushAsync();
+    assert.equal(wasenderCalls.length, 1);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test('duplicate WooCommerce webhook does not send twice', async () => {
