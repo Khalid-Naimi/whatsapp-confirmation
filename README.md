@@ -52,6 +52,8 @@ Backend-only Node.js service that:
 - `DROP_ALERT_MESSAGE_TEMPLATE`: early-access drop notice (`{{productName}}`, `{{productUrl}}`, `{{earlyMinutes}}`); a French default is built in. Sent through `POST /tasks/stock-alerts` with `"kind": "drop"` on each item.
 - `STOCK_ALERT_MESSAGE_TEMPLATE`: back-in-stock alert text (`{{size}}`, `{{productName}}`, `{{productUrl}}`); a French default is built in
 - `CONFIRMATION_MESSAGE_TEMPLATE`: outbound message template
+- `CONFIRMATION_POLL_ENABLED`: `true` sends a tap-to-answer poll (Confirmer / Annuler) right after the confirmation text; default off. Needs the `poll.results` event enabled on the Wasender webhook. The "1"/"2" text reply keeps working.
+- `CONFIRMATION_POLL_QUESTION`: poll question, default `Confirmer votre commande ?`
 - `INVALID_REPLY_MESSAGE`: invalid-reply follow-up message
 - `REMINDER_MESSAGE`: 24h/48h reminder template
 - `CONFIRMED_REPLY_MESSAGE`: confirmation follow-up message
