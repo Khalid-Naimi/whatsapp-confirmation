@@ -1676,6 +1676,31 @@ export class ConfirmationService {
     });
   }
 
+  // The poll only adds a tap-to-answer option; the "1"/"2" text reply keeps working if it fails.
+  async sendConfirmationPoll(normalizedOrder) {
+    if (!this.messages.confirmationPollEnabled) {
+      return;
+    }
+
+    try {
+      const result = await this.wasenderClient.sendPoll({
+        to: normalizedOrder.phone,
+        question: this.messages.confirmationPollQuestion,
+        options: CONFIRMATION_POLL_OPTIONS
+      });
+      this.store.appendMessage({
+        source: 'outbound',
+        orderId: normalizedOrder.orderId,
+        phone: normalizedOrder.phone,
+        kind: 'confirmation_poll',
+        payload: result,
+        text: this.messages.confirmationPollQuestion
+      });
+    } catch (error) {
+      this.logger.warn(`[confirmation] poll send failed orderId=${normalizedOrder.orderId} message=${error.message}`);
+    }
+  }
+
   async persistInitialConfirmationMeta({ orderPayload, normalizedOrder, acceptedAt, providerMessageId, reservedAt }) {
     const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
       normalizedOrder.orderId,
@@ -1966,6 +1991,7 @@ export class ConfirmationService {
       }
 
       this.logger.log(`[confirmation] initial send accepted orderId=${normalizedOrder.orderId} phone=${normalizedOrder.phone}`);
+      await this.sendConfirmationPoll(normalizedOrder);
 
       return { status: 202, body: { ok: true } };
     } catch (error) {
@@ -2723,6 +2749,8 @@ function resolveDeliveryEta(city, messages) {
     ? messages.deliveryEtaCasablanca
     : messages.deliveryEtaOtherCities;
 }
+
+const CONFIRMATION_POLL_OPTIONS = ['Confirmer', 'Annuler'];
 
 const POLL_OPTION_REPLIES = [
   { pattern: /^confirm/iu, reply: '1' },

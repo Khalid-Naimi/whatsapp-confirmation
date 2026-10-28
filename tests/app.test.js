@@ -11,12 +11,13 @@ import { WasenderSendError } from '../src/services/wasender-client.js';
 import { normalizePhone, validatePhone } from '../src/utils/format.js';
 import { buildOptOutKeywords } from '../src/utils/opt-out.js';
 
-function createTestContext({ optOutKeywords = null } = {}) {
+function createTestContext({ optOutKeywords = null, pollEnabled = false, failPoll = false } = {}) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'woo-confirmation-'));
   const dataFile = path.join(tmpDir, 'db.json');
   const store = new JsonStore(dataFile);
 
   const wasenderCalls = [];
+  const pollCalls = [];
   const mailCalls = [];
   const wooStatusCalls = [];
   const wooNoteCalls = [];
@@ -40,6 +41,13 @@ function createTestContext({ optOutKeywords = null } = {}) {
     async sendMessage(payload) {
       wasenderCalls.push(payload);
       return { id: `msg-${wasenderCalls.length}` };
+    },
+    async sendPoll(payload) {
+      if (failPoll) {
+        throw new Error('poll rejected');
+      }
+      pollCalls.push(payload);
+      return { id: `poll-${pollCalls.length}` };
     }
   };
 
@@ -127,6 +135,8 @@ function createTestContext({ optOutKeywords = null } = {}) {
     mailService,
     optOutKeywords,
     messages: {
+      confirmationPollEnabled: pollEnabled,
+      confirmationPollQuestion: 'Confirmer votre commande ?',
       confirmationTemplate: 'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       invalidReply: '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
       reminderMessage: 'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.\n\nIla 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
@@ -168,6 +178,7 @@ function createTestContext({ optOutKeywords = null } = {}) {
     app,
     store,
     wasenderCalls,
+    pollCalls,
     mailCalls,
     wooStatusCalls,
     wooNoteCalls,
@@ -399,6 +410,32 @@ test('new WooCommerce order sends one confirmation message and writes workflow m
   assert.equal(workflowMetaValue(metaUpdate, 'rhymat_whatsapp_state'), 'pending');
   assert.equal(workflowMetaValue(metaUpdate, 'rhymat_whatsapp_reminder_count'), 0);
   assert.ok(workflowMetaValue(metaUpdate, 'rhymat_whatsapp_confirmation_sent_at'));
+});
+
+test('confirmation poll is sent after the text when enabled', async () => {
+  const { app, wasenderCalls, pollCalls } = createTestContext({ pollEnabled: true });
+  await placePollTestOrder(app, 401, '212600000041');
+
+  assert.equal(wasenderCalls.length, 1);
+  assert.deepEqual(pollCalls, [
+    { to: '+212600000041', question: 'Confirmer votre commande ?', options: ['Confirmer', 'Annuler'] }
+  ]);
+});
+
+test('confirmation poll is not sent by default', async () => {
+  const { app, pollCalls } = createTestContext();
+  await placePollTestOrder(app, 402, '212600000042');
+
+  assert.equal(pollCalls.length, 0);
+});
+
+test('a failed poll send does not break the confirmation', async () => {
+  const { app, wasenderCalls, store, logCalls } = createTestContext({ pollEnabled: true, failPoll: true });
+  await placePollTestOrder(app, 403, '212600000043');
+
+  assert.equal(wasenderCalls.length, 1);
+  assert.equal(store.getOrder('403').confirmationState, 'pending_confirmation');
+  assert.ok(logCalls.some((line) => line.includes('poll send failed')));
 });
 
 test('duplicate WooCommerce webhook does not send twice', async () => {
