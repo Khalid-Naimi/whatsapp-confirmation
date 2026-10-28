@@ -129,6 +129,7 @@ export class ConfirmationService {
     this.activeOrderLocks = new Map();
     this.orderMutexes = new Map();
     this.inFlightWooEvents = new Map();
+    this.pendingInitialConfirmations = new Map();
     this.inFlightWasenderEvents = new Map();
     this.recentInboundMessageKeys = new Map();
   }
@@ -164,6 +165,52 @@ export class ConfirmationService {
       releaseLock();
       this.logger.log(`[lock] released lockKey=${lockKey}`);
     }
+  }
+
+  // Held back so the customer sees the thank-you page before the WhatsApp message lands.
+  // If the process restarts during the wait, the hourly followup backfill sends it instead.
+  scheduleInitialConfirmation(payload, orderId, delayMs) {
+    const key = String(orderId);
+    if (this.pendingInitialConfirmations.has(key)) {
+      return { status: 202, body: { ok: true, duplicate: true, reason: 'confirmation_scheduled' } };
+    }
+
+    const timer = setTimeout(() => {
+      this.runDelayedInitialConfirmation(payload, key)
+        .catch((error) => this.logger.error(error))
+        .finally(() => this.pendingInitialConfirmations.delete(key));
+    }, delayMs);
+    this.pendingInitialConfirmations.set(key, timer);
+    this.logger.log(`[confirmation] initial send scheduled orderId=${key} delayMs=${delayMs}`);
+
+    return { status: 202, body: { ok: true, scheduled: true, delayMs } };
+  }
+
+  async runDelayedInitialConfirmation(payload, orderId) {
+    await this.withOrderLock(orderId, async () => {
+      let order = payload;
+      try {
+        order = (await this.wooClient.getOrder(orderId)) || payload;
+      } catch (error) {
+        this.logger.warn(`[confirmation] delayed send could not refresh orderId=${orderId} error=${error.message}`);
+      }
+
+      if (!ACTIVE_CONFIRMATION_STATUSES.includes(String(order?.status || ''))) {
+        this.logger.log(`[confirmation] delayed send skipped orderId=${orderId} status=${String(order?.status || '')}`);
+        return;
+      }
+      if (isConfirmationAlreadyStarted(getWorkflowMeta(order), this.store.getOrder(orderId))) {
+        this.logger.log(`[confirmation] delayed send skipped orderId=${orderId} reason=already_started`);
+        return;
+      }
+
+      const sendResult = await this.sendInitialConfirmation(order, {
+        note: 'WhatsApp confirmation sent to customer.'
+      });
+      this.logger.log(
+        `[confirmation] order processed orderId=${orderId} result=${sendResult.body?.reason || (sendResult.body?.ok ? 'confirmation_sent' : 'unknown')}`
+      );
+    });
   }
 
   async processWooOrder(payload, eventKey) {
@@ -217,19 +264,13 @@ export class ConfirmationService {
           return { status: 200, body: { ok: true, skipped: true, reason: 'inactive_status' } };
         }
 
-        const cachedOrder = this.store.getOrder(normalizedOrder.orderId);
-        if (
-          workflow.confirmationSentAt ||
-          workflow.state === 'pending' ||
-          workflow.state === 'confirmed' ||
-          workflow.state === 'cancelled' ||
-          workflow.state === 'manual' ||
-          cachedOrder?.confirmationState === 'pending_confirmation' ||
-          cachedOrder?.confirmationState === 'confirmed' ||
-          cachedOrder?.confirmationState === 'cancelled' ||
-          cachedOrder?.confirmationState === 'manual'
-        ) {
+        if (isConfirmationAlreadyStarted(workflow, this.store.getOrder(normalizedOrder.orderId))) {
           return { status: 200, body: { ok: true, duplicate: true, reason: 'duplicate_order' } };
+        }
+
+        const confirmationDelayMs = Number(this.messages.confirmationDelayMs) || 0;
+        if (confirmationDelayMs > 0) {
+          return this.scheduleInitialConfirmation(payload, normalizedOrder.orderId, confirmationDelayMs);
         }
 
         const sendResult = await this.sendInitialConfirmation(payload, {
@@ -2742,6 +2783,14 @@ function buildTemplateValues(normalizedOrder) {
     decision: normalizedOrder.decision || normalizedOrder.confirmationState || '',
     storeName: normalizedOrder.storeName || ''
   };
+}
+
+function isConfirmationAlreadyStarted(workflow, cachedOrder) {
+  return Boolean(
+    workflow.confirmationSentAt ||
+    ['pending', 'confirmed', 'cancelled', 'manual'].includes(workflow.state) ||
+    ['pending_confirmation', 'confirmed', 'cancelled', 'manual'].includes(cachedOrder?.confirmationState)
+  );
 }
 
 function resolveDeliveryEta(city, messages) {

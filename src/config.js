@@ -78,6 +78,7 @@ export function loadConfig() {
     },
     messages: {
       internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),
+      confirmationDelayMs: Number(process.env.CONFIRMATION_DELAY_SECONDS ?? 30) * 1000,
       confirmationPollEnabled: parseBooleanEnv(process.env.CONFIRMATION_POLL_ENABLED, false),
       confirmationPollQuestion: process.env.CONFIRMATION_POLL_QUESTION || 'Confirmer votre commande ?',
       confirmationTemplate: process.env.CONFIRMATION_MESSAGE_TEMPLATE ||
