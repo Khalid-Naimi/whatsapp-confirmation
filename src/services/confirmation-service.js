@@ -2724,7 +2724,74 @@ function resolveDeliveryEta(city, messages) {
     : messages.deliveryEtaOtherCities;
 }
 
+const POLL_OPTION_REPLIES = [
+  { pattern: /^confirm/iu, reply: '1' },
+  { pattern: /^(annul|cancel)/iu, reply: '2' }
+];
+
+// A vote on our confirmation poll is the same decision as typing "1" or "2".
+function extractPollVoteMessages(payload, eventKey, logger = console) {
+  const pollKey = payload?.data?.key || {};
+  if (pollKey.fromMe === false) {
+    return [];
+  }
+
+  const pollId = String(pollKey.id || '').trim() || eventKey;
+  const results = Array.isArray(payload?.data?.pollResult) ? payload.data.pollResult : [];
+  const messages = [];
+
+  for (const result of results) {
+    const reply = POLL_OPTION_REPLIES.find(({ pattern }) => pattern.test(String(result?.name || '').trim()))?.reply;
+    if (!reply) {
+      continue;
+    }
+
+    for (const voter of Array.isArray(result.voters) ? result.voters : []) {
+      const senderRaw = String(voter || '');
+      const senderPhone = senderRaw.endsWith('@lid') ? '' : normalizePhone(normalizeRemoteJid(senderRaw));
+      if (!senderPhone) {
+        logger.warn(`[webhook][wasender] poll vote skipped, voter is not a phone jid domain=${senderRaw.split('@')[1] || 'none'} pollId=${pollId}`);
+        continue;
+      }
+
+      const index = messages.length;
+      const message = { key: { id: pollId, remoteJid: senderRaw }, poll: result.name, vote: reply };
+      messages.push({
+        webhookEventKey: eventKey,
+        messageIndex: index,
+        messageKey: `poll:${pollId}:${senderPhone}:${reply}`,
+        providerMessageId: null,
+        senderPhone,
+        senderRaw,
+        recipientRaw: '',
+        timestamp: resolveInboundTimestamp(payload?.timestamp),
+        kind: 'text',
+        textBody: reply,
+        captionText: '',
+        mediaRef: '',
+        mimeType: '',
+        fromMe: false,
+        rawMessage: message,
+        rawEnvelopeSnapshot: {
+          eventKey,
+          index,
+          topLevelKeys: Object.keys(payload || {}).sort(),
+          dataKeys: Object.keys(payload?.data || {}).sort(),
+          providerMessageId: '',
+          message
+        }
+      });
+    }
+  }
+
+  return messages;
+}
+
 function extractWasenderInboundMessages(payload, eventKey, logger = console) {
+  if (payload?.event === 'poll.results') {
+    return extractPollVoteMessages(payload, eventKey, logger);
+  }
+
   const messages = extractWasenderMessages(payload, logger);
 
   return messages.map((message, index) => normalizeWasenderInboundMessage({

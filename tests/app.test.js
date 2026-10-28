@@ -895,6 +895,135 @@ test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
   assert.equal(store.getOrder('103').internalNotifiedConfirmed, 'yes');
 });
 
+function pollVotePayload({ pollId = 'POLL1', voters = {}, fromMe = true } = {}) {
+  return {
+    event: 'poll.results',
+    sessionId: 'session',
+    timestamp: 1753278982097,
+    data: {
+      key: { remoteJid: 'chat@s.whatsapp.net', fromMe, id: pollId },
+      pollMsg: { name: 'Confirmer votre commande ?' },
+      pollResult: Object.entries(voters).map(([name, list]) => ({ name, voters: list }))
+    }
+  };
+}
+
+async function placePollTestOrder(app, id, phone) {
+  const orderPayload = {
+    id,
+    status: 'pending',
+    total: '90.00',
+    currency: 'MAD',
+    billing: { first_name: 'Lina', last_name: 'B', phone, state: 'Casablanca' },
+    line_items: [{ name: 'Savon', quantity: 1 }]
+  };
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: {
+      'x-wc-webhook-signature': signWoo(orderPayload),
+      'x-wc-webhook-delivery-id': `delivery-poll-${id}`
+    },
+    payload: orderPayload
+  });
+}
+
+test('poll vote "Confirmer" confirms the order like reply 1', async () => {
+  const { app, store, wooOrderUpdates, wasenderCalls } = createTestContext();
+  await placePollTestOrder(app, 301, '212600000031');
+
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: pollVotePayload({ voters: { Confirmer: ['212600000031@s.whatsapp.net'], Annuler: [] } })
+  });
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(wooOrderUpdates.find((u) => u.fields.status)?.fields.status, 'on-hold');
+  assert.equal(store.getOrder('301').confirmationState, 'confirmed');
+  assert.equal(
+    wasenderCalls[1].message,
+    'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.'
+  );
+});
+
+test('poll vote "Annuler" cancels the order like reply 2', async () => {
+  const { app, store, wooOrderUpdates } = createTestContext();
+  await placePollTestOrder(app, 302, '212600000032');
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: pollVotePayload({ voters: { Confirmer: [], Annuler: ['212600000032@s.whatsapp.net'] } })
+  });
+
+  assert.equal(wooOrderUpdates.find((u) => u.fields.status)?.fields.status, 'cancelled');
+  assert.equal(store.getOrder('302').decision, 'cancelled');
+});
+
+test('replayed poll results do not send the customer a second reply', async () => {
+  const { app, wasenderCalls } = createTestContext();
+  await placePollTestOrder(app, 303, '212600000033');
+  const payload = pollVotePayload({ voters: { Confirmer: ['212600000033@s.whatsapp.net'], Annuler: [] } });
+
+  for (let i = 0; i < 2; i += 1) {
+    await dispatch(app, {
+      method: 'POST',
+      url: '/webhooks/wasender',
+      headers: { 'x-wasender-signature': signWasenderPlain() },
+      payload
+    });
+  }
+
+  const customerReplies = wasenderCalls.filter((c) => /t confirmat/.test(c.message || ''));
+  assert.equal(customerReplies.length, 1);
+});
+
+test('changing a poll vote after the first decision does not reopen the order', async () => {
+  const { app, store, wooOrderUpdates, wasenderCalls } = createTestContext();
+  await placePollTestOrder(app, 305, '212600000035');
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: pollVotePayload({ voters: { Confirmer: ['212600000035@s.whatsapp.net'], Annuler: [] } })
+  });
+  const callsAfterFirstVote = wasenderCalls.length;
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: pollVotePayload({ voters: { Confirmer: [], Annuler: ['212600000035@s.whatsapp.net'] } })
+  });
+
+  assert.equal(store.getOrder('305').decision, 'confirmed');
+  assert.equal(wooOrderUpdates.filter((u) => u.fields.status).map((u) => u.fields.status).join(), 'on-hold');
+  assert.equal(wasenderCalls.length, callsAfterFirstVote);
+});
+
+test('poll results for polls we did not send or without a phone voter are ignored', async () => {
+  const { app, wooOrderUpdates } = createTestContext();
+  await placePollTestOrder(app, 304, '212600000034');
+
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: pollVotePayload({ fromMe: false, voters: { Confirmer: ['212600000034@s.whatsapp.net'] } })
+  });
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: pollVotePayload({ pollId: 'POLL2', voters: { Confirmer: ['123456789@lid'] } })
+  });
+
+  assert.equal(wooOrderUpdates.find((u) => u.fields.status), undefined);
+});
+
 test('reply 2 cancels the order', async () => {
   const { app, wooStatusCalls, store, wasenderCalls, wooOrderUpdates } = createTestContext();
   const orderPayload = {

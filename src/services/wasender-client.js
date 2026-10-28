@@ -27,7 +27,13 @@ export class WasenderClient {
     return run;
   }
 
-  async sendMessageWithRetries({ to, message }) {
+  async sendPoll({ to, question, options }) {
+    const run = this.sendChain.then(() => this.sendMessageWithRetries({ to, poll: { question, options, multiSelect: false } }));
+    this.sendChain = run.catch(() => {});
+    return run;
+  }
+
+  async sendMessageWithRetries({ to, message, poll }) {
     for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
       await this.waitForAvailability();
       this.logger.log(`[wasender] send attempt=${attempt + 1} to=${maskPhone(to)}`);
@@ -38,10 +44,7 @@ export class WasenderClient {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiToken}`
         },
-        body: JSON.stringify({
-          to,
-          text: message
-        })
+        body: JSON.stringify(poll ? { to, poll } : { to, text: message })
       });
 
       const data = await parseJsonSafe(response);
