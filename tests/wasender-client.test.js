@@ -127,3 +127,23 @@ test('WasenderClient throws when a 200 response reports success:false (disconnec
   );
   assert.equal(attempts, 1);
 });
+
+test('WasenderClient.sendPoll posts a poll body instead of text', async () => {
+  let sentBody;
+  const client = new WasenderClient({
+    baseUrl: 'https://example.com/api',
+    apiToken: 'token',
+    minIntervalMs: 0,
+    fetchImpl: async (url, init) => {
+      sentBody = JSON.parse(init.body);
+      return { ok: true, async json() { return { success: true }; } };
+    }
+  });
+
+  await client.sendPoll({ to: '+212612345678', question: 'Confirmer ?', options: ['Confirmer', 'Annuler'] });
+
+  assert.deepEqual(sentBody, {
+    to: '+212612345678',
+    poll: { question: 'Confirmer ?', options: ['Confirmer', 'Annuler'], multiSelect: false }
+  });
+});
