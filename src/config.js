@@ -76,6 +76,13 @@ export function loadConfig() {
     optOut: {
       keywords: process.env.OPT_OUT_KEYWORDS || ''
     },
+    highDelivery: {
+      // Off unless HD_AUTO_SEND_ENABLED is set: confirmed orders then go straight to the new HighDelivery platform.
+      autoSendEnabled: parseBooleanEnv(process.env.HD_AUTO_SEND_ENABLED, false),
+      baseUrl: process.env.HD_API_BASE_URL || 'https://api.highdelivery.pro/api',
+      phone: process.env.HD_API_PHONE || '',
+      password: process.env.HD_API_PASSWORD || ''
+    },
     messages: {
       internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),
       confirmationDelayMs: Number(process.env.CONFIRMATION_DELAY_SECONDS ?? 30) * 1000,
@@ -99,6 +106,8 @@ export function loadConfig() {
         'Commande confirmat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       internalCancelledTemplate: process.env.INTERNAL_CANCELLED_TEMPLATE ||
         'Commande annulat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
+      internalHdSentTemplate: process.env.INTERNAL_HD_SENT_TEMPLATE ||
+        'Commande envoyee a High Delivery.\nNumero: {{orderId}}\nTracking: {{trackingNumber}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       stockAlertTemplate: process.env.STOCK_ALERT_MESSAGE_TEMPLATE || '',
       dropAlertTemplate: process.env.DROP_ALERT_MESSAGE_TEMPLATE || '',
       deliveryEtaCasablanca: process.env.DELIVERY_ETA_CASABLANCA || '24h',
