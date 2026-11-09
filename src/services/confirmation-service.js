@@ -117,13 +117,15 @@ const OUTBOUND_META_KEYS = {
 };
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, messages, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, logger = console }) {
     this.store = store;
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
     this.mailService = mailService;
     this.wordpressClient = wordpressClient;
     this.optOutKeywords = optOutKeywords;
+    this.hdAutoSend = hdAutoSend;
+    this.backgroundTasks = new Set();
     this.messages = messages;
     this.logger = logger;
     this.activeOrderLocks = new Map();
@@ -854,6 +856,9 @@ export class ConfirmationService {
         note,
         nowIso
       });
+      if (nextState === 'confirmed' && reconciliation.success) {
+        this.scheduleHdAutoSend(nextOrderState);
+      }
       return {
         ok: true,
         ignored: false,
@@ -2357,6 +2362,26 @@ export class ConfirmationService {
     } catch (error) {
       this.logger.warn(`Unable to persist internal notification flag for order ${order.orderId}: ${error.message}`);
       return nextOrder;
+    }
+  }
+
+  // Hands a confirmed order to the HighDelivery auto-send without holding up the WhatsApp webhook answer.
+  // The auto-send never throws and leaves the order on-hold whenever anything goes wrong.
+  scheduleHdAutoSend(order) {
+    if (!this.hdAutoSend?.enabled) {
+      return null;
+    }
+    const task = Promise.resolve()
+      .then(() => this.hdAutoSend.autoSend(order))
+      .catch((error) => this.logger.warn(`[hd-auto-send] unexpected failure orderId=${order?.orderId}: ${error.message}`))
+      .finally(() => this.backgroundTasks.delete(task));
+    this.backgroundTasks.add(task);
+    return task;
+  }
+
+  async drainBackgroundTasks() {
+    while (this.backgroundTasks.size) {
+      await Promise.all([...this.backgroundTasks]);
     }
   }
 

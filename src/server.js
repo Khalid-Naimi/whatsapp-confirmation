@@ -3,6 +3,8 @@ import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { JsonStore } from './json-store.js';
 import { ConfirmationService } from './services/confirmation-service.js';
+import { HdAutoSendService } from './services/hd-auto-send-service.js';
+import { HighDeliveryClient } from './services/highdelivery-client.js';
 import { MailService } from './services/mail-service.js';
 import { StockAlertService } from './services/stock-alert-service.js';
 import { WasenderClient } from './services/wasender-client.js';
@@ -44,6 +46,25 @@ const wooClient = new WooCommerceClient({
 
 const mailService = new MailService(config.mail);
 
+const hdAutoSend = new HdAutoSendService({
+  hdClient: new HighDeliveryClient({
+    baseUrl: config.highDelivery.baseUrl,
+    phone: config.highDelivery.phone,
+    password: config.highDelivery.password,
+    logger
+  }),
+  wooClient,
+  wasenderClient,
+  store,
+  notifyPhones: config.messages.internalNotifyPhones,
+  template: config.messages.internalHdSentTemplate,
+  enabled: config.highDelivery.autoSendEnabled,
+  logger
+});
+if (config.highDelivery.autoSendEnabled) {
+  logger.log(`HighDelivery auto-send is ON (${hdAutoSend.hdClient.isConfigured() ? 'credentials set' : 'WARNING: HD_API_PHONE / HD_API_PASSWORD missing, orders will stay on-hold'}).`);
+}
+
 const confirmationService = new ConfirmationService({
   store,
   wasenderClient,
@@ -51,6 +72,7 @@ const confirmationService = new ConfirmationService({
   mailService,
   wordpressClient,
   optOutKeywords,
+  hdAutoSend,
   messages: config.messages,
   logger
 });

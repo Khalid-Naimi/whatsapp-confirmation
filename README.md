@@ -62,6 +62,14 @@ Backend-only Node.js service that:
 - `CANCELLATION_EMAIL_SUBJECT`: subject template for invalid/non-WhatsApp cancellation emails
 - `CANCELLATION_EMAIL_BODY`: body template for invalid/non-WhatsApp cancellation emails
 
+## HighDelivery auto-send (optional)
+
+When `HD_AUTO_SEND_ENABLED=true`, an order the customer confirms (reply `1` or the "Confirmer" poll vote) is also created as a parcel on the new HighDelivery platform (`HD_API_PHONE` / `HD_API_PASSWORD`).
+
+- **Sent:** the parcel is created, the WooCommerce order is set to `completed` (so the desktop app no longer loads it), the tracking number is saved in `rhymat_hd_api_*` meta and an order note, and `INTERNAL_NOTIFY_PHONES` receive `INTERNAL_HD_SENT_TEMPLATE`.
+- **Anything else** (missing address or phone, city not served, HighDelivery refuses or is down, no credentials): nothing is sent twice, the order stays `on-hold` with an order note saying why, and the desktop app picks it up exactly as before.
+- **Never twice:** `rhymat_hd_api_state` (`sending` / `sent` / `failed` / `unknown`) is written before the call; `sending`, `sent` and `unknown` (no answer, the parcel may exist) block any further automatic send.
+
 ## Notes
 
 - Persistence is file-backed JSON for easy local setup and debug history.

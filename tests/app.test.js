@@ -7,6 +7,8 @@ import { createHmac } from 'node:crypto';
 import { createApp } from '../src/app.js';
 import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
+import { HdAutoSendService } from '../src/services/hd-auto-send-service.js';
+import { HighDeliveryError } from '../src/services/highdelivery-client.js';
 import { WasenderSendError } from '../src/services/wasender-client.js';
 import { normalizePhone, validatePhone } from '../src/utils/format.js';
 import { buildOptOutKeywords } from '../src/utils/opt-out.js';
@@ -5093,4 +5095,125 @@ test('GET /api/contacts/opted-out only returns opted-out contacts not all contac
 
   assert.equal(result.body.contacts.length, 1);
   assert.equal(result.body.contacts[0].phone, '+212600000099');
+});
+
+
+// ---- HighDelivery auto-send after a confirmed reply ----
+
+function attachHdAutoSend(context, { createImpl, enabled = true } = {}) {
+  const hdCalls = [];
+  const hdClient = {
+    isConfigured: () => true,
+    async createPackage(parcel) {
+      hdCalls.push(parcel);
+      return createImpl ? createImpl(parcel) : { trackingNumber: 'HD-900', data: {} };
+    }
+  };
+  context.confirmationService.hdAutoSend = new HdAutoSendService({
+    hdClient,
+    wooClient: context.confirmationService.wooClient,
+    wasenderClient: context.confirmationService.wasenderClient,
+    store: context.store,
+    notifyPhones: ['+212708357533', '+491729031097'],
+    template: 'Commande envoyee a High Delivery.\nNumero: {{orderId}}\nTracking: {{trackingNumber}}',
+    enabled,
+    logger: { log() {}, warn() {}, error() {} }
+  });
+  return hdCalls;
+}
+
+async function confirmFullOrder(context, id, { phone = '212600000009', address = 'Rue 1' } = {}) {
+  const orderPayload = {
+    id,
+    status: 'pending',
+    total: '90.00',
+    currency: 'MAD',
+    billing: { first_name: 'Lina', last_name: 'B', phone, city: 'Casablanca', address_1: address },
+    line_items: [{ name: 'Savon', quantity: 1 }]
+  };
+  // like the real WooCommerce, the fake store answers with the whole order, not just the changed fields
+  context.listedOrders.push({ ...orderPayload, meta_data: [] });
+  await dispatch(context.app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: { 'x-wc-webhook-signature': signWoo(orderPayload), 'x-wc-webhook-delivery-id': `delivery-hd-${id}` },
+    payload: orderPayload
+  });
+  const result = await dispatch(context.app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: { data: { messages: { key: { cleanedSenderPn: phone, fromMe: false }, messageBody: '1' } } }
+  });
+  await context.confirmationService.drainBackgroundTasks();
+  return result;
+}
+
+test('confirmed reply auto-sends to HighDelivery, completes the Woo order and tells the two numbers', async () => {
+  const context = createTestContext();
+  const hdCalls = attachHdAutoSend(context);
+  const result = await confirmFullOrder(context, 9101);
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(hdCalls.length, 1);
+  assert.equal(hdCalls[0].recipientPhone, '0600000009');
+  assert.equal(hdCalls[0].productName, 'Savon x1');
+  assert.equal(hdCalls[0].codAmount, 90);
+  assert.deepEqual(
+    context.wooOrderUpdates.filter((update) => update.fields.status).map((update) => update.fields.status),
+    ['on-hold', 'completed']
+  );
+  const hdMeta = Object.fromEntries(context.listedOrders.find((o) => String(o.id) === '9101').meta_data.map((m) => [m.key, m.value]));
+  assert.equal(hdMeta.rhymat_hd_api_state, 'sent');
+  assert.equal(hdMeta.rhymat_hd_api_tracking, 'HD-900');
+  const hdMessages = context.wasenderCalls.filter((call) => /Commande envoyee a High Delivery/u.test(call.message || ''));
+  assert.deepEqual(hdMessages.map((call) => call.to), ['+212708357533', '+491729031097']);
+  assert.match(hdMessages[0].message, /Numero: 9101\nTracking: HD-900/u);
+  // the usual confirmation messages still went out as before
+  assert.ok(context.wasenderCalls.some((call) => /Commande confirmat/u.test(call.message || '')));
+});
+
+test('when HighDelivery fails the confirmed order stays on-hold for the desktop app and nobody gets a "sent" message', async () => {
+  const context = createTestContext();
+  const hdCalls = attachHdAutoSend(context, { createImpl: () => { throw new HighDeliveryError('Service unavailable', { status: 503 }); } });
+  const result = await confirmFullOrder(context, 9102);
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(hdCalls.length, 1);
+  assert.deepEqual(context.wooOrderUpdates.filter((update) => update.fields.status).map((update) => update.fields.status), ['on-hold']);
+  assert.equal(context.store.getOrder('9102').confirmationState, 'confirmed');
+  assert.equal(context.wasenderCalls.filter((call) => /Commande envoyee/u.test(call.message || '')).length, 0);
+  assert.ok(context.wooNoteCalls.some((n) => /Auto-send to HighDelivery failed: Service unavailable \| HTTP 503/u.test(n.note) && /desktop app/u.test(n.note)));
+});
+
+test('an order HighDelivery cannot take (no address) stays on-hold and never reaches the API', async () => {
+  const context = createTestContext();
+  const hdCalls = attachHdAutoSend(context);
+  await confirmFullOrder(context, 9103, { address: '' });
+  assert.equal(hdCalls.length, 0);
+  assert.deepEqual(context.wooOrderUpdates.filter((update) => update.fields.status).map((update) => update.fields.status), ['on-hold']);
+  assert.ok(context.wooNoteCalls.some((n) => /Auto-send to HighDelivery skipped: .*address is missing/u.test(n.note)));
+});
+
+test('with the switch off (or no service) a confirmed order behaves exactly as before', async () => {
+  const off = createTestContext();
+  const offCalls = attachHdAutoSend(off, { enabled: false });
+  await confirmFullOrder(off, 9104);
+  assert.equal(offCalls.length, 0);
+  assert.deepEqual(off.wooOrderUpdates.filter((update) => update.fields.status).map((update) => update.fields.status), ['on-hold']);
+
+  const none = createTestContext();
+  await confirmFullOrder(none, 9105);
+  assert.deepEqual(none.wooOrderUpdates.filter((update) => update.fields.status).map((update) => update.fields.status), ['on-hold']);
+});
+
+test('a cancelled reply never triggers an auto-send', async () => {
+  const context = createTestContext();
+  const hdCalls = attachHdAutoSend(context);
+  const orderPayload = { id: 9106, status: 'pending', total: '90.00', currency: 'MAD', billing: { first_name: 'Lina', last_name: 'B', phone: '212600000010', city: 'Casablanca', address_1: 'Rue 1' }, line_items: [{ name: 'Savon', quantity: 1 }] };
+  await dispatch(context.app, { method: 'POST', url: '/webhooks/woocommerce', headers: { 'x-wc-webhook-signature': signWoo(orderPayload), 'x-wc-webhook-delivery-id': 'delivery-hd-9106' }, payload: orderPayload });
+  await dispatch(context.app, { method: 'POST', url: '/webhooks/wasender', headers: { 'x-wasender-signature': signWasenderPlain() }, payload: { data: { messages: { key: { cleanedSenderPn: '212600000010', fromMe: false }, messageBody: '2' } } } });
+  await context.confirmationService.drainBackgroundTasks();
+  assert.equal(hdCalls.length, 0);
+  assert.equal(context.store.getOrder('9106').confirmationState, 'cancelled');
 });
