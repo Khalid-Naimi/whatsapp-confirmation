@@ -5,6 +5,7 @@ import { loadConfig } from './config.js';
 import { JsonStore } from './json-store.js';
 import { ConfirmationService } from './services/confirmation-service.js';
 import { HdAutoSendService } from './services/hd-auto-send-service.js';
+import { HdStatusSyncService } from './services/hd-status-sync-service.js';
 import { HighDeliveryClient } from './services/highdelivery-client.js';
 import { loadProductMapFile } from './services/hd-product-match.js';
 import { MailService } from './services/mail-service.js';
@@ -85,6 +86,15 @@ const confirmationService = new ConfirmationService({
   logger
 });
 
+const hdStatusSyncService = new HdStatusSyncService({
+  confirmationService,
+  wooClient,
+  hdClient: hdAutoSend.hdClient,
+  enabled: config.highDelivery.statusSyncEnabled,
+  logger
+});
+logger.log(`HighDelivery status sync is ${config.highDelivery.statusSyncEnabled ? 'ON' : 'OFF'}; quiet hours ${config.messages.quietHours.enabled ? `${config.messages.quietHours.startHour}:00-${config.messages.quietHours.endHour}:00 ${config.messages.quietHours.timeZone}` : 'OFF'}.`);
+
 const stockAlertService = new StockAlertService({
   store,
   wasenderClient,
@@ -98,6 +108,7 @@ const app = createApp({
   confirmationService,
   store,
   stockAlertService,
+  hdStatusSyncService,
   logger
 });
 

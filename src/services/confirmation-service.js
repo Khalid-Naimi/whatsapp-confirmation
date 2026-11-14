@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems, validatePhone } from '../utils/format.js';
 import { isOptOutMessage } from '../utils/opt-out.js';
+import { isQuietHours } from '../utils/quiet-hours.js';
 import { WasenderSendError } from './wasender-client.js';
 
 const WORKFLOW_META_KEYS = {
@@ -78,7 +79,9 @@ const OUTBOUND_LOGICAL_KEYS = {
   clarification2: 'customer:clarification_2',
   confirmationSuccess: 'customer:confirmation_success',
   cancellationSuccess: 'customer:cancellation_success',
-  autoCancellation: 'customer:auto_cancellation'
+  autoCancellation: 'customer:auto_cancellation',
+  hdShipped: 'customer:hd_shipped',
+  hdArriving: 'customer:hd_arriving'
 };
 const OUTBOUND_META_KEYS = {
   [OUTBOUND_LOGICAL_KEYS.confirmationRequest]: {
@@ -113,6 +116,18 @@ const OUTBOUND_META_KEYS = {
     state: 'rhymat_whatsapp_auto_cancellation_state',
     reservedAt: 'rhymat_whatsapp_auto_cancellation_reserved_at',
     messageId: 'rhymat_whatsapp_auto_cancellation_message_id'
+  },
+  [OUTBOUND_LOGICAL_KEYS.hdShipped]: {
+    state: 'rhymat_whatsapp_hd_shipped_state',
+    reservedAt: 'rhymat_whatsapp_hd_shipped_reserved_at',
+    sentAt: 'rhymat_whatsapp_hd_shipped_sent_at',
+    messageId: 'rhymat_whatsapp_hd_shipped_message_id'
+  },
+  [OUTBOUND_LOGICAL_KEYS.hdArriving]: {
+    state: 'rhymat_whatsapp_hd_arriving_state',
+    reservedAt: 'rhymat_whatsapp_hd_arriving_reserved_at',
+    sentAt: 'rhymat_whatsapp_hd_arriving_sent_at',
+    messageId: 'rhymat_whatsapp_hd_arriving_message_id'
   }
 };
 
@@ -127,6 +142,9 @@ export class ConfirmationService {
     this.hdAutoSend = hdAutoSend;
     this.backgroundTasks = new Set();
     this.messages = messages;
+    // No customer message inside the quiet hours (see utils/quiet-hours.js). Unset in tests = never quiet.
+    this.quietHours = messages?.quietHours?.enabled ? messages.quietHours : null;
+    this.clock = () => new Date();
     this.logger = logger;
     this.activeOrderLocks = new Map();
     this.orderMutexes = new Map();
@@ -1207,6 +1225,7 @@ export class ConfirmationService {
       remindersSent: 0,
       autoCancelled: 0,
       ambiguous: 0,
+      deferredReplies: 0,
       skipped: 0,
       errors: 0
     };
@@ -1275,6 +1294,11 @@ export class ConfirmationService {
             };
             if (currentSyncStatus === 'manual') {
               return 'skipped';
+            }
+
+            // A "thank you / cancelled" reply that was held back by the quiet hours goes out now.
+            if (order.status === targetWooStatus && await this.sendDeferredDecisionReply({ order, nextOrderState, decisionMeta, effectiveDecision, now })) {
+              summary.deferredReplies += 1;
             }
 
             if (order.status !== targetWooStatus && currentSyncStatus !== 'pending_retry') {
@@ -1533,6 +1557,12 @@ export class ConfirmationService {
       return { ok: true, duplicate: true, orderPayload };
     }
 
+    // Quiet hours: nothing is reserved and nothing is sent. The hourly task tries again after the window.
+    if (this.isQuietNow()) {
+      this.logger.log(`[quiet-hours] deferred orderId=${orderId} logicalKey=${logicalKey}`);
+      return { ok: true, duplicate: true, deferred: true, orderPayload };
+    }
+
     if (outboundMeta.state === 'reserved') {
       if (!Number.isNaN(reservedAtMs) && (now.getTime() - reservedAtMs) < OUTBOUND_RESERVATION_STALE_MS) {
         return { ok: true, duplicate: true, inProgress: true, orderPayload };
@@ -1663,6 +1693,61 @@ export class ConfirmationService {
         buildDecisionMetaUpdate(orderPayload, decisionValues)
       )
     );
+  }
+
+  // One customer message per delivery stage ("shipped", "arriving"), at most once per order, never in quiet hours.
+  // Returns { sent, reason }. The Woo order fields are the "already sent" record.
+  async sendHdStageMessage(orderPayload, stage, trackingNumber = '', now = new Date()) {
+    const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
+    const shipped = stage === 'shipped';
+    const template = shipped ? this.messages.shippedMessage : this.messages.outForDeliveryMessage;
+    if (!template || !normalizedOrder.phone) {
+      return { sent: false, reason: 'no_template_or_phone' };
+    }
+    if (this.store?.isOptedOut?.(normalizedOrder.phone)) {
+      return { sent: false, reason: 'opted_out' };
+    }
+    const outcome = await this.sendLogicalMessageWithWooReservation({
+      orderPayload,
+      orderId: normalizedOrder.orderId,
+      phone: normalizedOrder.phone,
+      logicalKey: shipped ? OUTBOUND_LOGICAL_KEYS.hdShipped : OUTBOUND_LOGICAL_KEYS.hdArriving,
+      kind: shipped ? 'hd_shipped' : 'hd_arriving',
+      message: interpolateTemplate(template, { ...buildTemplateValues(normalizedOrder), trackingNumber }),
+      now
+    });
+    if (outcome.deferred) {
+      return { sent: false, reason: 'quiet_hours' };
+    }
+    if (outcome.duplicate || outcome.ambiguous) {
+      return { sent: false, reason: outcome.ambiguous ? 'ambiguous' : 'already_sent' };
+    }
+    return { sent: outcome.ok === true, reason: '' };
+  }
+
+  // Sends the customer's "confirmed" / "cancelled" reply when it was held back (quiet hours). At most 48 hours after the decision.
+  async sendDeferredDecisionReply({ order, nextOrderState, decisionMeta, effectiveDecision, now }) {
+    const decidedAt = decisionMeta.decisionAt || nextOrderState.decisionAt || '';
+    const decidedMs = Date.parse(decidedAt);
+    if ((decisionMeta.customerReplySent || nextOrderState.customerReplySent || '') === 'yes'
+      || this.isQuietNow()
+      || Number.isNaN(decidedMs)
+      || now.getTime() - decidedMs > 48 * 60 * 60 * 1000
+      || !nextOrderState.phone) {
+      return false;
+    }
+    const confirmed = effectiveDecision === 'confirmed';
+    const updated = await this.sendCustomerDecisionReply({
+      order: nextOrderState,
+      decisionOrderPayload: order,
+      phone: nextOrderState.phone,
+      logicalKey: confirmed ? OUTBOUND_LOGICAL_KEYS.confirmationSuccess : OUTBOUND_LOGICAL_KEYS.cancellationSuccess,
+      nextState: effectiveDecision,
+      nowIso: decidedAt,
+      currentInvalidReplyCount: decisionMeta.invalidReplyCount || 0,
+      message: confirmed ? this.messages.confirmedReply : this.messages.cancelledReply
+    });
+    return (updated?.customerReplySent || '') === 'yes';
   }
 
   async sendCustomerDecisionReply({ order, decisionOrderPayload, phone, logicalKey, nextState, nowIso, currentInvalidReplyCount, message }) {
@@ -2018,6 +2103,10 @@ export class ConfirmationService {
         }
       });
 
+      if (sendOutcome.deferred) {
+        return { status: 202, body: { ok: true, deferred: true, reason: 'quiet_hours' } };
+      }
+
       if (sendOutcome.inProgress || sendOutcome.duplicate) {
         return { status: 202, body: { ok: true, duplicate: true, reason: 'confirmation_in_flight' } };
       }
@@ -2251,7 +2340,16 @@ export class ConfirmationService {
     }
   }
 
+  // Always judged on the real clock, not on the time an order or decision was recorded.
+  isQuietNow() {
+    return isQuietHours(this.clock(), this.quietHours);
+  }
+
   async safeSendTrackedMessage({ phone, orderId, kind, message }) {
+    if (this.isQuietNow()) {
+      this.logger.log(`[quiet-hours] skipped orderId=${orderId} kind=${kind}`);
+      return null;
+    }
     try {
       const result = await this.wasenderClient.sendMessage({
         to: phone,

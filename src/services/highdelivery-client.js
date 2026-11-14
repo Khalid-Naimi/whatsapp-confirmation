@@ -203,6 +203,24 @@ export class HighDeliveryClient {
     return this.warehouseProducts;
   }
 
+  // Every parcel of the account, newest data: [{ tracking_number, status, ... }].
+  async listPackages() {
+    const all = [];
+    for (let page = 1; page <= 50; page += 1) {
+      const payload = await this.request('GET', `/client/packages?page=${page}&limit=100`);
+      const rows = payload?.data?.packages;
+      if (!Array.isArray(rows)) {
+        throw new HighDeliveryError('HighDelivery parcel list is missing.');
+      }
+      all.push(...rows);
+      const total = Number(payload?.data?.total ?? 0);
+      if (rows.length === 0 || all.length >= total) {
+        break;
+      }
+    }
+    return all;
+  }
+
   // The platform's own check of a phone number: how many parcels it took, how many were delivered, whether it is blacklisted.
   // Returns { score, totalOrders, deliveredOrders, failedOrders, blacklisted }. A brand-new number scores 50.
   async trustScore(phone) {

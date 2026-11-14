@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseQuietHoursEnv } from './utils/quiet-hours.js';
 
 function readEnvFile(filePath = '.env') {
   try {
@@ -83,7 +84,10 @@ export function loadConfig() {
       phone: process.env.HD_API_PHONE || '',
       password: process.env.HD_API_PASSWORD || '',
       // A customer number scoring below this on HighDelivery's own check (0-100, new numbers score 50) is held for a human.
-      minTrustScore: Number(process.env.HD_MIN_TRUST_SCORE ?? 30)
+      minTrustScore: Number(process.env.HD_MIN_TRUST_SCORE ?? 30),
+      // Off unless HD_STATUS_SYNC_ENABLED is set: parcel statuses are copied to the Woo orders and customers get
+      // the "shipped" / "arriving" messages.
+      statusSyncEnabled: parseBooleanEnv(process.env.HD_STATUS_SYNC_ENABLED, false)
     },
     messages: {
       internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),
@@ -112,6 +116,12 @@ export function loadConfig() {
         'Commande envoyee a High Delivery.\nNumero: {{orderId}}\nTracking: {{trackingNumber}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       stockAlertTemplate: process.env.STOCK_ALERT_MESSAGE_TEMPLATE || '',
       dropAlertTemplate: process.env.DROP_ALERT_MESSAGE_TEMPLATE || '',
+      // No customer message between startHour and endHour in the shop's time zone (default 22:00 to 10:00, Morocco).
+      quietHours: parseQuietHoursEnv(process.env),
+      shippedMessage: process.env.HD_SHIPPED_MESSAGE ||
+        'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) tkhrjat mn 3endna. Ghadi twsl lik f {{deliveryEta}}. Chokran.',
+      outForDeliveryMessage: process.env.HD_ARRIVING_MESSAGE ||
+        'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) lyoum m3a livreur. Ghadi ytsel bik, 3afak khelli telephone dyalk m7loul.',
       deliveryEtaCasablanca: process.env.DELIVERY_ETA_CASABLANCA || '24h',
       deliveryEtaOtherCities: process.env.DELIVERY_ETA_OTHER_CITIES || '2 a 3 jours ouvrables',
       defaultCityLabel: process.env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'

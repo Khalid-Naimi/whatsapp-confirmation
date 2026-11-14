@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 
-export function createApp({ config, confirmationService, store, stockAlertService = null, logger = console }) {
+export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, logger = console }) {
   return async function handler(req, res) {
     try {
       const parsedUrl = new URL(req.url, 'http://localhost');
@@ -144,7 +144,16 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         logger.log(
           `[task][order-followups] completed backfilled=${result.backfilled || 0} remindersSent=${result.remindersSent || 0} autoCancelled=${result.autoCancelled || 0} ambiguous=${result.ambiguous || 0} skipped=${result.skipped || 0} errors=${result.errors || 0}`
         );
-        return sendJson(res, 200, { ok: true, summary: result });
+        // The same hourly call also copies HighDelivery parcel statuses to the orders (never breaks the follow-ups).
+        let hdStatus = null;
+        if (hdStatusSyncService) {
+          try {
+            hdStatus = await hdStatusSyncService.run();
+          } catch (error) {
+            logger.warn(`[task][order-followups] hd status sync failed: ${error.message}`);
+          }
+        }
+        return sendJson(res, 200, { ok: true, summary: result, hdStatus });
       }
 
       if (pathname === '/tasks/stock-alerts') {
