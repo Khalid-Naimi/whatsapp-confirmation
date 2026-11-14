@@ -3,16 +3,19 @@ function buildAuthHeader(consumerKey, consumerSecret) {
 }
 
 export class WooCommerceClient {
-  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, logger = console }) {
+  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, timeoutMs = 30000, logger = console }) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
     this.consumerKey = consumerKey;
     this.consumerSecret = consumerSecret;
     this.authHeader = buildAuthHeader(consumerKey, consumerSecret);
     this.fetch = fetchImpl;
+    this.timeoutMs = timeoutMs;
     this.logger = logger;
   }
 
-  async listOrdersByStatuses(statuses, { perPage = 100 } = {}) {
+  // `after` (ISO date) keeps only orders created since then. A status the shop does not know (for example the
+  // "confirmed" status before the Rhymat Order Statuses plugin is active) is skipped instead of failing the whole list.
+  async listOrdersByStatuses(statuses, { perPage = 100, after = '' } = {}) {
     const allOrders = [];
     const seenOrderIds = new Set();
 
@@ -20,11 +23,21 @@ export class WooCommerceClient {
       let page = 1;
 
       while (true) {
-        const orders = await this.listOrders({
-          status,
-          perPage,
-          page
-        });
+        let orders;
+        try {
+          orders = await this.listOrders({
+            status,
+            perPage,
+            page,
+            after
+          });
+        } catch (error) {
+          if (/failed with 400/u.test(String(error?.message)) && /rest_invalid_param/u.test(String(error?.message))) {
+            this.logger.warn(`[woo] status "${status}" is not known to the shop; skipped in the order list`);
+            break;
+          }
+          throw error;
+        }
 
         if (!orders.length) {
           break;
@@ -50,10 +63,13 @@ export class WooCommerceClient {
     return allOrders;
   }
 
-  async listOrders({ status, perPage = 100, page = 1 }) {
+  async listOrders({ status, perPage = 100, page = 1, after = '' }) {
     const params = new URLSearchParams();
     if (status) {
       params.set('status', status);
+    }
+    if (after) {
+      params.set('after', after);
     }
     params.set('per_page', String(perPage));
     params.set('page', String(page));
@@ -126,7 +142,8 @@ export class WooCommerceClient {
               authMode: strategy.mode,
               hasBody: body !== undefined
             }),
-            body: body === undefined ? undefined : JSON.stringify(body)
+            body: body === undefined ? undefined : JSON.stringify(body),
+            signal: AbortSignal.timeout(this.timeoutMs)
           });
         } catch (networkError) {
           lastError = networkError;

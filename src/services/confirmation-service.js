@@ -721,6 +721,20 @@ export class ConfirmationService {
           };
         }
 
+        if (this.isQuietNow()) {
+          // The "please answer 1 or 2" message cannot go out now, so this reply is not counted against the customer.
+          this.logger.log(`[quiet-hours] unclear reply not counted orderId=${pendingOrder.orderId}`);
+          return {
+            ok: false,
+            ignored: true,
+            duplicate: false,
+            failed: false,
+            route: 'confirmation',
+            eventStatus: 'invalid_reply',
+            reason: 'invalid_reply_quiet_hours'
+          };
+        }
+
         const nextInvalidReplyCount = Math.min(currentInvalidReplyCount + 1, 2);
         const nextManualFollowupRequired = nextInvalidReplyCount >= 2;
         let conversationOrder = pendingOrder.rawOrder || {};
@@ -1300,7 +1314,7 @@ export class ConfirmationService {
             }
 
             // A "thank you / cancelled" reply that was held back by the quiet hours goes out now.
-            if (wooStatusMatchesTarget(order.status, targetWooStatus) && await this.sendDeferredDecisionReply({ order, nextOrderState, decisionMeta, effectiveDecision, now })) {
+            if ((wooStatusMatchesTarget(order.status, targetWooStatus) || (effectiveDecision === 'confirmed' && ['completed', 'delivered'].includes(String(order.status || '')))) && await this.sendDeferredDecisionReply({ order, nextOrderState, decisionMeta, effectiveDecision, now })) {
               summary.deferredReplies += 1;
             }
 
@@ -1710,15 +1724,36 @@ export class ConfirmationService {
     if (this.store?.isOptedOut?.(normalizedOrder.phone)) {
       return { sent: false, reason: 'opted_out' };
     }
-    const outcome = await this.sendLogicalMessageWithWooReservation({
-      orderPayload,
-      orderId: normalizedOrder.orderId,
-      phone: normalizedOrder.phone,
-      logicalKey: shipped ? OUTBOUND_LOGICAL_KEYS.hdShipped : OUTBOUND_LOGICAL_KEYS.hdArriving,
-      kind: shipped ? 'hd_shipped' : 'hd_arriving',
-      message: interpolateTemplate(template, { ...buildTemplateValues(normalizedOrder), trackingNumber }),
-      now
-    });
+    const logicalKey = shipped ? OUTBOUND_LOGICAL_KEYS.hdShipped : OUTBOUND_LOGICAL_KEYS.hdArriving;
+    if (getOutboundReservationMeta(orderPayload, logicalKey).state === 'failed') {
+      return { sent: false, reason: 'unreachable' };
+    }
+    let outcome;
+    try {
+      outcome = await this.sendLogicalMessageWithWooReservation({
+        orderPayload,
+        orderId: normalizedOrder.orderId,
+        phone: normalizedOrder.phone,
+        logicalKey,
+        kind: shipped ? 'hd_shipped' : 'hd_arriving',
+        message: interpolateTemplate(template, { ...buildTemplateValues(normalizedOrder), trackingNumber }),
+        now
+      });
+    } catch (error) {
+      if (!isWhatsAppContactabilityFailure(error)) {
+        throw error;
+      }
+      // The number is not on WhatsApp: remember it, so the hourly task does not try again for two weeks.
+      try {
+        await this.wooClient.updateOrderMeta(
+          normalizedOrder.orderId,
+          buildLogicalSendMetaUpdate(orderPayload, logicalKey, { state: 'failed', reservedAt: now.toISOString() })
+        );
+      } catch (metaError) {
+        this.logger.warn(`[hd-status] could not record the unreachable number orderId=${normalizedOrder.orderId}: ${metaError.message}`);
+      }
+      return { sent: false, reason: 'unreachable' };
+    }
     if (outcome.deferred) {
       return { sent: false, reason: 'quiet_hours' };
     }
@@ -1729,31 +1764,47 @@ export class ConfirmationService {
   }
 
   // Sends the customer's "confirmed" / "cancelled" reply when it was held back (quiet hours). At most 48 hours after the decision.
+  // Only a reply that the quiet hours held back (its reservation state is "deferred") is sent here. Auto-cancelled and
+  // invalid-phone orders also have customerReplySent=no, but they are never marked deferred, so they are never messaged.
   async sendDeferredDecisionReply({ order, nextOrderState, decisionMeta, effectiveDecision, now }) {
     const decidedAt = decisionMeta.decisionAt || nextOrderState.decisionAt || '';
     const decidedMs = Date.parse(decidedAt);
+    const confirmed = effectiveDecision === 'confirmed';
+    const logicalKey = confirmed ? OUTBOUND_LOGICAL_KEYS.confirmationSuccess : OUTBOUND_LOGICAL_KEYS.cancellationSuccess;
     if ((decisionMeta.customerReplySent || nextOrderState.customerReplySent || '') === 'yes'
+      || getOutboundReservationMeta(order, logicalKey).state !== 'deferred'
       || this.isQuietNow()
       || Number.isNaN(decidedMs)
       || now.getTime() - decidedMs > 48 * 60 * 60 * 1000
       || !nextOrderState.phone) {
       return false;
     }
-    const confirmed = effectiveDecision === 'confirmed';
     const updated = await this.sendCustomerDecisionReply({
       order: nextOrderState,
       decisionOrderPayload: order,
       phone: nextOrderState.phone,
-      logicalKey: confirmed ? OUTBOUND_LOGICAL_KEYS.confirmationSuccess : OUTBOUND_LOGICAL_KEYS.cancellationSuccess,
+      logicalKey,
       nextState: effectiveDecision,
       nowIso: decidedAt,
+      reservationNow: now,
       currentInvalidReplyCount: decisionMeta.invalidReplyCount || 0,
       message: confirmed ? this.messages.confirmedReply : this.messages.cancelledReply
     });
     return (updated?.customerReplySent || '') === 'yes';
   }
 
-  async sendCustomerDecisionReply({ order, decisionOrderPayload, phone, logicalKey, nextState, nowIso, currentInvalidReplyCount, message }) {
+  async sendCustomerDecisionReply({ order, decisionOrderPayload, phone, logicalKey, nextState, nowIso, currentInvalidReplyCount, message, reservationNow = null }) {
+    // Quiet hours hold the reply back: remember that, so the hourly task sends exactly this reply later.
+    if (this.isQuietNow()) {
+      try {
+        await this.wooClient.updateOrderMeta(
+          order.orderId,
+          buildLogicalSendMetaUpdate(decisionOrderPayload, logicalKey, { state: 'deferred', reservedAt: nowIso })
+        );
+      } catch (error) {
+        this.logger.warn(`[quiet-hours] could not mark the held reply orderId=${order.orderId}: ${error.message}`);
+      }
+    }
     const sendOutcome = await this.sendLogicalMessageWithWooReservation({
       orderPayload: decisionOrderPayload,
       orderId: order.orderId,
@@ -1761,7 +1812,7 @@ export class ConfirmationService {
       logicalKey,
       kind: logicalKey === OUTBOUND_LOGICAL_KEYS.confirmationSuccess ? 'confirmation_success' : 'cancellation_success',
       message,
-      now: new Date(nowIso),
+      now: reservationNow || new Date(nowIso),
       persistAfterSend: async ({ providerMessageId, reservedAt, reservationOrder }) => {
         const updatedOrder = await this.persistWorkflowAndDecisionMeta({
           orderPayload: reservationOrder || decisionOrderPayload,
@@ -2533,9 +2584,9 @@ export class ConfirmationService {
     });
   }
 
-  async listOrdersForStatuses(statuses) {
+  async listOrdersForStatuses(statuses, options = {}) {
     if (typeof this.wooClient.listOrdersByStatuses === 'function') {
-      return this.wooClient.listOrdersByStatuses(statuses);
+      return this.wooClient.listOrdersByStatuses(statuses, options);
     }
 
     const allOrders = [];

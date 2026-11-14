@@ -41,6 +41,7 @@ test('HighDelivery status to Woo status: only end states, only forward', () => {
   assert.equal(wooStatusChange('delivered', 'cancelled'), null, 'never reopen a cancelled order');
   assert.equal(wooStatusChange('returned', 'completed'), 'cancelled', 'a parcel that came back cancels the order');
   assert.equal(wooStatusChange('refused', 'on-hold'), 'cancelled');
+  assert.equal(wooStatusChange('returned_by_driver', 'completed'), null, 'an in-between return step does not cancel the order');
   assert.equal(wooStatusChange('cancelled', 'cancelled'), null);
   for (const status of ['picked_up', 'in_transit', 'out_for_delivery', 'postponed', 'not_delivered', 'saved', 'nonsense']) {
     assert.equal(wooStatusChange(status, 'on-hold'), null, status);
@@ -118,6 +119,7 @@ test('stage message skips an opted-out customer and an order without phone', asy
 function makeSync({ orders, parcels, outcome = { sent: true } }) {
   const calls = { meta: [], notes: [], status: [], stage: [] };
   const wooClient = {
+    getOrder: async (id) => orders.find((o) => String(o.id) === String(id)),
     updateOrderMeta: async (id, meta) => { calls.meta.push({ id, meta }); return { ...orders.find((o) => String(o.id) === String(id)), meta_data: meta }; },
     addOrderNote: async (id, note) => { calls.notes.push({ id, note }); },
     updateOrderStatus: async (id, status) => { calls.status.push({ id, status }); }
@@ -257,4 +259,163 @@ test('auto-send accepts a confirmed order as well as an on-hold one', async () =
     assert.equal((await service.autoSend({ orderId: '321' })).status, 'sent', status);
     assert.equal(created, 1, status);
   }
+});
+
+
+// ---- fixes from the independent review ----------------------------------------------------------------------------
+
+test('review #3: a failed Woo status write is retried even though the HighDelivery status was already final', async () => {
+  const order = { ...trackedOrder(11, 'NAI000011', [{ key: HD_STATUS_META.status, value: 'delivered' }]), status: 'completed' };
+  const calls = { status: [] };
+  const sync = new HdStatusSyncService({
+    confirmationService: { listOrdersForStatuses: async () => [order], withOrderLock: async (_id, work) => work(), sendHdStageMessage: async () => ({ sent: false }) },
+    wooClient: { getOrder: async () => order, updateOrderMeta: async () => order, addOrderNote: async () => ({}), updateOrderStatus: async (id, status) => { calls.status.push({ id, status }); } },
+    hdClient: { isConfigured: () => true, listPackages: async () => [] },
+    wooStatuses: { confirmed: 'confirmed', delivered: 'delivered' },
+    logger: { log() {}, warn() {}, error() {} }
+  });
+  await sync.run({ now: NOW });
+  assert.deepEqual(calls.status, [{ id: '11', status: 'delivered' }], 'the order catches up to delivered');
+});
+
+test('review #3: when the Woo status write fails, the saved status is not advanced, so the next run tries again', async () => {
+  const order = trackedOrder(12, 'NAI000012');
+  const writes = [];
+  const sync = new HdStatusSyncService({
+    confirmationService: { listOrdersForStatuses: async () => [order], withOrderLock: async (_id, work) => work(), sendHdStageMessage: async () => ({ sent: false }) },
+    wooClient: { getOrder: async () => order, updateOrderMeta: async (id, meta) => { writes.push(meta); return order; }, addOrderNote: async () => ({}), updateOrderStatus: async () => { throw new Error('woo 503'); } },
+    hdClient: { isConfigured: () => true, listPackages: async () => [{ tracking_number: 'NAI000012', status: 'delivered' }] },
+    wooStatuses: { confirmed: 'confirmed', delivered: 'delivered' },
+    logger: { log() {}, warn() {}, error() {} }
+  });
+  const summary = await sync.run({ now: NOW });
+  assert.equal(summary.errors, 1);
+  assert.equal(writes.length, 0, 'the HighDelivery status is only saved after the Woo status was written');
+});
+
+test('review #6: parcels older than 30 days are left alone', async () => {
+  const old = { ...trackedOrder(13, 'NAI000013'), meta_data: [{ key: HD_META.tracking, value: 'NAI000013' }, { key: HD_META.sentAt, value: '2026-09-01T00:00:00Z' }] };
+  const { sync, calls } = makeSync({ orders: [old], parcels: [{ tracking_number: 'NAI000013', status: 'delivered' }] });
+  const summary = await sync.run({ now: NOW });
+  assert.equal(summary.checked, 0);
+  assert.equal(calls.status.length, 0);
+  assert.equal(calls.notes.length, 0);
+});
+
+test('review #1/#4: only a reply held back by the quiet hours is sent later (auto-cancelled orders are never messaged)', async () => {
+  const now = at('2026-11-15T09:30:00Z');
+  const { service, sent } = makeService({ quietHours: QUIET, clock: () => now });
+  service.messages.cancelledReply = 'Cancelled reply';
+  service.messages.confirmedReply = 'Confirmed reply';
+  const base = (extra = []) => ({ ...WOO_ORDER, status: 'cancelled', meta_data: extra });
+  const normalized = { orderId: '501', phone: '+212600000041', customerReplySent: 'no' };
+  const decisionMeta = { decisionAt: '2026-11-15T06:00:00Z', customerReplySent: 'no', invalidReplyCount: 0 };
+
+  // Auto-cancelled (no 'deferred' mark): nothing is sent.
+  assert.equal(await service.sendDeferredDecisionReply({ order: base(), nextOrderState: normalized, decisionMeta, effectiveDecision: 'cancelled', now }), false);
+  assert.equal(sent.length, 0);
+
+  // Held back at night (reservation state 'deferred'): sent now.
+  const held = base([{ key: 'rhymat_whatsapp_cancellation_success_state', value: 'deferred' }]);
+  await service.sendDeferredDecisionReply({ order: held, nextOrderState: normalized, decisionMeta, effectiveDecision: 'cancelled', now });
+  assert.deepEqual(sent.map((row) => row.message), ['Cancelled reply']);
+});
+
+test('review #2: a status the shop does not know is skipped, not fatal', async () => {
+  const { WooCommerceClient } = await import('../src/services/woocommerce-client.js');
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(String(url));
+    const status = new URL(url).searchParams.get('status');
+    if (status === 'confirmed') {
+      return { ok: false, status: 400, headers: new Map(), text: async () => JSON.stringify({ code: 'rest_invalid_param', message: 'Invalid parameter(s): status' }) };
+    }
+    return { ok: true, status: 200, headers: new Map(), text: async () => JSON.stringify(status === 'on-hold' ? [{ id: 7 }] : []) };
+  };
+  const client = new WooCommerceClient({ baseUrl: 'https://shop.example', consumerKey: 'k', consumerSecret: 's', fetchImpl, logger: { log() {}, warn() {}, error() {} } });
+  const orders = await client.listOrdersByStatuses(['confirmed', 'on-hold']);
+  assert.deepEqual(orders.map((o) => o.id), [7]);
+});
+
+test('review #5: the hourly task never runs twice at once', async () => {
+  const http = await import('node:http');
+  const { createApp } = await import('../src/app.js');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let runs = 0;
+  const app = createApp({
+    config: { tasks: { secret: 's3cret' } },
+    confirmationService: { runOrderFollowups: async () => { runs += 1; await gate; return {}; } },
+    store: {},
+    logger: { log() {}, warn() {}, error() {} }
+  });
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  const url = `http://127.0.0.1:${server.address().port}/tasks/order-followups`;
+  try {
+    const first = fetch(url, { method: 'POST', headers: { 'x-task-secret': 's3cret' } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const second = await fetch(url, { method: 'POST', headers: { 'x-task-secret': 's3cret' } });
+    assert.equal(second.status, 202);
+    assert.equal((await second.json()).skipped, 'already_running');
+    release();
+    assert.equal((await first).status, 200);
+    assert.equal(runs, 1);
+  } finally {
+    release();
+    server.close();
+  }
+});
+
+test('review #7: stock alerts wait for the end of the quiet hours', async () => {
+  const { StockAlertService } = await import('../src/services/stock-alert-service.js');
+  let quiet = true;
+  const sent = [];
+  const db = { stockAlerts: [{ id: 'a1', status: 'queued', phone: '+212600000041', productName: 'Cap', size: 'M', productUrl: 'https://x' }] };
+  const store = { read: () => db, transaction: (fn) => fn(db), appendMessage() {} };
+  const service = new StockAlertService({ store, wasenderClient: { sendMessage: async (p) => { sent.push(p); return {}; } }, logger: { log() {}, warn() {}, error() {} }, autoProcess: false, isQuiet: () => quiet });
+  await service.runQueue();
+  assert.equal(sent.length, 0);
+  assert.equal(db.stockAlerts[0].status, 'queued');
+  quiet = false;
+  await service.runQueue();
+  assert.equal(sent.length, 1);
+  assert.equal(db.stockAlerts[0].status, 'sent');
+});
+
+test('review #9: the parcel list is read page by page even without a total', async () => {
+  const { HighDeliveryClient } = await import('../src/services/highdelivery-client.js');
+  const pages = [Array.from({ length: 100 }, (_, i) => ({ tracking_number: `A${i}` })), [{ tracking_number: 'B1' }]];
+  let call = 0;
+  const fetchImpl = async (url) => {
+    const body = String(url).endsWith('/auth/login') ? { success: true, data: { token: 't' } } : { success: true, data: { packages: pages[call++] || [] } };
+    return { status: 200, json: async () => body };
+  };
+  const client = new HighDeliveryClient({ phone: '0611111111', password: 'pw', fetchImpl, logger: { log() {}, warn() {}, error() {} } });
+  assert.equal((await client.listPackages()).length, 101);
+});
+
+test('review #11: a mistyped time zone falls back to Morocco instead of breaking every send', () => {
+  assert.equal(parseQuietHoursEnv({ QUIET_HOURS_TIMEZONE: 'Mars/Phobos' }).timeZone, 'Africa/Casablanca');
+  assert.equal(isQuietHours(at('2026-11-14T23:30:00Z'), { ...QUIET, timeZone: 'Mars/Phobos' }), true);
+});
+
+test('review #13: customer-typed text cannot add lines to a team alert', async () => {
+  const { HdAutoSendService } = await import('../src/services/hd-auto-send-service.js');
+  const sent = [];
+  const service = new HdAutoSendService({ hdClient: {}, wooClient: {}, wasenderClient: { sendMessage: async (p) => { sent.push(p); return {}; } }, store: {}, notifyPhones: ['+212611111111'], logger: { log() {}, warn() {}, error() {} } });
+  await service.sendInternal('9', { billing: { first_name: 'Eve\nATTENTION: fake line', phone: '0612345678' } }, 'N {{customerName}}', {}, 'x');
+  assert.equal(sent[0].message.includes('\n'), false);
+});
+
+test('review #10: a number that is not on WhatsApp is marked failed and not retried', async () => {
+  const { WasenderSendError } = await import('../src/services/wasender-client.js');
+  const now = at('2026-11-15T09:30:00Z');
+  const { service, metaWrites } = makeService({ quietHours: QUIET, clock: () => now });
+  service.wasenderClient.sendMessage = async () => { throw new WasenderSendError({ status: 422, data: { message: 'not on whatsapp' }, message: 'x' }); };
+  const first = await service.sendHdStageMessage(WOO_ORDER, 'shipped', 'T', now);
+  assert.equal(first.reason, 'unreachable');
+  assert.ok(JSON.stringify(metaWrites).includes('hd_shipped_state') && JSON.stringify(metaWrites).includes('failed'));
+  const again = await service.sendHdStageMessage({ ...WOO_ORDER, meta_data: [{ key: 'rhymat_whatsapp_hd_shipped_state', value: 'failed' }] }, 'shipped', 'T', now);
+  assert.equal(again.reason, 'unreachable');
 });

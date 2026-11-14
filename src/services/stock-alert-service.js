@@ -14,13 +14,14 @@ const DEFAULT_DROP_TEMPLATE =
  * after another in the background. The caller gets its answer straight away, because Wasender is rate limited.
  */
 export class StockAlertService {
-  constructor({ store, wasenderClient, template, dropTemplate, logger = console, autoProcess = true }) {
+  constructor({ store, wasenderClient, template, dropTemplate, logger = console, autoProcess = true, isQuiet = () => false }) {
     this.store = store;
     this.wasenderClient = wasenderClient;
     this.template = template || DEFAULT_TEMPLATE;
     this.dropTemplate = dropTemplate || DEFAULT_DROP_TEMPLATE;
     this.logger = logger;
     this.autoProcess = autoProcess;
+    this.isQuiet = isQuiet; // true during the customer quiet hours
     this.processing = null;
   }
 
@@ -130,6 +131,10 @@ export class StockAlertService {
 
   async runQueue() {
     for (;;) {
+      // Customers get no message in the quiet hours; the alert stays queued and the hourly task sends it later.
+      if (this.isQuiet()) {
+        return;
+      }
       const next = (this.store.read().stockAlerts || []).find((alert) => alert.status === 'queued');
       if (!next) {
         return;

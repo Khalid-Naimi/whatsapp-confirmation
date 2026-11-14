@@ -8,9 +8,11 @@ export const HD_STATUS_META = {
 };
 
 const SYNC_WOO_STATUSES = ['on-hold', 'confirmed', 'processing', 'completed'];
-// A customer message is only sent for a parcel that was sent to HighDelivery recently, so turning this on never
-// messages customers about old parcels.
-const MESSAGE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+// Only parcels sent to HighDelivery in the last 30 days are synced or messaged. Turning the sync on therefore never
+// rewrites old orders (restock-on-cancel, reports) or messages customers about old parcels, and the order list stays short.
+const SYNC_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+// Woo filters by creation date; a parcel is sent shortly after its order, so look back a little further.
+const LIST_LOOKBACK_MS = SYNC_MAX_AGE_MS + 14 * 24 * 60 * 60 * 1000;
 
 function metaValue(order, key) {
   const row = (order?.meta_data || []).find((item) => item?.key === key);
@@ -46,7 +48,7 @@ export class HdStatusSyncService {
     try {
       [packages, orders] = await Promise.all([
         this.hdClient.listPackages(),
-        this.confirmationService.listOrdersForStatuses(SYNC_WOO_STATUSES)
+        this.confirmationService.listOrdersForStatuses(SYNC_WOO_STATUSES, { after: new Date(now.getTime() - LIST_LOOKBACK_MS).toISOString() })
       ]);
     } catch (error) {
       this.logger.warn(`[hd-status] could not load parcels or orders: ${error.message}`);
@@ -63,12 +65,19 @@ export class HdStatusSyncService {
 
     for (const order of orders) {
       const tracking = metaValue(order, HD_META.tracking).trim().toUpperCase();
-      if (!tracking || HD_FINAL_STATUSES.has(foldHdStatus(metaValue(order, HD_STATUS_META.status)))) {
+      const sentAt = Date.parse(metaValue(order, HD_META.sentAt));
+      if (!tracking || !Number.isFinite(sentAt) || now.getTime() - sentAt > SYNC_MAX_AGE_MS) {
+        continue;
+      }
+      const previous = foldHdStatus(metaValue(order, HD_STATUS_META.status));
+      // A parcel that already reached an end state needs a visit only if its Woo status still has to catch up
+      // (for example the earlier status write failed).
+      if (HD_FINAL_STATUSES.has(previous) && !wooStatusChange(previous, order.status, this.wooStatuses)) {
         continue;
       }
       summary.checked += 1;
       const parcel = byTracking.get(tracking);
-      if (!parcel) {
+      if (!parcel && !HD_FINAL_STATUSES.has(previous)) {
         summary.skipped += 1;
         continue;
       }
@@ -86,34 +95,46 @@ export class HdStatusSyncService {
 
   async syncOrder(order, parcel, tracking, now, summary) {
     const orderId = String(order.id);
-    const status = foldHdStatus(parcel.status);
     const previous = foldHdStatus(metaValue(order, HD_STATUS_META.status));
+    const status = foldHdStatus(parcel?.status) || previous;
     let current = order;
 
+    // 1. The Woo status first, and on every visit: if this write fails, the saved HighDelivery status is not updated
+    //    either, so the next hourly run tries again.
+    const target = wooStatusChange(status, order.status, this.wooStatuses);
+    if (target) {
+      await this.wooClient.updateOrderStatus(orderId, target);
+      summary.wooUpdated += 1;
+      current = { ...current, status: target };
+    }
+
+    // 2. Then the saved HighDelivery status and the note.
     if (status && status !== previous) {
       summary.changed += 1;
       const updated = await this.wooClient.updateOrderMeta(orderId, [
         metaUpdate(order, HD_STATUS_META.status, status),
         metaUpdate(order, HD_STATUS_META.statusAt, now.toISOString())
       ]);
-      current = updated || order;
+      current = { ...(updated || order), status: current.status };
       await this.safeNote(orderId, `HighDelivery status: ${previous || 'unknown'} -> ${status} (${tracking}).`);
-
-      const target = wooStatusChange(status, order.status, this.wooStatuses);
-      if (target) {
-        await this.wooClient.updateOrderStatus(orderId, target);
-        summary.wooUpdated += 1;
-        current = { ...current, status: target };
-      }
     }
 
     const stage = customerStageFor(status);
-    const sentAt = Date.parse(metaValue(order, HD_META.sentAt));
-    const recent = Number.isFinite(sentAt) && now.getTime() - sentAt <= MESSAGE_MAX_AGE_MS;
-    if (!stage || !recent || ['cancelled', 'refunded', 'failed'].includes(String(current.status || ''))) {
+    if (!stage || ['cancelled', 'refunded', 'failed', 'delivered'].includes(String(current.status || ''))) {
       return;
     }
-    const outcome = await this.confirmationService.sendHdStageMessage(current, stage, tracking, now);
+    // Look at the order again right before a customer message: an overlapping run may have sent it a moment ago.
+    let fresh = current;
+    try {
+      fresh = (await this.wooClient.getOrder(orderId)) || current;
+    } catch (error) {
+      this.logger.warn(`[hd-status] could not re-read orderId=${orderId}: ${error.message}`);
+      return;
+    }
+    if (['cancelled', 'refunded', 'failed', 'delivered'].includes(String(fresh.status || ''))) {
+      return;
+    }
+    const outcome = await this.confirmationService.sendHdStageMessage(fresh, stage, tracking, now);
     if (outcome.sent) {
       summary.messagesSent += 1;
     } else if (outcome.reason === 'quiet_hours') {

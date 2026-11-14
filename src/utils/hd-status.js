@@ -45,7 +45,6 @@ export function hdToWooStatus(hdStatus, statuses = DEFAULT_WOO_STATUSES) {
       return statuses.delivered || DEFAULT_WOO_STATUSES.delivered;
     case 'cancelled':
     case 'refused':
-    case 'returned_by_driver':
     case 'returned':
     case 'returned_to_client':
     case 'returned_to_stock':

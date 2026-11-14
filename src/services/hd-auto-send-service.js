@@ -325,6 +325,7 @@ export class HdAutoSendService {
 
   // One WhatsApp message to each team phone. Not subject to the customer quiet hours: it is the team's own alert.
   async sendInternal(orderId, raw, template, extra, kind) {
+    const oneLine = (value, max = 120) => String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, max);
     const values = {
       customerName: [raw?.shipping?.first_name, raw?.shipping?.last_name].filter(Boolean).join(' ')
         || [raw?.billing?.first_name, raw?.billing?.last_name].filter(Boolean).join(' ')
@@ -340,6 +341,10 @@ export class HdAutoSendService {
       orderTotal: formatOrderTotal(raw || {}),
       ...extra
     };
+    // Customer-typed text must not be able to add lines to the alert.
+    for (const key of ['customerName', 'customerPhone', 'deliveryCity', 'deliveryAddress', 'orderItemsSummary', 'problem']) {
+      values[key] = oneLine(values[key], key === 'problem' ? 300 : 120);
+    }
     const message = interpolateTemplate(template, values);
     let sentTo = 0;
     for (const phone of this.notifyPhones || []) {

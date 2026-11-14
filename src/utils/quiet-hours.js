@@ -9,8 +9,18 @@ export const DEFAULT_QUIET_HOURS = Object.freeze({
   timeZone: 'Africa/Casablanca'
 });
 
+export function isValidTimeZone(timeZone) {
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone: String(timeZone) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function hourInZone(date, timeZone) {
-  const parts = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone }).formatToParts(date);
+  const zone = isValidTimeZone(timeZone) ? timeZone : DEFAULT_QUIET_HOURS.timeZone;
+  const parts = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', hourCycle: 'h23', timeZone: zone }).formatToParts(date);
   const hour = Number(parts.find((part) => part.type === 'hour')?.value);
   return Number.isFinite(hour) ? hour : date.getUTCHours();
 }
@@ -39,6 +49,6 @@ export function parseQuietHoursEnv(env = process.env) {
     enabled: flag === '' ? DEFAULT_QUIET_HOURS.enabled : ['1', 'true', 'yes', 'on'].includes(flag),
     startHour: hour(env.QUIET_HOURS_START, DEFAULT_QUIET_HOURS.startHour),
     endHour: hour(env.QUIET_HOURS_END, DEFAULT_QUIET_HOURS.endHour),
-    timeZone: String(env.QUIET_HOURS_TIMEZONE || DEFAULT_QUIET_HOURS.timeZone)
+    timeZone: isValidTimeZone(env.QUIET_HOURS_TIMEZONE) ? String(env.QUIET_HOURS_TIMEZONE) : DEFAULT_QUIET_HOURS.timeZone
   };
 }

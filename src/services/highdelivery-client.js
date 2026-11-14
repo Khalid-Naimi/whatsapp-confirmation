@@ -213,11 +213,12 @@ export class HighDeliveryClient {
         throw new HighDeliveryError('HighDelivery parcel list is missing.');
       }
       all.push(...rows);
-      const total = Number(payload?.data?.total ?? 0);
-      if (rows.length === 0 || all.length >= total) {
-        break;
+      const total = Number(payload?.data?.total);
+      if (rows.length < 100 || (Number.isFinite(total) && total > 0 && all.length >= total)) {
+        return all;
       }
     }
+    this.logger.warn('[hd] parcel list hit the 50-page cap; newer parcels may be missing');
     return all;
   }
 

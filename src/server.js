@@ -104,6 +104,7 @@ const stockAlertService = new StockAlertService({
   wasenderClient,
   template: config.messages.stockAlertTemplate,
   dropTemplate: config.messages.dropAlertTemplate,
+  isQuiet: () => confirmationService.isQuietNow(),
   logger
 });
 

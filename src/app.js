@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 
 export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, logger = console }) {
+  // The hourly task must never run twice at once (two runs could message the same customer twice).
+  let followupsRunning = false;
   return async function handler(req, res) {
     try {
       const parsedUrl = new URL(req.url, 'http://localhost');
@@ -139,6 +141,12 @@ export function createApp({ config, confirmationService, store, stockAlertServic
           return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
         }
 
+        if (followupsRunning) {
+          logger.warn('[task][order-followups] skipped: the previous run is still going');
+          return sendJson(res, 202, { ok: true, skipped: 'already_running' });
+        }
+        followupsRunning = true;
+        try {
         logger.log('[task][order-followups] started');
         const result = await confirmationService.runOrderFollowups();
         logger.log(
@@ -153,7 +161,18 @@ export function createApp({ config, confirmationService, store, stockAlertServic
             logger.warn(`[task][order-followups] hd status sync failed: ${error.message}`);
           }
         }
+        // Stock alerts held back by the quiet hours go out now.
+        if (stockAlertService) {
+          try {
+            await stockAlertService.processQueue();
+          } catch (error) {
+            logger.warn(`[task][order-followups] stock alert queue failed: ${error.message}`);
+          }
+        }
         return sendJson(res, 200, { ok: true, summary: result, hdStatus });
+        } finally {
+          followupsRunning = false;
+        }
       }
 
       if (pathname === '/tasks/stock-alerts') {
