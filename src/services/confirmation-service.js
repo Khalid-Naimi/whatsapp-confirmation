@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems, validatePhone } from '../utils/format.js';
 import { isOptOutMessage } from '../utils/opt-out.js';
+import { DEFAULT_WOO_STATUSES, wooStatusMatchesTarget } from '../utils/hd-status.js';
 import { isQuietHours } from '../utils/quiet-hours.js';
 import { WasenderSendError } from './wasender-client.js';
 
@@ -58,9 +59,9 @@ const FEEDBACK_TEST_META_KEYS = {
 
 const PROCESSING_STATUS = 'processing';
 const ACTIVE_CONFIRMATION_STATUSES = ['pending', 'processing'];
-const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'cancelled', 'completed', 'failed', 'refunded'];
+const RECONCILIATION_STATUSES = ['pending', 'processing', 'on-hold', 'confirmed', 'cancelled', 'completed', 'delivered', 'failed', 'refunded'];
 const REPLY_RECOVERY_STATUSES = [...ACTIVE_CONFIRMATION_STATUSES];
-const FEEDBACK_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'completed', 'cancelled'];
+const FEEDBACK_MATCH_STATUSES = ['pending', 'processing', 'on-hold', 'confirmed', 'completed', 'delivered', 'cancelled'];
 const FEEDBACK_RECOVERY_PER_PAGE = 50;
 const FEEDBACK_RECOVERY_MAX_PAGES = 2;
 const BACKFILL_MAX_ORDER_AGE_MS = 72 * 60 * 60 * 1000;
@@ -132,7 +133,7 @@ const OUTBOUND_META_KEYS = {
 };
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, logger = console }) {
     this.store = store;
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
@@ -142,6 +143,8 @@ export class ConfirmationService {
     this.hdAutoSend = hdAutoSend;
     this.backgroundTasks = new Set();
     this.messages = messages;
+    // The Woo status written when the customer confirms (on-hold until the order statuses plugin is installed).
+    this.wooStatuses = { ...DEFAULT_WOO_STATUSES, ...(wooStatuses || {}) };
     // No customer message inside the quiet hours (see utils/quiet-hours.js). Unset in tests = never quiet.
     this.quietHours = messages?.quietHours?.enabled ? messages.quietHours : null;
     this.clock = () => new Date();
@@ -767,7 +770,7 @@ export class ConfirmationService {
       }
 
       const nextState = reply === '1' ? 'confirmed' : 'cancelled';
-      const nextWooStatus = reply === '1' ? 'on-hold' : 'cancelled';
+      const nextWooStatus = reply === '1' ? this.wooStatuses.confirmed : 'cancelled';
       const note = reply === '1'
         ? 'Customer confirmed order via WhatsApp.'
         : 'Customer cancelled order via WhatsApp.';
@@ -1281,7 +1284,7 @@ export class ConfirmationService {
           }
 
           if (effectiveDecision) {
-            const targetWooStatus = effectiveDecision === 'confirmed' ? 'on-hold' : 'cancelled';
+            const targetWooStatus = effectiveDecision === 'confirmed' ? this.wooStatuses.confirmed : 'cancelled';
             const currentSyncStatus = decisionMeta.wooSyncStatus || localOrder?.wooSyncStatus || '';
             // Internal alerts are sent once, when the customer decides (reply path). Never from here:
             // old orders (auto-cancelled, invalid phone, pre-flag) have no notified flag and would be re-alerted.
@@ -1297,11 +1300,11 @@ export class ConfirmationService {
             }
 
             // A "thank you / cancelled" reply that was held back by the quiet hours goes out now.
-            if (order.status === targetWooStatus && await this.sendDeferredDecisionReply({ order, nextOrderState, decisionMeta, effectiveDecision, now })) {
+            if (wooStatusMatchesTarget(order.status, targetWooStatus) && await this.sendDeferredDecisionReply({ order, nextOrderState, decisionMeta, effectiveDecision, now })) {
               summary.deferredReplies += 1;
             }
 
-            if (order.status !== targetWooStatus && currentSyncStatus !== 'pending_retry') {
+            if (!wooStatusMatchesTarget(order.status, targetWooStatus) && currentSyncStatus !== 'pending_retry') {
               await this.markManualOverride({
                 order: nextOrderState,
                 status: order.status

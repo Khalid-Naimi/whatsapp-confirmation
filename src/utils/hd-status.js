@@ -21,38 +21,58 @@ export const HD_STATUSES = Object.freeze([
   'returned_to_stock'
 ]);
 
-// In this shop: processing = waiting for the customer's answer, on-hold = confirmed, completed = sent to HighDelivery,
-// cancelled = cancelled. Only the end states are written to WooCommerce; everything else is kept in the order field
-// rhymat_hd_status and an order note.
-export const HD_TO_WOO_STATUS = Object.freeze({
-  delivered: 'completed',
-  cancelled: 'cancelled',
-  refused: 'cancelled',
-  returned_by_driver: 'cancelled',
-  returned: 'cancelled',
-  returned_to_client: 'cancelled',
-  returned_to_stock: 'cancelled'
-});
+// WooCommerce statuses the service writes. The defaults are the shop's old codes (on-hold = confirmed, completed =
+// delivered). After the "Rhymat Order Statuses" plugin is installed, set WOO_STATUS_CONFIRMED=confirmed and
+// WOO_STATUS_DELIVERED=delivered. Reading always accepts both, so switching never strands an order.
+export const DEFAULT_WOO_STATUSES = Object.freeze({ confirmed: 'on-hold', delivered: 'completed' });
+export const CONFIRMED_WOO_STATUSES = Object.freeze(['confirmed', 'on-hold']);
+
+export function isConfirmedWooStatus(status) {
+  return CONFIRMED_WOO_STATUSES.includes(String(status || '').toLowerCase());
+}
+
+// Does this order's status already count as the status the service wanted to write?
+export function wooStatusMatchesTarget(current, target) {
+  const status = String(current || '').toLowerCase();
+  return status === String(target || '').toLowerCase() || (isConfirmedWooStatus(target) && isConfirmedWooStatus(status));
+}
+
+// Only the end states are written to WooCommerce; everything else is kept in the order field rhymat_hd_status and an
+// order note. delivered -> the "delivered" status, cancelled/refused/returned -> cancelled.
+export function hdToWooStatus(hdStatus, statuses = DEFAULT_WOO_STATUSES) {
+  switch (foldHdStatus(hdStatus)) {
+    case 'delivered':
+      return statuses.delivered || DEFAULT_WOO_STATUSES.delivered;
+    case 'cancelled':
+    case 'refused':
+    case 'returned_by_driver':
+    case 'returned':
+    case 'returned_to_client':
+    case 'returned_to_stock':
+      return 'cancelled';
+    default:
+      return '';
+  }
+}
 
 // After these the parcel will not change again, so the order is no longer checked.
 export const HD_FINAL_STATUSES = new Set(['delivered', 'cancelled', 'refused', 'returned', 'returned_to_client', 'returned_to_stock']);
 
-const WOO_CLOSED = new Set(['cancelled', 'refunded', 'trash', 'failed']);
+const WOO_CLOSED = new Set(['cancelled', 'refunded', 'trash', 'failed', 'delivered']);
 
 export function foldHdStatus(value) {
   return String(value ?? '').trim().toLowerCase().replace(/[\s-]+/gu, '_');
 }
 
-// Only move an order forward: never out of cancelled/refunded, and never from completed to a "lower" status.
-// delivered -> completed is allowed from any open status; cancelled-type statuses cancel even a completed order
-// (the parcel came back).
-export function wooStatusChange(hdStatus, currentWooStatus) {
-  const target = HD_TO_WOO_STATUS[foldHdStatus(hdStatus)];
+// Only move an order forward: never out of cancelled/refunded/delivered. The delivered status can be set from any open
+// status (including completed); a cancelled-type status cancels even a completed order (the parcel came back).
+export function wooStatusChange(hdStatus, currentWooStatus, statuses = DEFAULT_WOO_STATUSES) {
+  const target = hdToWooStatus(hdStatus, statuses);
   const current = String(currentWooStatus || '').toLowerCase();
   if (!target || target === current || WOO_CLOSED.has(current)) {
     return null;
   }
-  if (target === 'completed' && !['on-hold', 'processing', 'pending'].includes(current)) {
+  if (target === 'completed' && !['on-hold', 'confirmed', 'processing', 'pending'].includes(current)) {
     return null;
   }
   return target;

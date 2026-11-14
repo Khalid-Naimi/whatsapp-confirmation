@@ -56,6 +56,12 @@ export function loadConfig() {
       consumerSecret: process.env.WOOCOMMERCE_CONSUMER_SECRET || '',
       webhookSecret: process.env.WOOCOMMERCE_WEBHOOK_SECRET || ''
     },
+    // The Woo status written on a customer's confirmation and on delivery. Keep the defaults until the
+    // "Rhymat Order Statuses" plugin is active, then set WOO_STATUS_CONFIRMED=confirmed and WOO_STATUS_DELIVERED=delivered.
+    wooStatuses: {
+      confirmed: (process.env.WOO_STATUS_CONFIRMED || 'on-hold').trim(),
+      delivered: (process.env.WOO_STATUS_DELIVERED || 'completed').trim()
+    },
     wasender: {
       baseUrl: process.env.WASENDER_BASE_URL || 'https://www.wasenderapi.com/api',
       apiToken: process.env.WASENDER_API_TOKEN || '',

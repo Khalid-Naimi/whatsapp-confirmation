@@ -213,3 +213,48 @@ test('sync: disabled or unconfigured does nothing, and a platform outage never t
   });
   assert.equal((await down.run()).errors, 1);
 });
+
+test('new Woo statuses: delivered/confirmed are written only when configured, and both old and new are read', async () => {
+  const { wooStatusMatchesTarget, isConfirmedWooStatus } = await import('../src/utils/hd-status.js');
+  const NEW = { confirmed: 'confirmed', delivered: 'delivered' };
+  assert.equal(wooStatusChange('delivered', 'completed', NEW), 'delivered', 'sent-to-HighDelivery orders become delivered');
+  assert.equal(wooStatusChange('delivered', 'confirmed', NEW), 'delivered');
+  assert.equal(wooStatusChange('delivered', 'delivered', NEW), null);
+  assert.equal(wooStatusChange('returned', 'delivered', NEW), null, 'a delivered order is closed');
+  assert.equal(wooStatusChange('returned', 'completed', NEW), 'cancelled');
+  assert.equal(wooStatusChange('delivered', 'completed'), null, 'defaults keep the old behaviour: completed stays completed');
+  assert.equal(wooStatusChange('delivered', 'on-hold'), 'completed');
+  assert.equal(isConfirmedWooStatus('on-hold'), true);
+  assert.equal(isConfirmedWooStatus('confirmed'), true);
+  assert.equal(isConfirmedWooStatus('processing'), false);
+  assert.equal(wooStatusMatchesTarget('on-hold', 'confirmed'), true, 'an old on-hold order is not a mismatch');
+  assert.equal(wooStatusMatchesTarget('confirmed', 'on-hold'), true);
+  assert.equal(wooStatusMatchesTarget('processing', 'confirmed'), false);
+  assert.equal(wooStatusMatchesTarget('cancelled', 'cancelled'), true);
+});
+
+test('auto-send accepts a confirmed order as well as an on-hold one', async () => {
+  const { HdAutoSendService } = await import('../src/services/hd-auto-send-service.js');
+  for (const status of ['on-hold', 'confirmed']) {
+    let created = 0;
+    const service = new HdAutoSendService({
+      hdClient: { isConfigured: () => true, trustScore: async () => ({ score: 80 }), createPackage: async () => { created += 1; return { trackingNumber: 'NAI000321' }; } },
+      wooClient: {
+        getOrder: async () => ({
+          id: 321, status, total: '300', currency: 'MAD', meta_data: [],
+          billing: { first_name: 'A', last_name: 'B', phone: '0612345678', city: 'Rabat', address_1: 'Rue 1' },
+          shipping: { first_name: 'A', last_name: 'B', phone: '0612345678', city: 'Rabat', address_1: 'Rue 1' },
+          line_items: [{ name: 'Cap', quantity: 1 }]
+        }),
+        updateOrderMeta: async () => ({}), addOrderNote: async () => ({}), updateOrderStatus: async () => ({})
+      },
+      wasenderClient: { sendMessage: async () => ({}) },
+      store: {},
+      notifyPhones: [],
+      enabled: true,
+      logger: { log() {}, warn() {}, error() {} }
+    });
+    assert.equal((await service.autoSend({ orderId: '321' })).status, 'sent', status);
+    assert.equal(created, 1, status);
+  }
+});

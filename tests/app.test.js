@@ -2887,7 +2887,7 @@ test('tokenless self-test recovery uses bounded Woo paging and caches the matche
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.feedback, 1);
   assert.ok(listCalls.length >= 1);
-  assert.ok(listCalls.length <= 10);
+  assert.ok(listCalls.length <= 14) // 7 statuses x 2 pages at most;
   assert.ok(listCalls.every((call) => call.perPage === 50));
   assert.ok(listCalls.every((call) => call.page >= 1 && call.page <= 2));
   assert.equal(store.getOrder('9036')?.feedbackState, 'reply_received');
@@ -2942,7 +2942,7 @@ test('tokenless production feedback matches via Woo recovery and caches the matc
   assert.equal(result.statusCode, 200);
   assert.equal(result.body.feedback, 1);
   assert.ok(listCalls.length >= 1);
-  assert.ok(listCalls.length <= 10);
+  assert.ok(listCalls.length <= 14); // 7 statuses x 2 pages at most
   assert.ok(listCalls.every((call) => call.perPage === 50));
   assert.ok(listCalls.every((call) => call.page >= 1 && call.page <= 2));
   assert.equal(store.getOrder('9038')?.feedbackState, 'reply_received');

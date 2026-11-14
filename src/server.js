@@ -85,6 +85,7 @@ const confirmationService = new ConfirmationService({
   optOutKeywords,
   hdAutoSend,
   messages: config.messages,
+  wooStatuses: config.wooStatuses,
   logger
 });
 
@@ -93,6 +94,7 @@ const hdStatusSyncService = new HdStatusSyncService({
   wooClient,
   hdClient: hdAutoSend.hdClient,
   enabled: config.highDelivery.statusSyncEnabled,
+  wooStatuses: config.wooStatuses,
   logger
 });
 logger.log(`HighDelivery status sync is ${config.highDelivery.statusSyncEnabled ? 'ON' : 'OFF'}; quiet hours ${config.messages.quietHours.enabled ? `${config.messages.quietHours.startHour}:00-${config.messages.quietHours.endHour}:00 ${config.messages.quietHours.timeZone}` : 'OFF'}.`);

@@ -1,4 +1,5 @@
 import { HighDeliveryError } from './highdelivery-client.js';
+import { isConfirmedWooStatus } from '../utils/hd-status.js';
 import { formatOrderTotal, interpolateTemplate, summarizeOrderItems } from '../utils/format.js';
 import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
 
@@ -109,7 +110,7 @@ export class HdAutoSendService {
   }
 
   // Sends one confirmed order to HighDelivery. Never throws: whatever happens, the order is either completed in Woo
-  // (sent) or left exactly as it is (on-hold) so the desktop app still picks it up.
+  // (sent) or left exactly as it is (confirmed / on-hold) so the desktop app still picks it up.
   async autoSend(order) {
     if (!this.enabled) {
       return { status: 'disabled' };
@@ -156,7 +157,7 @@ export class HdAutoSendService {
       this.logger.log(`[hd-auto-send] skipped orderId=${orderId} reason=already_${previousState}`);
       return { status: 'skipped', reason: `already_${previousState}` };
     }
-    if (raw?.status && raw.status !== 'on-hold') {
+    if (raw?.status && !isConfirmedWooStatus(raw.status)) {
       // Someone already handled it (completed, cancelled, ...): do not touch it.
       this.logger.log(`[hd-auto-send] skipped orderId=${orderId} reason=status_${raw.status}`);
       return { status: 'skipped', reason: `status_${raw.status}` };

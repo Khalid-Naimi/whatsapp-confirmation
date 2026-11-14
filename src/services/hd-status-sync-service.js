@@ -1,5 +1,5 @@
 import { HD_META } from './hd-auto-send-service.js';
-import { HD_FINAL_STATUSES, customerStageFor, foldHdStatus, wooStatusChange } from '../utils/hd-status.js';
+import { DEFAULT_WOO_STATUSES, HD_FINAL_STATUSES, customerStageFor, foldHdStatus, wooStatusChange } from '../utils/hd-status.js';
 
 // Order fields written by this sync.
 export const HD_STATUS_META = {
@@ -7,7 +7,7 @@ export const HD_STATUS_META = {
   statusAt: 'rhymat_hd_status_at'
 };
 
-const SYNC_WOO_STATUSES = ['on-hold', 'processing', 'completed'];
+const SYNC_WOO_STATUSES = ['on-hold', 'confirmed', 'processing', 'completed'];
 // A customer message is only sent for a parcel that was sent to HighDelivery recently, so turning this on never
 // messages customers about old parcels.
 const MESSAGE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -26,11 +26,12 @@ function metaUpdate(order, key, value) {
 // the status is stored in the order, an order note records each change, delivered and cancelled/returned parcels
 // close the order, and the customer gets one "shipped" and one "arriving" message (never in the quiet hours).
 export class HdStatusSyncService {
-  constructor({ confirmationService, wooClient, hdClient, enabled = true, logger = console }) {
+  constructor({ confirmationService, wooClient, hdClient, enabled = true, wooStatuses = DEFAULT_WOO_STATUSES, logger = console }) {
     this.confirmationService = confirmationService;
     this.wooClient = wooClient;
     this.hdClient = hdClient;
     this.enabled = enabled;
+    this.wooStatuses = { ...DEFAULT_WOO_STATUSES, ...(wooStatuses || {}) };
     this.logger = logger;
   }
 
@@ -98,7 +99,7 @@ export class HdStatusSyncService {
       current = updated || order;
       await this.safeNote(orderId, `HighDelivery status: ${previous || 'unknown'} -> ${status} (${tracking}).`);
 
-      const target = wooStatusChange(status, order.status);
+      const target = wooStatusChange(status, order.status, this.wooStatuses);
       if (target) {
         await this.wooClient.updateOrderStatus(orderId, target);
         summary.wooUpdated += 1;
