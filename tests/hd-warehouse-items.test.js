@@ -179,3 +179,18 @@ test('the never-twice guard still holds with the new checks', async () => {
   assert.equal((await service.autoSend({ orderId: '777' })).status, 'skipped');
   assert.equal(created.length, 0);
 });
+
+test('only the website\'s fast option is express: Casablanca same-day stays standard', async () => {
+  const run = async (shippingLine) => {
+    const { service, created } = makeService({ order: wooOrder({ shipping_lines: [shippingLine] }) });
+    assert.equal((await service.autoSend({ orderId: '777' })).status, 'sent');
+    return created[0].isExpress;
+  };
+  const tag = (value, title) => ({ method_title: title, method_id: 'flexible_shipping_single', meta_data: [{ key: 'rhymat_delivery', value }] });
+  assert.equal(await run(tag('fast', 'Livraison le jour même')), true);
+  assert.equal(await run(tag('fast', 'Livraison express')), true);
+  assert.equal(await run(tag('casa', 'Livraison le jour même')), false);
+  assert.equal(await run(tag('standard', 'Livraison 2 à 3 jours')), false);
+  assert.equal(await run({ method_title: 'Livraison express', method_id: 'flexible_shipping_single' }), true); // order from before the tag existed
+  assert.equal(await run({ method_title: 'Cash on delivery', method_id: 'flexible_shipping_single' }), false);
+});
