@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import http from 'node:http';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
@@ -5,6 +6,7 @@ import { JsonStore } from './json-store.js';
 import { ConfirmationService } from './services/confirmation-service.js';
 import { HdAutoSendService } from './services/hd-auto-send-service.js';
 import { HighDeliveryClient } from './services/highdelivery-client.js';
+import { loadProductMapFile } from './services/hd-product-match.js';
 import { MailService } from './services/mail-service.js';
 import { StockAlertService } from './services/stock-alert-service.js';
 import { WasenderClient } from './services/wasender-client.js';
@@ -46,11 +48,15 @@ const wooClient = new WooCommerceClient({
 
 const mailService = new MailService(config.mail);
 
+const hdCityAliases = JSON.parse(fs.readFileSync(new URL('./data/hd-city-aliases.json', import.meta.url), 'utf8')).aliases || {};
+const hdProductMap = loadProductMapFile(new URL('./data/hd-product-map.csv', import.meta.url));
+
 const hdAutoSend = new HdAutoSendService({
   hdClient: new HighDeliveryClient({
     baseUrl: config.highDelivery.baseUrl,
     phone: config.highDelivery.phone,
     password: config.highDelivery.password,
+    cityAliases: hdCityAliases,
     logger
   }),
   wooClient,
@@ -59,6 +65,8 @@ const hdAutoSend = new HdAutoSendService({
   notifyPhones: config.messages.internalNotifyPhones,
   template: config.messages.internalHdSentTemplate,
   enabled: config.highDelivery.autoSendEnabled,
+  productMap: hdProductMap,
+  minTrustScore: config.highDelivery.minTrustScore,
   logger
 });
 if (config.highDelivery.autoSendEnabled) {

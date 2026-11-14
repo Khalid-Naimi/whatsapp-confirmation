@@ -1,5 +1,5 @@
 // Client for the new HighDelivery platform API (app.highdelivery.pro).
-// Only what the auto-send needs: log in, read the served cities, create one parcel.
+// Only what the auto-send needs: log in, read the served cities and the warehouse stock, check a phone number, create (and cancel) one parcel.
 // Every refusal keeps the HTTP status and the server reply so the Woo order note can say what was rejected.
 
 export class HighDeliveryError extends Error {
@@ -62,7 +62,7 @@ export function extractTrackingNumber(data) {
 const CITY_CACHE_MS = 6 * 60 * 60 * 1000;
 
 export class HighDeliveryClient {
-  constructor({ baseUrl = 'https://api.highdelivery.pro/api', phone = '', password = '', fetchImpl = fetch, timeoutMs = 25000, logger = console, now = () => Date.now() } = {}) {
+  constructor({ baseUrl = 'https://api.highdelivery.pro/api', phone = '', password = '', fetchImpl = fetch, timeoutMs = 25000, logger = console, now = () => Date.now(), cityAliases = {} } = {}) {
     this.baseUrl = String(baseUrl || '').replace(/\/+$/u, '');
     this.phone = String(phone || '').trim();
     this.password = String(password || '').trim();
@@ -73,6 +73,10 @@ export class HighDeliveryClient {
     this.token = '';
     this.cities = null;
     this.citiesAt = 0;
+    this.warehouseProducts = null;
+    this.warehouseProductsAt = 0;
+    // Old website spellings of a town -> the name HighDelivery uses (checked once, by a human).
+    this.cityAliases = new Map(Object.entries(cityAliases || {}).map(([from, to]) => [foldText(from), String(to)]));
   }
 
   isConfigured() {
@@ -169,11 +173,60 @@ export class HighDeliveryClient {
       return null;
     }
     const cities = await this.listCities();
-    return cities.find((row) => foldText(row?.name_fr) === wanted) || null;
+    const direct = cities.find((row) => foldText(row?.name_fr) === wanted);
+    if (direct) {
+      return direct;
+    }
+    const alias = this.cityAliases.get(wanted);
+    return alias ? cities.find((row) => foldText(row?.name_fr) === foldText(alias)) || null : null;
+  }
+
+  // Warehouse products with the stock HighDelivery holds for us: [{ id, name, quantity_available, ... }]. Cached for a minute.
+  async listWarehouseProducts() {
+    if (!this.warehouseProducts || this.now() - this.warehouseProductsAt > 60 * 1000) {
+      const all = [];
+      for (let page = 1; page <= 20; page += 1) {
+        const payload = await this.request('GET', `/client/warehouse/products?page=${page}&limit=100`);
+        const rows = payload?.data?.products;
+        if (!Array.isArray(rows)) {
+          throw new HighDeliveryError('HighDelivery warehouse product list is missing.');
+        }
+        all.push(...rows);
+        const total = Number(payload?.data?.total ?? 0);
+        if (rows.length === 0 || all.length >= total) {
+          break;
+        }
+      }
+      this.warehouseProducts = all;
+      this.warehouseProductsAt = this.now();
+    }
+    return this.warehouseProducts;
+  }
+
+  // The platform's own check of a phone number: how many parcels it took, how many were delivered, whether it is blacklisted.
+  // Returns { score, totalOrders, deliveredOrders, failedOrders, blacklisted }. A brand-new number scores 50.
+  async trustScore(phone) {
+    const digits = String(phone || '').replace(/[\s\-+]/gu, '');
+    const payload = await this.request('GET', `/client/packages/trust-score?phone=${encodeURIComponent(digits)}`);
+    const data = payload?.data || {};
+    const number = (value, fallback = 0) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
+    return {
+      score: number(data.trustScore ?? data.trust_score, 50),
+      totalOrders: number(data.totalOrders ?? data.total_orders),
+      deliveredOrders: number(data.deliveredOrders ?? data.delivered_orders),
+      failedOrders: number(data.failedOrders ?? data.failed_orders),
+      blacklisted: Boolean(data.isBlacklisted ?? data.is_blacklisted)
+    };
+  }
+
+  // Cancels a parcel (warehouse stock is credited back by the platform).
+  async cancelPackage(id, reason = '') {
+    const payload = await this.request('PUT', `/client/packages/${encodeURIComponent(id)}/cancel`, reason ? { reason } : {});
+    return payload.data || {};
   }
 
   // Creates one parcel. Returns { trackingNumber, data }.
-  async createPackage({ recipientName, recipientPhone, address, city, productName, codAmount, comment = '', allowOpening = true, isExpress = false }) {
+  async createPackage({ recipientName, recipientPhone, address, city, productName, codAmount, comment = '', allowOpening = true, isExpress = false, items = [] }) {
     const cityRow = await this.resolveCity(city);
     if (!cityRow) {
       throw new HighDeliveryError(`City '${city}' is not served by the new HighDelivery platform.`);
@@ -186,10 +239,24 @@ export class HighDeliveryClient {
       product_name: productName,
       cod_amount: Math.round(Number(codAmount) || 0),
       allow_opening: Boolean(allowOpening),
-      is_express: Boolean(isExpress)
+      is_express: Boolean(isExpress),
+      // Verified against the live API: only the camelCase name makes a parcel express (fee 50 instead of 40 in Rabat).
+      isExpress: Boolean(isExpress)
     };
     if (comment) {
       body.comment = comment;
+    }
+    // Parcels made from our warehouse stock must name the stock products and quantities (the platform answers
+    // "Sélectionnez au moins un produit du stock entrepôt et sa quantité" otherwise).
+    if (Array.isArray(items) && items.length > 0) {
+      body.from_warehouse = true;
+      body.items = items.map((item) => ({
+        source: 'warehouse',
+        productId: item.productId,
+        name: item.name,
+        quantity: item.quantity,
+        unitPrice: 0
+      }));
     }
 
     let payload;
