@@ -81,7 +81,9 @@ export function loadConfig() {
       autoSendEnabled: parseBooleanEnv(process.env.HD_AUTO_SEND_ENABLED, false),
       baseUrl: process.env.HD_API_BASE_URL || 'https://api.highdelivery.pro/api',
       phone: process.env.HD_API_PHONE || '',
-      password: process.env.HD_API_PASSWORD || ''
+      password: process.env.HD_API_PASSWORD || '',
+      // A customer number scoring below this on HighDelivery's own check (0-100, new numbers score 50) is held for a human.
+      minTrustScore: Number(process.env.HD_MIN_TRUST_SCORE ?? 30)
     },
     messages: {
       internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),

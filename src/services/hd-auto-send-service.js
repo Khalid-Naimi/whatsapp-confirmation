@@ -1,5 +1,6 @@
 import { HighDeliveryError } from './highdelivery-client.js';
 import { formatOrderTotal, interpolateTemplate, summarizeOrderItems } from '../utils/format.js';
+import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
 
 // Woo order meta written by the auto-send. The state doubles as the "never send twice" guard.
 export const HD_META = {
@@ -56,6 +57,9 @@ export function buildParcelFromWooOrder(order) {
     .filter(Boolean)
     .join(', ');
   const codAmount = Math.round(Number(order?.total));
+  // The customer picked the fast delivery at checkout: the parcel goes express (the total already includes its price).
+  const shippingLines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
+  const isExpress = shippingLines.some((line) => /express/iu.test(`${line?.method_title || ''} ${line?.method_id || ''} ${line?.instance_id || ''}`));
 
   const problems = [];
   if (!recipientPhone) {
@@ -77,12 +81,12 @@ export function buildParcelFromWooOrder(order) {
   return {
     ok: problems.length === 0,
     problems,
-    parcel: { recipientName, recipientPhone, address, city, productName, codAmount, comment: `Woo #${order?.id ?? ''}`.trim() }
+    parcel: { recipientName, recipientPhone, address, city, productName, codAmount, isExpress, comment: `Woo #${order?.id ?? ''}`.trim() }
   };
 }
 
 export class HdAutoSendService {
-  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', enabled = false, logger = console }) {
+  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', enabled = false, productMap = null, minTrustScore = 30, logger = console }) {
     this.hdClient = hdClient;
     this.wooClient = wooClient;
     this.wasenderClient = wasenderClient;
@@ -90,6 +94,8 @@ export class HdAutoSendService {
     this.notifyPhones = notifyPhones;
     this.template = template;
     this.enabled = Boolean(enabled);
+    this.productMap = productMap; // Woo product name -> HighDelivery warehouse products (see hd-product-match.js)
+    this.minTrustScore = Number.isFinite(Number(minTrustScore)) ? Number(minTrustScore) : 30;
     this.logger = logger;
     this.inFlight = new Set();
   }
@@ -152,6 +158,41 @@ export class HdAutoSendService {
       return { status: 'skipped', reason: 'invalid_order', detail: reason };
     }
 
+    // Which warehouse products and quantities does this order take? Without a match the platform refuses the parcel.
+    const parcel = { ...built.parcel };
+    if (this.productMap) {
+      let matched;
+      try {
+        matched = resolveWarehouseItems(full.line_items, this.productMap, await this.hdClient.listWarehouseProducts());
+      } catch (error) {
+        const detail = error instanceof HighDeliveryError ? error.detail() : error.message;
+        this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=stock_read_failed ${detail}`);
+        await this.note(orderId, `Auto-send to HighDelivery skipped: could not read the warehouse stock (${detail}). The order stays on-hold; send it from the desktop app.`);
+        return { status: 'skipped', reason: 'stock_read_failed', detail };
+      }
+      if (!matched.ok) {
+        const reason = matched.problems.join('; ');
+        await this.note(orderId, `Auto-send to HighDelivery skipped: ${reason}. The order stays on-hold; send it from the desktop app.`);
+        return { status: 'skipped', reason: 'no_warehouse_match', detail: reason };
+      }
+      parcel.items = matched.items;
+      parcel.productName = describeItems(matched.items);
+    }
+
+    // The platform's own check of the customer's number. A blacklisted or low-scoring number is held for a human.
+    let trust = null;
+    try {
+      trust = await this.hdClient.trustScore(parcel.recipientPhone);
+    } catch (error) {
+      // The check must never block a good order: log it and carry on.
+      this.logger.warn(`[hd-auto-send] trust check unavailable orderId=${orderId} ${error.message}`);
+    }
+    if (trust && (trust.blacklisted || trust.score < this.minTrustScore)) {
+      const why = trust.blacklisted ? 'the number is blacklisted on HighDelivery' : `its trust score is ${trust.score} (minimum ${this.minTrustScore})`;
+      await this.note(orderId, `Auto-send to HighDelivery held for review: ${why} (${trust.totalOrders} parcels, ${trust.deliveredOrders} delivered, ${trust.failedOrders} failed). The order stays on-hold; decide from the desktop app.`);
+      return { status: 'held', reason: 'low_trust', trust };
+    }
+
     // Reserve first: if we cannot record that we are sending, we must not send (a retry could create a second parcel).
     try {
       await this.wooClient.updateOrderMeta(orderId, [
@@ -165,7 +206,7 @@ export class HdAutoSendService {
 
     let result;
     try {
-      result = await this.hdClient.createPackage(built.parcel);
+      result = await this.hdClient.createPackage(parcel);
     } catch (error) {
       const detail = error instanceof HighDeliveryError ? error.detail() : error.message;
       const ambiguous = Boolean(error?.ambiguous);
@@ -193,7 +234,7 @@ export class HdAutoSendService {
       { key: HD_META.error, value: '' }
     ]));
     this.store?.upsertOrder?.({ ...(order || {}), orderId, hdAutoSentAt: sentAt, hdTrackingNumber: tracking });
-    await this.note(orderId, `Sent to HighDelivery automatically${tracking ? `. Tracking: ${tracking}` : ''}.`);
+    await this.note(orderId, `Sent to HighDelivery automatically${tracking ? `. Tracking: ${tracking}` : ''}${parcel.isExpress ? ' (express)' : ''}${trust ? `. Customer trust score: ${trust.score}` : ''}.`);
 
     let completed = true;
     try {

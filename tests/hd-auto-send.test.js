@@ -59,7 +59,7 @@ test('createPackage sends the platform city name and returns the tracking number
   assert.equal(post.url, 'https://api.highdelivery.pro/api/client/packages');
   assert.deepEqual(post.body, {
     recipient_name: 'Jane Doe', recipient_phone: '0612345678', address: 'Rue 1', city: 'Casablanca',
-    product_name: 'Hoodie M x2', cod_amount: 399, allow_opening: true, is_express: false, comment: 'Woo #5'
+    product_name: 'Hoodie M x2', cod_amount: 399, allow_opening: true, is_express: false, isExpress: false, comment: 'Woo #5'
   });
 });
 
@@ -148,7 +148,7 @@ test('a Woo order becomes a parcel; every missing piece is named', () => {
   assert.equal(built.ok, true);
   assert.deepEqual(built.parcel, {
     recipientName: 'Jane Doe', recipientPhone: '0612345678', address: 'Rue 1, Etage 2', city: 'Casablanca',
-    productName: 'Hoodie M x2, Cap x1', codAmount: 399, comment: 'Woo #501'
+    productName: 'Hoodie M x2, Cap x1', codAmount: 399, isExpress: false, comment: 'Woo #501'
   });
   const bad = buildParcelFromWooOrder(wooOrder({ shipping: {}, billing: { phone: '+491729031097' }, line_items: [], total: '0' }));
   assert.equal(bad.ok, false);
