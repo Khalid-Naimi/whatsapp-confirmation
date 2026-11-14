@@ -419,3 +419,17 @@ test('review #10: a number that is not on WhatsApp is marked failed and not retr
   const again = await service.sendHdStageMessage({ ...WOO_ORDER, meta_data: [{ key: 'rhymat_whatsapp_hd_shipped_state', value: 'failed' }] }, 'shipped', 'T', now);
   assert.equal(again.reason, 'unreachable');
 });
+
+test('review cost: the hourly task reads open orders in full and only recent closed orders', async () => {
+  const now = at('2026-11-15T12:00:00Z');
+  const { service } = makeService({ quietHours: QUIET, clock: () => now });
+  const calls = [];
+  service.wooClient.listOrdersByStatuses = async (statuses, options = {}) => { calls.push({ statuses, after: options.after || '' }); return []; };
+  await service.runOrderFollowups({ now });
+  const open = calls.find((call) => !call.after);
+  const closed = calls.find((call) => call.after);
+  assert.ok(open.statuses.includes('processing') && open.statuses.includes('on-hold') && open.statuses.includes('confirmed'));
+  assert.ok(!open.statuses.includes('completed') && !open.statuses.includes('cancelled'));
+  assert.deepEqual(closed.statuses, ['cancelled', 'completed', 'delivered', 'refunded']);
+  assert.equal(closed.after, '2026-10-01T12:00:00.000Z', '45 days back');
+});

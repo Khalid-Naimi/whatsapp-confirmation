@@ -1247,7 +1247,13 @@ export class ConfirmationService {
       errors: 0
     };
 
-    const orders = await this.listOrdersForStatuses(RECONCILIATION_STATUSES);
+    // Open orders are always checked. Closed orders (the long history) only if created in the last 45 days: older
+    // ones can no longer need a reminder, a backfill or a reply, and reading ~1,900 of them every hour is slow.
+    const closedStatuses = ['cancelled', 'completed', 'delivered', 'refunded'];
+    const orders = [
+      ...await this.listOrdersForStatuses(RECONCILIATION_STATUSES.filter((status) => !closedStatuses.includes(status))),
+      ...await this.listOrdersForStatuses(closedStatuses, { after: new Date(now.getTime() - 45 * 24 * 60 * 60 * 1000).toISOString() })
+    ];
 
     for (const order of orders) {
       if (!hasAmbiguousCustomerOutboundState(order, now)) {
