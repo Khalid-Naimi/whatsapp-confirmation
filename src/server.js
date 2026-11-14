@@ -65,6 +65,8 @@ const hdAutoSend = new HdAutoSendService({
   store,
   notifyPhones: config.messages.internalNotifyPhones,
   template: config.messages.internalHdSentTemplate,
+  manualTemplate: config.messages.internalHdManualTemplate,
+  errorTemplate: config.messages.internalHdErrorTemplate,
   enabled: config.highDelivery.autoSendEnabled,
   productMap: hdProductMap,
   minTrustScore: config.highDelivery.minTrustScore,

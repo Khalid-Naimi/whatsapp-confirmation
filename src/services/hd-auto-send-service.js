@@ -92,13 +92,15 @@ export function buildParcelFromWooOrder(order) {
 }
 
 export class HdAutoSendService {
-  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', enabled = false, productMap = null, minTrustScore = 30, logger = console }) {
+  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', manualTemplate = '', errorTemplate = '', enabled = false, productMap = null, minTrustScore = 30, logger = console }) {
     this.hdClient = hdClient;
     this.wooClient = wooClient;
     this.wasenderClient = wasenderClient;
     this.store = store;
     this.notifyPhones = notifyPhones;
     this.template = template;
+    this.manualTemplate = manualTemplate; // order needs a human (held, no stock match, bad data)
+    this.errorTemplate = errorTemplate; // the send failed or the answer is unknown
     this.enabled = Boolean(enabled);
     this.productMap = productMap; // Woo product name -> HighDelivery warehouse products (see hd-product-match.js)
     this.minTrustScore = Number.isFinite(Number(minTrustScore)) ? Number(minTrustScore) : 30;
@@ -121,16 +123,21 @@ export class HdAutoSendService {
     }
     this.inFlight.add(orderId);
     try {
-      return await this.run(orderId, order);
+      const context = {};
+      const outcome = await this.run(orderId, order, context);
+      await this.notifyProblem(orderId, context.raw || order, outcome);
+      return outcome;
     } catch (error) {
       this.logger.warn(`[hd-auto-send] unexpected error orderId=${orderId}: ${error.message}`);
-      return { status: 'error', error: error.message };
+      const outcome = { status: 'error', error: error.message };
+      await this.notifyProblem(orderId, order, outcome);
+      return outcome;
     } finally {
       this.inFlight.delete(orderId);
     }
   }
 
-  async run(orderId, order) {
+  async run(orderId, order, context = {}) {
     if (!this.hdClient?.isConfigured()) {
       this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=not_configured`);
       return { status: 'skipped', reason: 'not_configured' };
@@ -157,6 +164,7 @@ export class HdAutoSendService {
 
     // Fresh Woo data wins; the order as the webhook delivered it fills any field Woo's answer does not carry.
     const full = { ...(order?.rawOrder || {}), ...raw };
+    context.raw = full;
     const built = buildParcelFromWooOrder(full);
     if (!built.ok) {
       const reason = built.problems.join('; ');
@@ -255,21 +263,83 @@ export class HdAutoSendService {
     return { status: 'sent', trackingNumber: tracking, completed, notified };
   }
 
+  // Tells the team's phones when an order needs a human or the send went wrong, so nobody has to open WooCommerce
+  // to find out. Outcomes that need no action (already sent, handled by someone else, feature off) stay silent.
+  describeProblem(outcome) {
+    const detail = String(outcome?.detail || outcome?.error || '').slice(0, 300);
+    switch (outcome?.status) {
+      case 'held': {
+        const trust = outcome.trust || {};
+        return { kind: 'manual', problem: trust.blacklisted ? 'numero blackliste sur HighDelivery' : `numero a risque (score ${trust.score})` };
+      }
+      case 'skipped':
+        if (outcome.reason === 'invalid_order') {
+          return { kind: 'manual', problem: detail || 'commande incomplete' };
+        }
+        if (outcome.reason === 'no_warehouse_match') {
+          return { kind: 'manual', problem: detail || 'produit introuvable dans le stock HighDelivery' };
+        }
+        if (outcome.reason === 'stock_read_failed') {
+          return { kind: 'error', problem: `stock HighDelivery illisible: ${detail}` };
+        }
+        if (['woo_read_failed', 'reservation_failed', 'not_configured'].includes(outcome.reason)) {
+          return { kind: 'error', problem: `envoi impossible (${outcome.reason})` };
+        }
+        return null;
+      case 'failed':
+        return { kind: 'error', problem: `HighDelivery a refuse: ${detail}` };
+      case 'unknown':
+        return { kind: 'error', problem: `pas de reponse de HighDelivery, verifier avant de renvoyer (${detail})` };
+      case 'error':
+        return { kind: 'error', problem: detail || 'erreur inattendue' };
+      case 'sent':
+        return outcome.completed === false
+          ? { kind: 'error', problem: `colis envoye (${outcome.trackingNumber || 'sans numero'}) mais WooCommerce pas passe a termine, ne pas renvoyer` }
+          : null;
+      default:
+        return null;
+    }
+  }
+
+  async notifyProblem(orderId, order, outcome) {
+    try {
+      const problem = this.describeProblem(outcome);
+      const template = problem?.kind === 'manual' ? this.manualTemplate : this.errorTemplate;
+      if (!problem || !template) {
+        return 0;
+      }
+      return await this.sendInternal(orderId, order?.rawOrder || order || {}, template, {
+        trackingNumber: outcome?.trackingNumber || '—',
+        problem: problem.problem
+      }, problem.kind === 'manual' ? 'internal_hd_manual_notification' : 'internal_hd_error_notification');
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] could not build the alert for order ${orderId}: ${error.message}`);
+      return 0;
+    }
+  }
+
   async notify(orderId, raw, tracking) {
+    return this.sendInternal(orderId, raw, this.template, { trackingNumber: tracking || '—' }, 'internal_hd_sent_notification');
+  }
+
+  // One WhatsApp message to each team phone. Not subject to the customer quiet hours: it is the team's own alert.
+  async sendInternal(orderId, raw, template, extra, kind) {
     const values = {
       customerName: [raw?.shipping?.first_name, raw?.shipping?.last_name].filter(Boolean).join(' ')
         || [raw?.billing?.first_name, raw?.billing?.last_name].filter(Boolean).join(' ')
         || 'Client',
       orderId,
-      trackingNumber: tracking || '—',
+      trackingNumber: '—',
+      problem: '',
       customerPhone: raw?.shipping?.phone || raw?.billing?.phone || '',
       deliveryCity: raw?.shipping?.city || raw?.billing?.city || '',
       deliveryAddress: [raw?.shipping?.address_1, raw?.shipping?.address_2].filter(Boolean).join(', ')
         || [raw?.billing?.address_1, raw?.billing?.address_2].filter(Boolean).join(', '),
       orderItemsSummary: summarizeOrderItems(raw?.line_items || []),
-      orderTotal: formatOrderTotal(raw || {})
+      orderTotal: formatOrderTotal(raw || {}),
+      ...extra
     };
-    const message = interpolateTemplate(this.template, values);
+    const message = interpolateTemplate(template, values);
     let sentTo = 0;
     for (const phone of this.notifyPhones || []) {
       try {
@@ -279,7 +349,7 @@ export class HdAutoSendService {
           source: 'outbound',
           orderId,
           phone,
-          kind: 'internal_hd_sent_notification',
+          kind,
           payload: sent,
           text: message
         });

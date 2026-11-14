@@ -114,6 +114,10 @@ export function loadConfig() {
         'Commande annulat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       internalHdSentTemplate: process.env.INTERNAL_HD_SENT_TEMPLATE ||
         'Commande envoyee a High Delivery.\nNumero: {{orderId}}\nTracking: {{trackingNumber}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
+      internalHdManualTemplate: process.env.INTERNAL_HD_MANUAL_TEMPLATE ||
+        'ATTENTION: commande a envoyer manuellement a High Delivery.\nNumero: {{orderId}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nRaison: {{problem}}',
+      internalHdErrorTemplate: process.env.INTERNAL_HD_ERROR_TEMPLATE ||
+        'ERREUR High Delivery.\nNumero: {{orderId}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nProbleme: {{problem}}',
       stockAlertTemplate: process.env.STOCK_ALERT_MESSAGE_TEMPLATE || '',
       dropAlertTemplate: process.env.DROP_ALERT_MESSAGE_TEMPLATE || '',
       // No customer message between startHour and endHour in the shop's time zone (default 22:00 to 10:00, Morocco).
