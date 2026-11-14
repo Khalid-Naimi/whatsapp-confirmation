@@ -58,8 +58,14 @@ export function buildParcelFromWooOrder(order) {
     .join(', ');
   const codAmount = Math.round(Number(order?.total));
   // The customer picked the fast delivery at checkout: the parcel goes express (the total already includes its price).
+  // The website tags every delivery choice (rhymat_delivery = standard | fast | casa). Only "fast" is express at HighDelivery:
+  // Casablanca "le jour même" is HighDelivery's standard Casablanca delivery. Older orders carry no tag, so "express" in the title still counts.
   const shippingLines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
-  const isExpress = shippingLines.some((line) => /express/iu.test(`${line?.method_title || ''} ${line?.method_id || ''} ${line?.instance_id || ''}`));
+  const tagOf = (line) => (line?.meta_data || []).find((meta) => meta?.key === 'rhymat_delivery')?.value;
+  const isExpress = shippingLines.some((line) => {
+    const tag = tagOf(line);
+    return tag ? tag === 'fast' : /express/iu.test(`${line?.method_title || ''}`);
+  });
 
   const problems = [];
   if (!recipientPhone) {
