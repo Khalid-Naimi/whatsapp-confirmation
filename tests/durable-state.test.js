@@ -261,25 +261,23 @@ test('an opt-out that is saved over twice stays marked for the next write', asyn
   const shop = fakeShop();
   const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
   await state.load();
-  // Another writer keeps saving its own list (without ours) right after every save.
+  // Something keeps writing an empty list right after every save.
   const original = shop.updateProduct;
-  let other = 0;
   shop.updateProduct = async (id, body) => {
     const result = await original(id, body);
-    other += 1;
-    await original(id, { meta_data: [{ key: DURABLE_META.optOuts, value: `{"schema":1,"phones":{"+21260000098${other}":"2026-11-15"}}` }] });
+    await original(id, { meta_data: [{ key: DURABLE_META.optOuts, value: '{"schema":1,"phones":{}}' }] });
     return result;
   };
   assert.equal(await state.recordOptOut('+212600000901'), false);
   assert.deepEqual(state.status().pendingWrites, ['optOuts']);
   shop.updateProduct = original;
   assert.equal(await state.recordOptOut('+212600000902'), true);
-  const saved = Object.keys(JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones);
-  assert.ok(saved.includes('+212600000901') && saved.includes('+212600000902'));
+  assert.deepEqual(Object.keys(JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones).sort(), ['+212600000901', '+212600000902']);
 });
 
-test('a read-back served from before the save (stale cache) is read again after a moment, not re-written or failed', async () => {
+test('a read-back served from before the save (stale cache, older than the save time) is read again after a moment, not re-written', async () => {
   const shop = fakeShop();
+  shop.product.date_modified_gmt = '2026-11-15T10:00:00';
   const waits = [];
   const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 1000, sleep: async (ms) => { waits.push(ms); }, logger: quiet });
   await state.load();
@@ -298,7 +296,9 @@ test('a read-back served from before the save (stale cache) is read again after 
   const write = shop.updateProduct;
   shop.updateProduct = async (id, body) => {
     staleBefore = structuredClone(shop.product);
-    return write(id, body);
+    const result = await write(id, body);
+    shop.product.date_modified_gmt = '2026-11-15T10:00:05';
+    return { ...result, date_modified_gmt: '2026-11-15T10:00:05' };
   };
   assert.equal(await state.recordOptOut('+212600000911'), true);
   assert.deepEqual(waits, [1000]);
@@ -336,4 +336,29 @@ test('a missing control product sends ONE critical team alert, however often it 
   assert.equal(sent.length, 1);
   assert.deepEqual([sent[0].key, sent[0].level], ['durable_control_missing', 'critical']);
   assert.doesNotMatch(sent[0].text, /\+2126/u);
+});
+
+test('without a save time from WooCommerce a read-back that looks old is never called stale: it is merged and saved again', async () => {
+  const shop = fakeShop();
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
+  await state.load();
+  const read = shop.listProductsPage;
+  let oldCopy = null;
+  shop.listProductsPage = async (query) => {
+    if (oldCopy) {
+      const copy = oldCopy;
+      oldCopy = null;
+      return [copy];
+    }
+    return read(query);
+  };
+  const write = shop.updateProduct;
+  shop.updateProduct = async (id, body) => {
+    if (!shop.writes.length) {
+      oldCopy = structuredClone(shop.product);
+    }
+    return write(id, body);
+  };
+  assert.equal(await state.recordOptOut('+212600000931'), true);
+  assert.equal(shop.writes.length, 2);
 });

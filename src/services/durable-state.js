@@ -325,7 +325,7 @@ export class DurableState {
       this.logger.warn(`[durable] WARNING: could not save ${keys.join(', ')} to WooCommerce (${error.message}); will retry on the next write`);
       return false;
     }
-    if (!(await this.confirmSaved(keys, meta, true, writeMarks(product, saved, meta)))) {
+    if (!(await this.confirmSaved(keys, meta, true, writeMarks(product, saved)))) {
       return false;
     }
     for (const key of keys) {
@@ -351,8 +351,7 @@ export class DurableState {
 
   // Reads the value back after a save. Something just written that is missing means another writer saved over it in
   // the meantime: merge what is there now and save once more (retry = false on that second check).
-  // `marks` tells a stale read-back apart from a real overwrite: the stored values and modification time from before
-  // our save, and the modification time WooCommerce gave our save.
+  // `marks` tells a stale read-back apart from a real overwrite: the modification time WooCommerce gave our save.
   async confirmSaved(keys, meta, retry = true, marks = null) {
     if (keys.includes('optOuts') && this.verifySettleMs > 0) {
       await this.sleep(this.verifySettleMs);
@@ -395,14 +394,15 @@ export class DurableState {
       return false;
     }
     const retryMeta = this.buildMeta(again);
+    let savedAgain;
     try {
-      await this.wooClient.updateProduct(this.productId, { meta_data: retryMeta });
+      savedAgain = await this.wooClient.updateProduct(this.productId, { meta_data: retryMeta });
     } catch (error) {
       this.lastError = 'woo_write_failed';
       this.logger.warn(`[durable] WARNING: could not save ${again.join(', ')} again (${error.message}); will retry on the next write`);
       return false;
     }
-    const marksAgain = writeMarks(product, null, retryMeta);
+    const marksAgain = writeMarks(product, savedAgain);
     return this.confirmSaved(again, retryMeta, false, marksAgain);
   }
 
@@ -447,14 +447,9 @@ function missingAfterWrite(product, meta) {
   return missing;
 }
 
-// What a read-back is compared with: the stored values before our save, the product's modification time then, and
-// the one WooCommerce answered for our save (when it gives one).
-function writeMarks(before, saved, meta) {
-  return {
-    beforeValues: Object.fromEntries(meta.map((row) => [row.key, readMeta(before, row.key)])),
-    beforeModified: modifiedMs(before),
-    savedModified: modifiedMs(saved)
-  };
+// What a read-back is compared with: the modification time WooCommerce answered for our save (when it gives one).
+function writeMarks(_before, saved) {
+  return { savedModified: modifiedMs(saved) };
 }
 
 function modifiedMs(product) {
@@ -465,19 +460,13 @@ function modifiedMs(product) {
   return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/u.test(raw) ? raw : `${raw}Z`);
 }
 
-// A read-back is stale (served from before our save) when it is older than our save by its modification time, or,
-// without times, when every value we wrote still reads exactly as it did before the save. Another writer's save would
-// be at least as new as ours and carry its own changes.
+// A read-back is stale (served from before our save) only when WooCommerce gave our save a modification time and the
+// read is older than it. Without that time it is never called stale: the value is merged and saved again instead
+// (an unproven 'stale' could hide a real overwrite of an opt-out).
 function isStaleRead(product, marks) {
-  if (!marks) {
+  if (!marks || !Number.isFinite(marks.savedModified)) {
     return false;
   }
   const readMs = modifiedMs(product);
-  if (Number.isFinite(readMs) && Number.isFinite(marks.savedModified)) {
-    return readMs < marks.savedModified;
-  }
-  if (Number.isFinite(readMs) && Number.isFinite(marks.beforeModified) && readMs > marks.beforeModified) {
-    return false;
-  }
-  return Object.entries(marks.beforeValues).every(([key, value]) => readMeta(product, key) === value);
+  return Number.isFinite(readMs) && readMs < marks.savedModified;
 }
