@@ -81,3 +81,24 @@ export function createShutdown({ server, waitFor = [], stop = [], graceMs = SHUT
     exit(0);
   };
 }
+
+// Logs every configuration problem (names and reasons only, never a value). With errors and strict mode on, the
+// process stops (exit 1) before it listens, so a bad deploy is visible at once. CONFIG_STRICT=0 is the way out: the
+// errors are then logged as warnings and the service starts anyway (for an emergency fix).
+// -> true when the service may start.
+export function checkConfigAtBoot({ config, strict = true, logger = console, exit = (code) => process.exit(code) }) {
+  const errors = config.errors || [];
+  const warnings = config.warnings || [];
+  for (const warning of warnings) {
+    logger.warn(`[config] warning: ${warning}`);
+  }
+  for (const error of errors) {
+    logger[strict ? 'error' : 'warn'](`[config] ${strict ? 'error' : 'error (CONFIG_STRICT=0, starting anyway)'}: ${error}`);
+  }
+  if (errors.length > 0 && strict) {
+    logger.error(`[config] ${errors.length} configuration error(s): not starting. Fix the environment, or set CONFIG_STRICT=0 to start anyway.`);
+    exit(1);
+    return false;
+  }
+  return true;
+}

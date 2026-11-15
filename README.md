@@ -65,6 +65,17 @@ Backend-only Node.js service that:
 - `CANCELLED_REPLY_MESSAGE`: cancellation follow-up message
 - `CANCELLATION_EMAIL_SUBJECT`: subject template for invalid/non-WhatsApp cancellation emails
 - `CANCELLATION_EMAIL_BODY`: body template for invalid/non-WhatsApp cancellation emails
+- `INTERNAL_NOTIFY_PHONES` (required): comma list of team phones (`+212...`) that get team notices and alerts. There is no built-in default.
+- `SHOP_CONTACT_PHONE` (required): the number customers are told to write to with a question; it is put, as written (for example `+212 6xx-xxxxxx`), at the end of the default confirmation, invalid-reply and reminder texts. A text set in its own variable is used as it is.
+- `CONFIG_STRICT`: default on. See "Configuration check" below.
+
+## Configuration check
+
+At start the service checks every variable it reads against one table (`ENV_TABLE` in `src/config.js`: name, type, required, allowed values) and logs each problem by name, never its value.
+
+- **Errors** (the service does not start, exit code 1): a required value is missing (`TASK_SECRET`, `WOOCOMMERCE_BASE_URL`, `WOOCOMMERCE_CONSUMER_KEY`, `WOOCOMMERCE_CONSUMER_SECRET`, `WOOCOMMERCE_WEBHOOK_SECRET`, `WASENDER_API_TOKEN`, `WASENDER_WEBHOOK_SECRET`, `INTERNAL_NOTIFY_PHONES`, `SHOP_CONTACT_PHONE`, and `HD_API_PHONE` / `HD_API_PASSWORD` only when `HD_AUTO_SEND_ENABLED` is on), a number that is not a number, an unknown choice (for example `STOCK_SYNC_MODE=yes`, `HD_AUTO_SEND_ENABLED=ture`), or `WOO_STATUS_CONFIRMED` / `WOO_STATUS_DELIVERED` that do not look like a WooCommerce status slug (lower case, no `wc-` prefix).
+- **Warnings** (logged, the service starts): for example no `SMTP_HOST`.
+- **Way out:** `CONFIG_STRICT=0` logs the errors as warnings and starts anyway, so a bad value can never block an emergency fix. The values themselves still fall back to the safe defaults as before (an unknown mode is `off`).
 
 ## HighDelivery auto-send (optional)
 

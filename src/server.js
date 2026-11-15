@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import { createApp } from './app.js';
-import { createShutdown, keepAwakeUrl, startKeepAwake } from './lifecycle.js';
-import { loadConfig } from './config.js';
+import { checkConfigAtBoot, createShutdown, keepAwakeUrl, startKeepAwake } from './lifecycle.js';
+import { isConfigStrict, loadConfig } from './config.js';
 import { JsonStore } from './json-store.js';
 import { ConfirmationService } from './services/confirmation-service.js';
 import { DurableState } from './services/durable-state.js';
@@ -25,6 +25,10 @@ import { buildOptOutKeywords } from './utils/opt-out.js';
 
 const config = loadConfig();
 const logger = console;
+if (!checkConfigAtBoot({ config, strict: isConfigStrict(process.env), logger })) {
+  // exit(1) was called; nothing below may run.
+  await new Promise(() => {});
+}
 const store = new JsonStore(config.dataFile, { logger });
 
 const optOutKeywords = buildOptOutKeywords(config.optOut.keywords);
