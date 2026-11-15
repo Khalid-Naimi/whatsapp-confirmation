@@ -257,3 +257,22 @@ test('the WooCommerce order webhook answers within its budget while the order lo
   await service.drain();
   assert.equal(wasender.sends.length, 1);
 });
+
+test('a HighDelivery auto-send started inside the order lock waits for the holder (it does not inherit the lock)', async () => {
+  const { woo } = fakeWoo([order(808)]);
+  const service = makeService(woo, gatedWasender());
+  const events = [];
+  service.hdAutoSend = {
+    enabled: true,
+    async autoSend() {
+      return service.withOrderLock('808', async () => { events.push('auto-send'); });
+    }
+  };
+  await service.withOrderLock('808', async () => {
+    service.scheduleHdAutoSend({ orderId: '808' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    events.push('holder:end');
+  });
+  await service.drain();
+  assert.deepEqual(events, ['holder:end', 'auto-send']);
+});

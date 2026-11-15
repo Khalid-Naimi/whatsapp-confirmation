@@ -85,3 +85,20 @@ test('run(): a failing holder releases the lock (no leak) and the next caller ru
   assert.equal(lock.depths.size, 0);
   assert.equal(lock.mutexes.size, 0);
 });
+
+test('outsideLocks(): a task started inside the lock queues behind the holder instead of re-entering', async () => {
+  const { outsideLocks } = await import('../src/utils/keyed-lock.js');
+  const lock = new KeyedLock({ logger: quiet });
+  const events = [];
+  let inherited;
+  let detached;
+  await lock.run('1', async () => {
+    inherited = lock.run('1', async () => { events.push('inherited'); });
+    detached = outsideLocks(() => lock.run('1', async () => { events.push('detached'); }));
+    await pause(10);
+    events.push('holder:end');
+  });
+  await Promise.all([inherited, detached]);
+  // A plain call from inside still re-enters (same chain); the detached one waits for the holder.
+  assert.deepEqual(events, ['inherited', 'holder:end', 'detached']);
+});

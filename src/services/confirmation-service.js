@@ -11,7 +11,7 @@ import {
 } from '../domain/order-states.js';
 import { interpolateTemplate, maskEmail, maskPhone, redactPhones, validatePhone } from '../utils/format.js';
 import { DEFAULT_WOO_STATUSES } from '../utils/hd-status.js';
-import { KeyedLock } from '../utils/keyed-lock.js';
+import { KeyedLock, outsideLocks } from '../utils/keyed-lock.js';
 import { isOptOutMessage } from '../utils/opt-out.js';
 import { isQuietHours } from '../utils/quiet-hours.js';
 import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID } from './claim.js';
@@ -117,7 +117,8 @@ export class ConfirmationService {
       return { status: 202, body: { ok: true, duplicate: true, reason: 'confirmation_scheduled' } };
     }
 
-    const timer = setTimeout(() => this.startDelayedInitialConfirmation(payload, key), delayMs);
+    // Scheduled outside the lock this is called in, so the timer never carries the holder's token.
+    const timer = outsideLocks(() => setTimeout(() => this.startDelayedInitialConfirmation(payload, key), delayMs));
     this.pendingInitialConfirmations.set(key, timer);
     this.initialConfirmationDueAt.set(key, { dueAt: Date.now() + delayMs, payload });
     this.logger.log(`[confirmation] initial send scheduled orderId=${key} delayMs=${delayMs}`);
@@ -129,10 +130,9 @@ export class ConfirmationService {
   // in pendingInitialConfirmations until it is done, so the hourly backfill never sends it as well.
   startDelayedInitialConfirmation(payload, key) {
     this.initialConfirmationDueAt.delete(key);
-    const run = this.runDelayedInitialConfirmation(payload, key)
+    return this.trackBackground(() => this.runDelayedInitialConfirmation(payload, key)
       .catch((error) => this.logger.error(error))
-      .finally(() => this.pendingInitialConfirmations.delete(key));
-    return this.trackBackground(run, `first confirmation ${key}`);
+      .finally(() => this.pendingInitialConfirmations.delete(key)), `first confirmation ${key}`);
   }
 
   // For a shutdown (SIGTERM). A first message whose 30-second wait is over is started now (drain() then waits for it);
@@ -445,7 +445,9 @@ export class ConfirmationService {
   }
 
   // Keeps a promise on the list drain() waits for. Its failure is logged here (the caller may still await it).
-  trackBackground(promise, label = 'background task') {
+  // Given a function, starts it outside every held lock (a task started inside a lock queues behind the holder).
+  trackBackground(work, label = 'background task') {
+    const promise = typeof work === 'function' ? outsideLocks(work) : work;
     const task = Promise.resolve(promise)
       .catch((error) => this.logger.warn(`[background] ${label} failed: ${error?.message || error}`))
       .finally(() => this.backgroundTasks.delete(task));
@@ -1475,10 +1477,11 @@ export class ConfirmationService {
     if (!this.hdAutoSend?.enabled) {
       return null;
     }
-    const task = Promise.resolve()
+    // Started outside the lock it is usually called in (the reply, the hourly run): it must queue, not re-enter.
+    const task = outsideLocks(() => Promise.resolve()
       .then(() => this.hdAutoSend.autoSend(order))
       .catch((error) => this.logger.warn(`[hd-auto-send] unexpected failure orderId=${order?.orderId}: ${error.message}`))
-      .finally(() => this.backgroundTasks.delete(task));
+      .finally(() => this.backgroundTasks.delete(task)));
     this.backgroundTasks.add(task);
     return task;
   }

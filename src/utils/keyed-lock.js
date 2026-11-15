@@ -13,6 +13,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 // held it returns { ran: false } at once. `held` is the set of keys being run (callers may look at it).
 const chain = new AsyncLocalStorage();
 
+// Runs `start` outside every held lock: a background task or timer started from inside a lock must not carry the
+// holder's token (it would otherwise re-enter while the holder still holds the key). Returns what `start` returns.
+export function outsideLocks(start) {
+  return chain.exit(start);
+}
+
 export class KeyedLock {
   constructor({ prefix = '', logger = console } = {}) {
     this.prefix = prefix;
