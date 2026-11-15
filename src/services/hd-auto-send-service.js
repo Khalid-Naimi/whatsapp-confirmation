@@ -287,7 +287,7 @@ export class HdAutoSendService {
   }
 
   // off: by name through the CSV, exactly as before. shadow: still by name, but the link result is compared and
-  // only the ids are logged. on: by the product links (a product without a link still goes through the CSV).
+  // only the ids are logged, after the fact. on: by the product links (a product without a link still goes through the CSV).
   async matchItems(orderId, full) {
     const warehouse = await this.hdClient.listWarehouseProducts();
     const byName = resolveWarehouseItems(full.line_items, this.productMap, warehouse);
@@ -297,13 +297,18 @@ export class HdAutoSendService {
     if (this.linksMode === 'on') {
       return this.matchByLinks(full, warehouse);
     }
+    // Shadow only watches: the comparison runs on its own and never makes the order wait for it.
+    this.compareInShadow(orderId, full, warehouse, byName);
+    return byName;
+  }
+
+  async compareInShadow(orderId, full, warehouse, byName) {
     try {
       const byLink = await this.matchByLinks(full, warehouse);
       this.logger.log(`[hd-links] shadow orderId=${orderId} same=${sameResolution(byName, byLink)} csv=${describeResolution(byName)} link=${describeResolution(byLink)}`);
     } catch (error) {
       this.logger.warn(`[hd-links] shadow orderId=${orderId} link lookup failed: ${error.message}`);
     }
-    return byName;
   }
 
   async matchByLinks(full, warehouse) {

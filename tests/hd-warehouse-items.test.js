@@ -199,6 +199,7 @@ test('only the website\'s fast option is express: Casablanca same-day stays stan
 
 // --- product links (HD_LINKS_FOR_ORDERS) ---
 
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 const linkWarehouse = [...warehouse, { id: 512, name: 'Zip up Hoodie Saumon XL', quantity_available: 4 }];
 const linkedOrder = (overrides = {}) => wooOrder({ line_items: [{ name: 'Cargo - S', quantity: 1, product_id: 8974, variation_id: 8978 }], ...overrides });
 
@@ -223,6 +224,7 @@ test('links shadow: the CSV still decides, a difference is logged with ids only'
   const { linkIndex } = makeLinkIndex(linkedToSaumon());
   const { service, created } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'shadow', logger: { log: (m) => logs.push(m), warn: (m) => logs.push(m), error() {} } });
   assert.equal((await service.autoSend({ orderId: '777' })).status, 'sent');
+  await settle();
   assert.deepEqual(created[0].items, [{ productId: 30, name: 'Military Cargo S', quantity: 1 }]);
   const line = logs.find((m) => m.startsWith('[hd-links]'));
   assert.equal(line, '[hd-links] shadow orderId=777 same=false csv=30x1 link=512x1');
@@ -234,6 +236,7 @@ test('links shadow: when both agree the log says so', async () => {
   const { linkIndex } = makeLinkIndex(linkUnit({ items: [{ hd_id: 30, hd_name: 'Military Cargo S', qty: 1 }] }));
   const { service } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'shadow', logger: { log: (m) => logs.push(m), warn() {}, error() {} } });
   await service.autoSend({ orderId: '777' });
+  await settle();
   assert.ok(logs.includes('[hd-links] shadow orderId=777 same=true csv=30x1 link=30x1'));
 });
 
@@ -276,4 +279,12 @@ test('links on: if the links cannot be read the order is held, not sent by guess
   const result = await service.autoSend({ orderId: '777' });
   assert.deepEqual([result.status, result.reason], ['skipped', 'stock_read_failed']);
   assert.equal(created.length, 0);
+});
+
+test('links shadow never delays the send: a link lookup that never answers changes nothing', async () => {
+  const linkIndex = new LinkIndex({ wooClient: { getProduct: () => new Promise(() => {}) } });
+  const { service, created } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'shadow' });
+  const result = await Promise.race([service.autoSend({ orderId: '777' }), new Promise((resolve) => setTimeout(() => resolve('waited'), 500))]);
+  assert.equal(result.status, 'sent');
+  assert.deepEqual(created[0].items, [{ productId: 30, name: 'Military Cargo S', quantity: 1 }]);
 });
