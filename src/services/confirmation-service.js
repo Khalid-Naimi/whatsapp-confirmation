@@ -51,9 +51,11 @@ const MAX_WOO_SYNC_ATTEMPTS = 6;
 const INBOUND_MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 // The Wasender webhook is answered after at most this long; the work goes on in the background.
 const DEFAULT_INBOUND_ACK_BUDGET_MS = 1000;
+// The WooCommerce order webhook is answered after at most this long (WooCommerce waits about 5 s per delivery).
+const DEFAULT_WOO_ACK_BUDGET_MS = 3000;
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, claimSettleMs = DEFAULT_CLAIM_SETTLE_MS, instanceId = INSTANCE_ID, inboundAckBudgetMs = DEFAULT_INBOUND_ACK_BUDGET_MS, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, claimSettleMs = DEFAULT_CLAIM_SETTLE_MS, instanceId = INSTANCE_ID, inboundAckBudgetMs = DEFAULT_INBOUND_ACK_BUDGET_MS, wooAckBudgetMs = DEFAULT_WOO_ACK_BUDGET_MS, logger = console }) {
     this.store = store;
     // Opt-outs are also saved in WooCommerce (services/durable-state.js): the local store is wiped on every restart.
     this.durableState = durableState;
@@ -65,6 +67,8 @@ export class ConfirmationService {
     this.instanceId = instanceId;
     // How long the Wasender webhook answer waits for the messages to be handled before answering "accepted".
     this.inboundAckBudgetMs = Math.max(0, Number(inboundAckBudgetMs) || 0);
+    // The same for the WooCommerce order webhook.
+    this.wooAckBudgetMs = Math.max(0, Number(wooAckBudgetMs) || 0);
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
     this.mailService = mailService;
@@ -183,6 +187,10 @@ export class ConfirmationService {
     });
   }
 
+  // The WooCommerce order webhook. WooCommerce disables a webhook after 5 failed deliveries, so the answer never waits
+  // longer than wooAckBudgetMs (3 s) for the order lock and the work: the delivery is deduped first, the work runs as
+  // a tracked background task, and when it is not done in time the answer is 200 { accepted, pending } (the hourly
+  // follow-ups pick up anything that still fails later, from WooCommerce itself).
   async processWooOrder(payload, eventKey) {
     if (this.inFlightWooEvents.has(eventKey)) {
       this.safeRecordEvent('woocommerce', eventKey, payload, 'duplicate_order');
@@ -190,6 +198,20 @@ export class ConfirmationService {
     }
     this.inFlightWooEvents.set(eventKey, Date.now());
 
+    const work = this.handleWooOrder(payload, eventKey);
+    this.trackBackground(work, `woo order event ${eventKey}`);
+    const settled = await settleWithin(work, this.wooAckBudgetMs);
+    if (settled.done) {
+      if (settled.error) {
+        throw settled.error;
+      }
+      return settled.value;
+    }
+    this.logger.log(`[webhook][woocommerce] answered before the work finished eventId=${eventKey} orderId=${String(payload?.id ?? '')}`);
+    return { status: 200, body: { ok: true, accepted: true, pending: true } };
+  }
+
+  async handleWooOrder(payload, eventKey) {
     try {
       const workflow = getWorkflowMeta(payload);
       const normalizedOrder = normalizeWooOrder(payload, this.messages);

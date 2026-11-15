@@ -230,3 +230,30 @@ test('flushDueConfirmations(): a due first message starts now, one not due yet i
   assert.equal(summary.backfilled, 1);
   assert.equal(wasender.sends.at(-1).message, 'Confirmez 805');
 });
+
+test('the WooCommerce order webhook answers within its budget while the order lock is held; the work finishes after', async () => {
+  const { woo } = fakeWoo([order(807)]);
+  const wasender = gatedWasender();
+  const service = new ConfirmationService({
+    store: new JsonStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ack-woo-')), 'db.json'), { logger: quiet }),
+    wasenderClient: wasender.client,
+    wooClient: woo,
+    messages: { ...messages, confirmationDelayMs: 0 },
+    claimSettleMs: 0,
+    wooAckBudgetMs: 20,
+    logger: quiet
+  });
+  let release;
+  const held = service.withOrderLock('807', () => new Promise((resolve) => { release = resolve; }));
+  const started = Date.now();
+  const answer = await service.processWooOrder(order(807), 'delivery-807');
+  assert.ok(Date.now() - started < 1000);
+  assert.deepEqual(answer, { status: 200, body: { ok: true, accepted: true, pending: true } });
+  // The same delivery again while it is still pending is a duplicate.
+  assert.equal((await service.processWooOrder(order(807), 'delivery-807')).body.reason, 'event_in_flight');
+  assert.equal(wasender.sends.length, 0);
+  release();
+  await held;
+  await service.drain();
+  assert.equal(wasender.sends.length, 1);
+});
