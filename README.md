@@ -70,6 +70,15 @@ Backend-only Node.js service that:
 - `SHOP_CONTACT_PHONE` (required): the number customers are told to write to with a question; it is put, as written (for example `+212 6xx-xxxxxx`), at the end of the default confirmation, invalid-reply and reminder texts. A text set in its own variable is used as it is.
 - `CONFIG_STRICT`: default on. See "Configuration check" below.
 
+## Calls to other services
+
+WooCommerce, WordPress, Wasender and HighDelivery are all called through `src/http/request.js`: one error type (`kind`: `timeout`, `network` or `http`, plus `status` and `ambiguous`), exponential backoff with jitter, and redaction of phones, emails, tokens, consumer keys and secret query values in every message.
+
+- Reads (GET, the order lists too) are retried up to 3 times on no answer, 429 and 5xx.
+- Writes are retried only when repeating them is harmless: a WooCommerce order update or product write (absolute values, meta), the WordPress opt-out. An order note, a WhatsApp send, a HighDelivery parcel (or the login) and the WordPress inbound copy are never repeated by the HTTP layer.
+- A write without an answer, or answered with a 5xx, is marked `ambiguous`. A HighDelivery parcel creation that is ambiguous becomes `unknown`, never `failed`; a WhatsApp send without an answer is never sent again automatically.
+- WordPress calls wait at most 15 s. Wasender and WooCommerce error texts carry the status (and WooCommerce's error code, such as `rest_invalid_param`) but never the reply body or a phone.
+
 ## Team alerts
 
 Every server message to the team goes through one path (`src/services/alerts.js`): WhatsApp to `INTERNAL_NOTIFY_PHONES`, the same alert key at most once per 6 hours (some alerts set their own window), and an email (`ALERT_EMAIL_TO`, default `SMTP_USER`) when no phone could be reached. Routine notices use a low-priority lane in the Wasender queue, so they never delay a customer message. A failed hourly run (`POST /tasks/order-followups` answering 500) is told once per 6 hours. The window is kept in memory and in the local JSON file, which Render wipes on a restart: after a restart an alert can go out once more.

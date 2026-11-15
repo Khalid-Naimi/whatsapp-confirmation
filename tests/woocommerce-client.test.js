@@ -54,13 +54,16 @@ test('WooCommerceClient retries GET with query auth after 415 response', async (
   assert.ok(logs.every((message) => !message.includes('count=1')));
 });
 
-test('WooCommerceClient does not retry non-retriable failures', async () => {
+// Behaviour change (backend hardening): a GET, order lists included, is now retried on 5xx; an order note (POST) never.
+test('WooCommerceClient retries a GET on 5xx three times, and never retries an order note', async () => {
   let attempts = 0;
   const logs = [];
+  const sleeps = [];
   const client = new WooCommerceClient({
     baseUrl: 'https://example.com',
     consumerKey: 'ck_test',
     consumerSecret: 'cs_test',
+    sleepImpl: async (ms) => { sleeps.push(ms); },
     logger: {
       log(message) {
         logs.push(message);
@@ -85,8 +88,13 @@ test('WooCommerceClient does not retry non-retriable failures', async () => {
     client.listOrders({ status: 'processing', perPage: 1, page: 1 }),
     /WooCommerce request failed with 500/
   );
-  assert.equal(attempts, 1);
+  assert.equal(attempts, 3);
+  assert.equal(sleeps.length, 2);
   assert.ok(logs.some((message) => message.includes('bodyFormat=json body={"message":"server_error"}')));
+
+  attempts = 0;
+  await assert.rejects(client.addOrderNote(5, 'hello'), /failed with 500/);
+  assert.equal(attempts, 1);
 });
 
 test('WooCommerceClient summarizes successful single-order responses without dumping full payloads', async () => {
@@ -162,6 +170,7 @@ test('WooCommerceClient reports non-JSON failure bodies with a text snippet', as
     baseUrl: 'https://example.com',
     consumerKey: 'ck_test',
     consumerSecret: 'cs_test',
+    sleepImpl: async () => {}, // a GET is retried on 5xx now; no real wait in the test
     logger: {
       log(message) {
         logs.push(message);
@@ -195,6 +204,7 @@ test('WooCommerceClient reports empty failure bodies explicitly', async () => {
     baseUrl: 'https://example.com',
     consumerKey: 'ck_test',
     consumerSecret: 'cs_test',
+    sleepImpl: async () => {}, // a GET is retried on 5xx now; no real wait in the test
     logger: {
       log(message) {
         logs.push(message);

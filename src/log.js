@@ -20,6 +20,8 @@ export function redact(input, { secrets = [] } = {}) {
     .replace(new RegExp(`("(?:${SECRET_JSON_KEYS})"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"`, 'giu'), '$1"[redacted]"')
     .replace(/\b(ck|cs)_[A-Za-z0-9]{8,}/gu, '$1_[redacted]')
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu, (match) => maskEmail(match))
+    // a phone in a URL path or query (%2B212...)
+    .replace(/%2B(\d{8,15})(?!\d)/giu, (match, digits) => maskPhone(`+${digits}`))
     // +212 6 12-34-56-78 style (needs the plus, so dates such as 2026-11-15 are left alone)
     .replace(/\+\d{1,3}(?:[\s().-]*\d){7,13}/gu, (match) => maskPhone(match.replace(/[^\d+]/gu, '')))
     .replace(/(?<![\w*])\+?\d{9,15}(?!\d)/gu, (match) => maskPhone(match));

@@ -1,4 +1,6 @@
-import { maskPhone, redactPhones } from '../utils/format.js';
+import { HttpError, request as httpRequest } from '../http/request.js';
+import { redact } from '../log.js';
+import { maskPhone } from '../utils/format.js';
 
 export class WasenderClient {
   constructor({
@@ -71,59 +73,58 @@ export class WasenderClient {
     }
   }
 
+  // A send is a create call: the HTTP layer never repeats it by itself. Only a 429 (nothing was sent) is tried again
+  // here, after Wasender's retry_after. No answer = ambiguous (the message may have gone out). Error texts carry the
+  // status only, never the reply body or a phone; the reply stays on the error (`data`) for the contactability check.
   async sendMessageWithRetries({ to, message, poll }) {
     for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
       await this.waitForAvailability();
       this.logger.log(`[wasender] send attempt=${attempt + 1} to=${maskPhone(to)}`);
 
-      let response;
+      let reply;
       try {
-        response = await this.fetch(`${this.baseUrl}/send-message`, {
+        reply = await httpRequest({
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.apiToken}`
-          },
+          url: `${this.baseUrl}/send-message`,
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiToken}` },
           body: JSON.stringify(poll ? { to, poll } : { to, text: message }),
-          signal: AbortSignal.timeout(this.timeoutMs)
+          timeoutMs: this.timeoutMs,
+          retry: 'none',
+          fetchImpl: this.fetch,
+          secrets: [this.apiToken],
+          label: 'Wasender send-message'
         });
       } catch (error) {
-        // No answer in time: the message may or may not have gone out. It is NOT safe to treat it as "not sent".
-        this.logger.warn(`[wasender] send gave no answer to=${maskPhone(to)} reason=${error?.name || 'error'}`);
-        throw new WasenderSendError({ status: 0, data: { timeout: true }, message: 'Wasender did not answer in time; the message may have been sent', ambiguous: true });
+        if (!(error instanceof HttpError) || error.kind !== 'http') {
+          // No answer in time: the message may or may not have gone out. It is NOT safe to treat it as "not sent".
+          this.logger.warn(`[wasender] send gave no answer to=${maskPhone(to)} reason=${error?.kind || error?.name || 'error'}`);
+          throw new WasenderSendError({ status: 0, data: { timeout: true }, message: 'Wasender did not answer in time; the message may have been sent', ambiguous: true });
+        }
+        const data = error.data;
+        this.logger.warn(`[wasender] send rejected to=${maskPhone(to)} status=${error.status}${describeReply(data)}`);
+        if (error.status === 429 && attempt < this.maxRetries - 1) {
+          const retryMs = resolveRetryDelayMs(data, this.minIntervalMs);
+          this.nextAvailableAt = Math.max(this.nextAvailableAt, this.now() + retryMs);
+          await this.sleep(retryMs);
+          continue;
+        }
+        throw new WasenderSendError({ status: error.status, data, message: `Wasender send-message failed with ${error.status}` });
       }
 
-      const data = await parseJsonSafe(response);
-      if (response.ok && data?.success === false) {
+      const data = reply.data;
+      if (data?.success === false) {
         // Wasender answers 200 with success:false when the session is disconnected; nothing was sent.
-        this.logger.warn(`[wasender] send rejected to=${maskPhone(to)} status=${response.status} body=${safeJson(data)}`);
+        this.logger.warn(`[wasender] send rejected to=${maskPhone(to)} status=${reply.status}${describeReply(data)}`);
         throw new WasenderSendError({
-          status: response.status,
+          status: reply.status,
           data,
-          message: `Wasender send-message was not delivered: ${JSON.stringify(data)}`
+          message: 'Wasender send-message was not delivered (success: false)'
         });
       }
 
-      if (response.ok) {
-        this.logger.log(`[wasender] send accepted to=${maskPhone(to)} status=${response.status} body=${safeJson(data)}`);
-        this.nextAvailableAt = this.now() + this.minIntervalMs;
-        return data;
-      }
-
-      this.logger.warn(`[wasender] send rejected to=${maskPhone(to)} status=${response.status} body=${safeJson(data)}`);
-
-      if (response.status === 429 && attempt < this.maxRetries - 1) {
-        const retryMs = resolveRetryDelayMs(data, this.minIntervalMs);
-        this.nextAvailableAt = Math.max(this.nextAvailableAt, this.now() + retryMs);
-        await this.sleep(retryMs);
-        continue;
-      }
-
-      throw new WasenderSendError({
-        status: response.status,
-        data,
-        message: `Wasender send-message failed with ${response.status}: ${JSON.stringify(data)}`
-      });
+      this.logger.log(`[wasender] send accepted to=${maskPhone(to)} status=${reply.status}${describeReply(data)}`);
+      this.nextAvailableAt = this.now() + this.minIntervalMs;
+      return data;
     }
 
     throw new WasenderSendError({
@@ -141,14 +142,6 @@ export class WasenderClient {
   }
 }
 
-async function parseJsonSafe(response) {
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
-}
-
 function resolveRetryDelayMs(data, fallbackMs) {
   const retryAfterSeconds = Number(data?.retry_after);
   if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
@@ -162,12 +155,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function safeJson(value) {
-  try {
-    return redactPhones(JSON.stringify(value));
-  } catch {
-    return '"[unserializable]"';
+// For the log: the message id and Wasender's own short message, redacted; never the echoed text or recipient.
+function describeReply(data) {
+  if (!data || typeof data !== 'object') {
+    return '';
   }
+  const parts = [];
+  const id = data.data?.msgId ?? data.data?.id ?? data.msgId ?? data.id;
+  if (id !== undefined && id !== null && ['string', 'number'].includes(typeof id)) {
+    parts.push(`msgId=${String(id).slice(0, 64)}`);
+  }
+  if (typeof data.message === 'string' && data.message) {
+    parts.push(`message=${JSON.stringify(redact(data.message).slice(0, 160))}`);
+  }
+  return parts.length ? ` ${parts.join(' ')}` : '';
 }
 
 export class WasenderSendError extends Error {

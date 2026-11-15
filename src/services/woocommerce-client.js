@@ -1,3 +1,6 @@
+import { HttpError, request as httpRequest } from '../http/request.js';
+import { redact } from '../log.js';
+
 function buildAuthHeader(consumerKey, consumerSecret) {
   return `Basic ${Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64')}`;
 }
@@ -12,7 +15,7 @@ const MAX_LIST_PAGES = 20;
 const MAX_BATCH_SIZE = 100;
 
 export class WooCommerceClient {
-  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, timeoutMs = 30000, logger = console, sleepImpl = sleep }) {
+  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, timeoutMs = 30000, logger = console, sleepImpl = sleep, randomImpl = Math.random }) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
     this.consumerKey = consumerKey;
     this.consumerSecret = consumerSecret;
@@ -21,6 +24,7 @@ export class WooCommerceClient {
     this.timeoutMs = timeoutMs;
     this.logger = logger;
     this.sleep = sleepImpl;
+    this.random = randomImpl;
   }
 
   // `after` (ISO date) keeps only orders created since then. A status the shop does not know (for example the
@@ -105,10 +109,12 @@ export class WooCommerceClient {
     });
   }
 
+  // Absolute values (a status, meta values): repeating it is harmless, so it may be retried.
   async updateOrder(orderId, fields) {
     return this.request(`/wp-json/wc/v3/orders/${orderId}`, {
       method: 'PUT',
-      body: fields
+      body: fields,
+      idempotent: true
     });
   }
 
@@ -120,6 +126,7 @@ export class WooCommerceClient {
     return this.updateOrder(orderId, { meta_data: metaData });
   }
 
+  // A POST that adds a note: never retried (a retry after a lost answer would add it twice).
   async addOrderNote(orderId, note) {
     return this.request(`/wp-json/wc/v3/orders/${orderId}/notes`, {
       method: 'POST',
@@ -184,83 +191,55 @@ export class WooCommerceClient {
     throw new Error(`WooCommerce ${what} is longer than ${MAX_LIST_PAGES} pages`);
   }
 
+  // GETs (also the order lists) are retried on no answer, 429 and 5xx; a write only when `idempotent` (absolute
+  // values: an order status or meta, a stock quantity); an order note (POST) never. A GET refused with 401/403/415
+  // with the header login is tried once more with the keys in the query (some hosts strip the header).
   async request(path, { method, body, idempotent = false }) {
-    const authStrategies = [{ mode: 'header' }];
-    if (method === 'GET') {
-      authStrategies.push({ mode: 'query' });
+    const authModes = method === 'GET' ? ['header', 'query'] : ['header'];
+    if (shouldLogWooRequest({ method })) {
+      this.logger.log(redact(`[woo] request method=${method} path=${path}${summarizeWooBody(body)}`, { secrets: this.secrets() }));
     }
 
     let lastError = null;
-
-    for (const strategy of authStrategies) {
-      const maxAttempts = shouldRetryTransient(method, idempotent) ? 3 : 1;
-
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        if (attempt > 1) {
-          await this.sleep(1000 * (attempt - 1));
+    for (const authMode of authModes) {
+      let reply;
+      try {
+        reply = await httpRequest({
+          method,
+          url: buildRequestUrl({ baseUrl: this.baseUrl, path, consumerKey: this.consumerKey, consumerSecret: this.consumerSecret, authMode }),
+          headers: buildHeaders({ authHeader: this.authHeader, authMode, hasBody: body !== undefined }),
+          body,
+          timeoutMs: this.timeoutMs,
+          retry: 'safe',
+          idempotent,
+          fetchImpl: this.fetch,
+          sleep: this.sleep,
+          random: this.random,
+          secrets: this.secrets(),
+          label: 'WooCommerce request',
+          onRetry: ({ nextAttempt, of, error }) => this.logger.warn(redact(`[woo] ${error.kind === 'http' ? `transient failure status=${error.status}` : `no answer (${error.kind})`} method=${method} path=${path} auth=${authMode}, retry ${nextAttempt} of ${of}`, { secrets: this.secrets() }))
+        });
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.kind !== 'http') {
+          throw error;
         }
-
-        if (shouldLogWooRequest({ method })) {
-          this.logger.log(`[woo] request method=${method} path=${path} auth=${strategy.mode}${attempt > 1 ? ` attempt=${attempt}` : ''}${summarizeWooBody(body)}`);
-        }
-
-        let response;
-        try {
-          response = await this.fetch(buildRequestUrl({
-            baseUrl: this.baseUrl,
-            path,
-            consumerKey: this.consumerKey,
-            consumerSecret: this.consumerSecret,
-            authMode: strategy.mode
-          }), {
-            method,
-            headers: buildHeaders({
-              authHeader: this.authHeader,
-              authMode: strategy.mode,
-              hasBody: body !== undefined
-            }),
-            body: body === undefined ? undefined : JSON.stringify(body),
-            signal: AbortSignal.timeout(this.timeoutMs)
-          });
-        } catch (networkError) {
-          lastError = networkError;
-          if (attempt < maxAttempts) {
-            this.logger.warn(`[woo] network error method=${method} path=${path} attempt=${attempt} message=${networkError.message} — retrying`);
-            continue;
-          }
-          throw networkError;
-        }
-
-        const parsedBody = await parseResponseBody(response);
-        const data = parsedBody.data;
-        if (response.ok) {
-          if (shouldLogWooSuccess({ method })) {
-            this.logger.log(
-              `[woo] success method=${method} path=${path} status=${response.status}${summarizeWooSuccessResponse(data)}`
-            );
-          }
-          return data;
-        }
-
-        this.logger.warn(
-          `[woo] failure method=${method} path=${path} auth=${strategy.mode} status=${response.status}${summarizeWooFailureBody(parsedBody)}`
-        );
-        lastError = buildWooError(response.status, parsedBody);
-
-        if (shouldRetryWithQueryAuth({ method, status: response.status, authMode: strategy.mode })) {
-          break;
-        }
-
-        if (attempt < maxAttempts && isTransientStatus(response.status)) {
-          this.logger.warn(`[woo] transient failure method=${method} path=${path} status=${response.status} attempt=${attempt} — retrying`);
+        this.logger.warn(redact(`[woo] failure method=${method} path=${path} auth=${authMode} status=${error.status}${summarizeWooFailureBody(error)}`, { secrets: this.secrets() }));
+        lastError = buildWooError(error);
+        if (shouldRetryWithQueryAuth({ method, status: error.status, authMode })) {
           continue;
         }
-
         throw lastError;
       }
+      if (shouldLogWooSuccess({ method })) {
+        this.logger.log(`[woo] success method=${method} path=${path} status=${reply.status}${summarizeWooSuccessResponse(reply.data)}`);
+      }
+      return reply.data;
     }
-
     throw lastError || new Error('WooCommerce request failed');
+  }
+
+  secrets() {
+    return [this.consumerKey, this.consumerSecret];
   }
 }
 
@@ -295,59 +274,8 @@ function shouldRetryWithQueryAuth({ method, status, authMode }) {
   return method === 'GET' && authMode === 'header' && [401, 403, 415].includes(status);
 }
 
-// Writes are retried today; reads only when the caller says a repeat is harmless (idempotent).
-function shouldRetryTransient(method, idempotent) {
-  return idempotent || method !== 'GET';
-}
-
-function isTransientStatus(status) {
-  return status === 429 || (status >= 500 && status <= 599);
-}
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function parseJsonSafe(response) {
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
-}
-
-async function parseResponseBody(response) {
-  if (typeof response?.text === 'function') {
-    try {
-      const rawText = await response.text();
-      if (!rawText) {
-        return { data: null, rawText: '', bodyFormat: 'empty' };
-      }
-
-      try {
-        return {
-          data: JSON.parse(rawText),
-          rawText,
-          bodyFormat: 'json'
-        };
-      } catch {
-        return {
-          data: null,
-          rawText,
-          bodyFormat: 'text'
-        };
-      }
-    } catch {
-      return { data: null, rawText: '', bodyFormat: 'unreadable' };
-    }
-  }
-
-  const data = await parseJsonSafe(response);
-  return {
-    data,
-    rawText: '',
-    bodyFormat: 'json'
-  };
 }
 
 function summarizeWooBody(body) {
@@ -448,8 +376,9 @@ function truncateForLog(value, maxLength = 500) {
   return `${text.slice(0, maxLength - 3)}...`;
 }
 
-function summarizeWooFailureBody(parsedBody) {
-  const { data, rawText, bodyFormat } = parsedBody;
+// The log line keeps a short, redacted picture of the reply (never in an error message).
+function summarizeWooFailureBody(error) {
+  const { data, text: rawText, bodyFormat } = error;
 
   if (bodyFormat === 'json') {
     return ` bodyFormat=json body=${truncateForLog(safeJson(data))}`;
@@ -466,22 +395,26 @@ function summarizeWooFailureBody(parsedBody) {
   return ' bodyFormat=unreadable';
 }
 
-function buildWooError(status, parsedBody) {
-  const { data, rawText, bodyFormat } = parsedBody;
-
+// The error names the status and WooCommerce's error code only (for example rest_invalid_param), never the reply
+// body: it can echo customer data or the link documents. The reply stays on the error (data) for code that needs it.
+function buildWooError(httpError) {
+  const { status, data, bodyFormat } = httpError;
+  let detail;
   if (bodyFormat === 'json') {
-    return new Error(`WooCommerce request failed with ${status}: ${safeJson(data)}`);
+    const code = typeof data?.code === 'string' ? data.code.replace(/[^A-Za-z0-9_.-]/gu, '').slice(0, 80) : '';
+    detail = code ? `: ${code}` : '';
+  } else if (bodyFormat === 'text') {
+    detail = ': non-JSON body';
+  } else if (bodyFormat === 'empty') {
+    detail = ': empty body';
+  } else {
+    detail = ': unreadable response body';
   }
-
-  if (bodyFormat === 'text') {
-    return new Error(
-      `WooCommerce request failed with ${status}: non-JSON body ${JSON.stringify(truncateForLog(rawText, 200))}`
-    );
-  }
-
-  if (bodyFormat === 'empty') {
-    return new Error(`WooCommerce request failed with ${status}: empty body`);
-  }
-
-  return new Error(`WooCommerce request failed with ${status}: unreadable response body`);
+  const error = new Error(`WooCommerce request failed with ${status}${detail}`);
+  error.status = status;
+  error.code = typeof data?.code === 'string' ? data.code : '';
+  error.kind = 'http';
+  error.ambiguous = httpError.ambiguous;
+  error.data = data;
+  return error;
 }
