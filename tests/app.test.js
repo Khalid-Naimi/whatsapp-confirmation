@@ -5299,34 +5299,58 @@ test('the stock sync task needs the secret, reads dryRun and approve, and report
   assert.equal((await dispatch(createMatchingApp(), { method: 'POST', url: '/tasks/stock-sync', headers: withSecret })).statusCode, 503);
 });
 
-test('the hourly task runs the stock sync after the HighDelivery status sync and before the stock alerts', async () => {
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+test('the hourly task answers first; the stock sync runs after the answer and its summary reaches the health row', async () => {
   const order = [];
+  let finishSync;
+  const runs = [];
   const app = createMatchingApp({
-    stockSyncService: { async run() { order.push('stock-sync'); return { summary: { changed: 2 } }; } },
+    stockSyncService: { async run() { order.push('stock-sync started'); await new Promise((resolve) => { finishSync = resolve; }); order.push('stock-sync done'); return { summary: { changed: 2 } }; } },
     followupExtras: {
       hdStatusSyncService: { async run() { order.push('hd-status'); return { checked: 0 }; } },
-      stockAlertService: { async processQueue() { order.push('stock-alerts'); } }
+      stockAlertService: { async processQueue() { order.push('stock-alerts'); } },
+      healthTracker: { recordRun: (run) => runs.push(run) }
     }
   });
   const result = await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
-  assert.deepEqual(order, ['hd-status', 'stock-sync', 'stock-alerts']);
-  assert.deepEqual(result.body.stockSync, { changed: 2 });
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(result.body, { ok: true, summary: { backfilled: 0 }, hdStatus: { checked: 0 } });
+  await tick();
+  assert.deepEqual(order, ['hd-status', 'stock-alerts', 'stock-sync started']); // the sync is still going, the answer is already out
+  assert.equal(runs.length, 0);
+  finishSync();
+  await tick();
+  assert.deepEqual(order.at(-1), 'stock-sync done');
+  assert.deepEqual(runs.map((run) => run.stockSync), [{ changed: 2 }]);
 });
 
-test('a stock sync that throws cannot break the hourly follow-ups', async () => {
-  const order = [];
+test('a stock sync that throws cannot break the hourly follow-ups, and the run is still recorded', async () => {
+  const warnings = [];
+  const runs = [];
   const app = createMatchingApp({
     stockSyncService: { async run() { throw new Error('boom'); } },
-    followupExtras: { stockAlertService: { async processQueue() { order.push('stock-alerts'); } } }
+    followupExtras: { logger: { log() {}, warn: (m) => warnings.push(m), error() {} }, healthTracker: { recordRun: (run) => runs.push(run) } }
   });
   const result = await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
   assert.equal(result.statusCode, 200);
-  assert.equal(result.body.stockSync, null);
-  assert.deepEqual(order, ['stock-alerts']);
+  await tick();
+  assert.ok(warnings.some((m) => m.includes('stock sync failed: boom')));
+  assert.deepEqual(runs.map((run) => [run.ok, run.stockSync]), [[true, null]]);
 });
 
-test('the hourly task with the stock sync switched off returns no stock sync summary', async () => {
-  const app = createMatchingApp({ stockSyncService: { async run() { return { skipped: 'off' }; } } });
-  const result = await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
-  assert.equal(result.body.stockSync, null);
+test('the hourly task with the stock sync switched off records a run without a stock sync summary', async () => {
+  const runs = [];
+  const app = createMatchingApp({ stockSyncService: { async run() { return { skipped: 'off' }; } }, followupExtras: { healthTracker: { recordRun: (run) => runs.push(run) } } });
+  await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
+  await tick();
+  assert.deepEqual(runs.map((run) => run.stockSync), [null]);
+});
+
+test('the hourly task still needs the secret and runs no stock sync without it', async () => {
+  let ran = false;
+  const app = createMatchingApp({ stockSyncService: { async run() { ran = true; return {}; } } });
+  assert.equal((await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: { 'x-task-secret': 'bad' } })).statusCode, 401);
+  await tick();
+  assert.equal(ran, false);
 });

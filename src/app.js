@@ -22,6 +22,17 @@ export function createApp({ config, confirmationService, store, stockAlertServic
     }
   }
 
+  function runStockSyncAfterResponse({ summary, hdStatus }) {
+    Promise.resolve()
+      .then(() => stockSyncService.run())
+      .then((stockSync) => stockSync?.summary || null, (error) => {
+        logger.warn(`[task][order-followups] stock sync failed: ${error.message}`);
+        return null;
+      })
+      .then((stockSync) => healthTracker?.recordRun({ ok: true, summary, hdStatus, stockSync }))
+      .catch((error) => logger.warn(`[task][order-followups] could not record the run: ${error.message}`));
+  }
+
   return async function handler(req, res) {
     try {
       const parsedUrl = new URL(req.url, 'http://localhost');
@@ -197,15 +208,6 @@ export function createApp({ config, confirmationService, store, stockAlertServic
             logger.warn(`[task][order-followups] hd status sync failed: ${error.message}`);
           }
         }
-        // Then the stock sync (runs only when STOCK_SYNC_MODE is set; it can never break the follow-ups).
-        let stockSync = null;
-        if (stockSyncService) {
-          try {
-            stockSync = await stockSyncService.run();
-          } catch (error) {
-            logger.warn(`[task][order-followups] stock sync failed: ${error.message}`);
-          }
-        }
         // Stock alerts held back by the quiet hours go out now.
         if (stockAlertService) {
           try {
@@ -214,8 +216,16 @@ export function createApp({ config, confirmationService, store, stockAlertServic
             logger.warn(`[task][order-followups] stock alert queue failed: ${error.message}`);
           }
         }
-        healthTracker?.recordRun({ ok: true, summary: result, hdStatus, stockSync: stockSync?.summary || null });
-        return sendJson(res, 200, { ok: true, summary: result, hdStatus, stockSync: stockSync?.summary || null });
+        const body = { ok: true, summary: result, hdStatus };
+        if (!stockSyncService) {
+          healthTracker?.recordRun({ ok: true, summary: result, hdStatus, stockSync: null });
+          return sendJson(res, 200, body);
+        }
+        // The stock sync can take a minute: the cron call gets its answer first and the sync runs after it
+        // (it has its own lock, and it can never break the follow-ups). The health row is written when it ends.
+        sendJson(res, 200, body);
+        runStockSyncAfterResponse({ summary: result, hdStatus });
+        return undefined;
         } catch (error) {
           healthTracker?.recordRun({ ok: false, error: String(error?.message || error).slice(0, 120) });
           throw error;
