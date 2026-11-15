@@ -109,7 +109,12 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
 
 ## Notes
 
-- Persistence is file-backed JSON for easy local setup and debug history.
+- The JSON file (`DATA_FILE`) is only a fast local cache and debug history: Render wipes it on every deploy or restart. Writes are atomic (temp file + rename), an unreadable file is moved aside as `.corrupt-<time>` and the service starts empty, events and messages keep the newest 5000, and events store a small summary instead of the webhook body.
+- What must survive a restart lives in WooCommerce: order state in `rhymat_whatsapp_*` / `rhymat_hd_api_*` order meta, and customer opt-outs (`rhymat_server_optouts`) plus back-in-stock alert outcomes (`rhymat_server_stock_alerts`) as small JSON meta on the hidden `rhymat-sync-control` product (the desktop app creates it). They are loaded before the server listens (at most 20 s; if WooCommerce is down the service starts anyway and retries on the next write). With `WP_BASE_URL` set, the WordPress opt-out list is merged in too.
+- Fail closed: with `WOOCOMMERCE_WEBHOOK_SECRET`, `WASENDER_WEBHOOK_SECRET` or `TASK_SECRET` unset, the routes they protect answer 503. Bodies over 1 MB get 413.
+- A signed WooCommerce delivery is answered 200 even when the WhatsApp send fails; the hourly backfill retries it.
+- On SIGTERM the service stops listening and waits up to 10 s for background work. With `RENDER_EXTERNAL_URL` (set by Render) it pings its own `/health` every 10 minutes.
+- Duplicate guards: before any customer send the hourly run reads the order again; a WhatsApp send without an answer for 2 hours is counted as sent (team alerted once); a HighDelivery `sending` older than 10 minutes becomes `unknown` (team alerted once); a 5xx or unreadable HighDelivery answer to a parcel creation is `unknown`, never `failed`.
 - Production is designed for a single app instance plus an external hourly task caller.
 - Confirmation/reminder state is stored on WooCommerce orders using `rhymat_whatsapp_*` meta keys.
 - Customer-facing send reservations are stored on WooCommerce orders so ambiguous post-send failures do not automatically resend messages.

@@ -78,6 +78,16 @@ export function maskPhone(value) {
   return `${input.slice(0, 4)}***${input.slice(-2)}`;
 }
 
+// For logs: the first letter and the domain only (k***@example.com). Never log a full customer email.
+export function maskEmail(value) {
+  const input = String(value || '').trim();
+  const at = input.lastIndexOf('@');
+  if (at <= 0) {
+    return input ? '***' : '';
+  }
+  return `${input[0]}***${input.slice(at)}`;
+}
+
 // Masks every phone-like number inside a text (provider answers can echo the recipient).
 export function redactPhones(text) {
   return String(text ?? '').replace(/\+?\d{9,15}/gu, (match) => maskPhone(match));

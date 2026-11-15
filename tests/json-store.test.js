@@ -75,3 +75,10 @@ test('events keep a small summary instead of the full webhook body', () => {
   assert.ok(!JSON.stringify(event).includes('+212600000042'));
   assert.ok(!JSON.stringify(event).includes('Rue Privee'));
 });
+
+test('emails are masked for logs', async () => {
+  const { maskEmail } = await import('../src/utils/format.js');
+  assert.equal(maskEmail('khalid@example.com'), 'k***@example.com');
+  assert.equal(maskEmail('nope'), '***');
+  assert.equal(maskEmail(''), '');
+});

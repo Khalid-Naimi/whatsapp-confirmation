@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems, validatePhone } from '../utils/format.js';
 import { isOptOutMessage } from '../utils/opt-out.js';
 import { DEFAULT_WOO_STATUSES, wooStatusMatchesTarget } from '../utils/hd-status.js';
-import { maskPhone } from '../utils/format.js';
+import { maskEmail, maskPhone, redactPhones } from '../utils/format.js';
 import { isQuietHours } from '../utils/quiet-hours.js';
 import { WasenderSendError } from './wasender-client.js';
 
@@ -275,7 +275,7 @@ export class ConfirmationService {
             rawOrder: payload
           });
           this.logger.log(
-            `[confirmation] skipped self-test confirmation send orderId=${normalizedOrder.orderId} testPhone=${feedbackMeta.testPhone || ''} token=${feedbackMeta.token || ''} runId=${feedbackMeta.testRunId || ''}`
+            `[confirmation] skipped self-test confirmation send orderId=${normalizedOrder.orderId} testPhone=${maskPhone(feedbackMeta.testPhone)} token=${feedbackMeta.token || ''} runId=${feedbackMeta.testRunId || ''}`
           );
           return {
             status: 200,
@@ -475,7 +475,7 @@ export class ConfirmationService {
     if (feedbackToken) {
       const feedbackMatch = await this.matchFeedbackOrder(message, { token: feedbackToken.value, explicitToken: true });
       this.logger.log(
-        `[feedback] route=token_match type=${feedbackToken.type} token=${feedbackToken.value} outcome=${feedbackMatch.kind} senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}`
+        `[feedback] route=token_match type=${feedbackToken.type} token=${feedbackToken.value} outcome=${feedbackMatch.kind} senderPhone=${maskPhone(message.senderPhone)} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}`
       );
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
@@ -492,7 +492,7 @@ export class ConfirmationService {
         ? ` candidateOrderIds=${feedbackMatch.matchedOrderIds.join(',')} chosenOrderId=${feedbackMatch.orderId}`
         : '';
       this.logger.log(
-        `[feedback] route=self_test_phone_match source=local matchedOrderId=${feedbackMatch.orderId} senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
+        `[feedback] route=self_test_phone_match source=local matchedOrderId=${feedbackMatch.orderId} senderPhone=${maskPhone(message.senderPhone)} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
       );
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
@@ -502,7 +502,7 @@ export class ConfirmationService {
         ? ` candidateOrderIds=${feedbackMatch.matchedOrderIds.join(',')} chosenOrderId=${feedbackMatch.orderId}`
         : '';
       this.logger.log(
-        `[feedback] route=self_test_phone_match source=woo_recovery matchedOrderId=${feedbackMatch.orderId} senderPhone=${message.senderPhone || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
+        `[feedback] route=self_test_phone_match source=woo_recovery matchedOrderId=${feedbackMatch.orderId} senderPhone=${maskPhone(message.senderPhone)} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
       );
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
@@ -512,7 +512,7 @@ export class ConfirmationService {
         ? ` candidateOrderIds=${feedbackMatch.matchedOrderIds.join(',')} chosenOrderId=${feedbackMatch.orderId}`
         : '';
       this.logger.log(
-        `[feedback] route=production_phone_match source=local matchedOrderId=${feedbackMatch.orderId} senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
+        `[feedback] route=production_phone_match source=local matchedOrderId=${feedbackMatch.orderId} senderPhone=${maskPhone(message.senderPhone)} senderRaw=${redactPhones(message.senderRaw)} recipient=${redactPhones(message.recipientRaw)} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
       );
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
@@ -522,7 +522,7 @@ export class ConfirmationService {
         ? ` candidateOrderIds=${feedbackMatch.matchedOrderIds.join(',')} chosenOrderId=${feedbackMatch.orderId}`
         : '';
       this.logger.log(
-        `[feedback] route=production_phone_match source=woo_recovery matchedOrderId=${feedbackMatch.orderId} senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
+        `[feedback] route=production_phone_match source=woo_recovery matchedOrderId=${feedbackMatch.orderId} senderPhone=${maskPhone(message.senderPhone)} senderRaw=${redactPhones(message.senderRaw)} recipient=${redactPhones(message.recipientRaw)} kind=${message.kind || 'unknown'} messageKey=${message.messageKey}${candidateSuffix}`
       );
       return this.processFeedbackMatchResult(message, feedbackMatch);
     }
@@ -535,7 +535,7 @@ export class ConfirmationService {
     }
 
     this.logger.log(
-      `[feedback] route=feedback_unmatched senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} kind=${message.kind || 'unknown'} source=${feedbackMatch.source || 'unknown'} reason=${feedbackMatch.reason || 'no_match'} messageKey=${message.messageKey}`
+      `[feedback] route=feedback_unmatched senderPhone=${maskPhone(message.senderPhone)} senderRaw=${redactPhones(message.senderRaw)} recipient=${redactPhones(message.recipientRaw)} kind=${message.kind || 'unknown'} source=${feedbackMatch.source || 'unknown'} reason=${feedbackMatch.reason || 'no_match'} messageKey=${message.messageKey}`
     );
     return this.processFeedbackMatchResult(message, feedbackMatch);
   }
@@ -620,7 +620,7 @@ export class ConfirmationService {
         optedOutAt
       });
       await this.safeAddOrderNote(String(latestOrder.id), note);
-      this.logger.log(`[opt-out] woo_marker_saved phone=${phone} orderId=${latestOrder.id} messageKey=${messageKey}`);
+      this.logger.log(`[opt-out] woo_marker_saved phone=${maskPhone(phone)} orderId=${latestOrder.id} messageKey=${messageKey}`);
     } catch (error) {
       this.logger.warn(`[opt-out] woo_marker_failed phone=${maskPhone(phone)} messageKey=${messageKey} error=${error.message}`);
     }
@@ -660,7 +660,7 @@ export class ConfirmationService {
     );
     if (resolvedReplyContext.pendingOrders.length > 1) {
       this.logger.warn(
-        `[confirmation] multiple pending orders require manual follow-up senderPhone=${message.senderPhone} candidateOrderIds=${resolvedReplyContext.pendingOrders.map((order) => order.orderId).join(',')} messageKey=${message.messageKey}`
+        `[confirmation] multiple pending orders require manual follow-up senderPhone=${maskPhone(message.senderPhone)} candidateOrderIds=${resolvedReplyContext.pendingOrders.map((order) => order.orderId).join(',')} messageKey=${message.messageKey}`
       );
       this.appendInboundMessage({
         message,
@@ -704,7 +704,7 @@ export class ConfirmationService {
     }
 
     this.logger.log(
-      `[inbound] route=confirmation_candidate senderPhone=${message.senderPhone || ''} pendingOrderId=${resolvedReplyContext.pendingOrder.orderId} kind=${message.kind || 'unknown'} messageKey=${message.messageKey} source=${resolvedReplyContext.matchedViaWooFallback ? 'woo_pending' : 'local_pending'}`
+      `[inbound] route=confirmation_candidate senderPhone=${maskPhone(message.senderPhone)} pendingOrderId=${resolvedReplyContext.pendingOrder.orderId} kind=${message.kind || 'unknown'} messageKey=${message.messageKey} source=${resolvedReplyContext.matchedViaWooFallback ? 'woo_pending' : 'local_pending'}`
     );
     return this.processConfirmationInboundMessage(message, resolvedReplyContext);
   }
@@ -1244,7 +1244,7 @@ export class ConfirmationService {
         );
       } catch (error) {
         this.logger.warn(
-          `[feedback] failed Woo meta update orderId=${normalizedOrder.orderId} wooBaseUrl=${String(this.wooClient?.baseUrl || '')} senderPhone=${message.senderPhone || ''} senderRaw=${message.senderRaw || ''} recipient=${message.recipientRaw || ''} messageKey=${message.messageKey} error=${error.message}`
+          `[feedback] failed Woo meta update orderId=${normalizedOrder.orderId} wooBaseUrl=${String(this.wooClient?.baseUrl || '')} senderPhone=${maskPhone(message.senderPhone)} senderRaw=${redactPhones(message.senderRaw)} recipient=${redactPhones(message.recipientRaw)} messageKey=${message.messageKey} error=${error.message}`
         );
         return {
           ok: false,
@@ -1516,7 +1516,7 @@ export class ConfirmationService {
             if (isFeedbackSelfTestOrder(order)) {
               const feedbackMeta = getFeedbackMeta(order);
               this.logger.log(
-                `[confirmation] skipped self-test confirmation backfill orderId=${String(order.id)} testPhone=${feedbackMeta.testPhone || ''} token=${feedbackMeta.token || ''} runId=${feedbackMeta.testRunId || ''}`
+                `[confirmation] skipped self-test confirmation backfill orderId=${String(order.id)} testPhone=${maskPhone(feedbackMeta.testPhone)} token=${feedbackMeta.token || ''} runId=${feedbackMeta.testRunId || ''}`
               );
               return 'skipped';
             }
@@ -2460,7 +2460,7 @@ export class ConfirmationService {
     } catch (error) {
       if (isWhatsAppContactabilityFailure(error)) {
         this.logger.warn(
-          `[confirmation] classified invalid_or_non_whatsapp_number orderId=${normalizedOrder.orderId} status=${String(error.status || '')} body=${safeErrorData(error)}`
+          `[confirmation] classified invalid_or_non_whatsapp_number orderId=${normalizedOrder.orderId} status=${String(error.status || '')} body=${redactPhones(safeErrorData(error))}`
         );
         const cancelledOrder = await this.cancelOrderForUnreachableWhatsApp(orderPayload, error, now);
         return {
@@ -2714,13 +2714,13 @@ export class ConfirmationService {
         throw new Error('Mail service is not configured');
       }
 
-      this.logger.log(`[confirmation] sending cancellation email orderId=${order.orderId} to=${order.customerEmail}`);
+      this.logger.log(`[confirmation] sending cancellation email orderId=${order.orderId} to=${maskEmail(order.customerEmail)}`);
       await this.mailService.send({
         to: order.customerEmail,
         subject,
         text
       });
-      this.logger.log(`[confirmation] cancellation email sent orderId=${order.orderId} to=${order.customerEmail}`);
+      this.logger.log(`[confirmation] cancellation email sent orderId=${order.orderId} to=${maskEmail(order.customerEmail)}`);
       return { status: 'sent', error: '' };
     } catch (error) {
       this.logger.warn(`Unable to send cancellation email for order ${order.orderId}: ${error.message}`);
@@ -2760,7 +2760,7 @@ export class ConfirmationService {
     }
 
     if (failedPhones.length) {
-      this.logger.warn(`[confirmation] internal ${decision} notifications incomplete orderId=${order.orderId} failedPhones=${failedPhones.join(',')}`);
+      this.logger.warn(`[confirmation] internal ${decision} notifications incomplete orderId=${order.orderId} failedPhones=${failedPhones.map((item) => maskPhone(item)).join(',')}`);
       return this.store.upsertOrder({
         ...order,
         internalNotifiedConfirmed: decision === 'confirmed' ? 'no' : order.internalNotifiedConfirmed || 'no',
