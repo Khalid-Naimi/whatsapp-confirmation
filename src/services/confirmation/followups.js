@@ -109,8 +109,8 @@ export const followupMethods = {
     const closedStatuses = [...FOLLOWUP_CLOSED_STATUSES];
     // A WooCommerce hiccup (timeout, 5xx) is retried a few times instead of skipping the whole hour.
     const orders = [
-      ...await this.withTransientRetry(() => this.listOrdersForStatuses(RECONCILIATION_STATUSES.filter((status) => !closedStatuses.includes(status))), 'open order list'),
-      ...await this.withTransientRetry(() => this.listOrdersForStatuses(closedStatuses, { after: new Date(now.getTime() - 45 * 24 * 60 * 60 * 1000).toISOString() }), 'closed order list')
+      ...await this.withTransientRetry(() => this.listOrdersForStatuses(RECONCILIATION_STATUSES.filter((status) => !closedStatuses.includes(status))), 'open order list', { idempotent: true }),
+      ...await this.withTransientRetry(() => this.listOrdersForStatuses(closedStatuses, { after: new Date(now.getTime() - 45 * 24 * 60 * 60 * 1000).toISOString() }), 'closed order list', { idempotent: true })
     ];
 
     for (let index = 0; index < orders.length; index += 1) {
@@ -491,8 +491,14 @@ export const followupMethods = {
     );
   },
 
-  // Retries a WooCommerce read that failed for a passing reason (timeout, network, 429, 5xx); anything else is thrown.
-  async withTransientRetry(work, label, attempts = 3) {
+  // Retries a WooCommerce call that failed for a passing reason (timeout, network, 429, 5xx); anything else is thrown.
+  // Only work the caller marks idempotent (a read, an absolute meta write) is retried here: anything else (an order
+  // note, a create) gets a single attempt, since a "failed" call may have landed and a repeat would duplicate it.
+  // The WooCommerce client has its own retries for idempotent calls, so this layer is for whole steps (the order list
+  // of the hourly run) that are worth a longer pause than the client's.
+  async withTransientRetry(work, label, options = {}) {
+    const { attempts: maxAttempts = 3, idempotent = false } = typeof options === 'number' ? { attempts: options, idempotent: true } : options;
+    const attempts = idempotent ? maxAttempts : 1;
     for (let attempt = 1; ; attempt += 1) {
       try {
         return await work();
@@ -512,7 +518,7 @@ export const followupMethods = {
       return listedOrder;
     }
     try {
-      return (await this.withTransientRetry(() => this.wooClient.getOrder(orderId), `order ${orderId}`)) || null;
+      return (await this.withTransientRetry(() => this.wooClient.getOrder(orderId), `order ${orderId}`, { idempotent: true })) || null;
     } catch (error) {
       this.logger.warn(`[task][order-followups] could not re-read orderId=${orderId}: ${error.message}`);
       return null;

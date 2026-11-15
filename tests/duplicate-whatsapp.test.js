@@ -368,3 +368,20 @@ test('the stale-send alert says the message may not have been sent', async () =>
   assert.equal(teamAlerts.length, 1);
   assert.match(teamAlerts[0], /peut-etre PAS envoye/u);
 });
+
+test('withTransientRetry: only idempotent work is retried; a note or a create gets one attempt', async () => {
+  const { service } = makeContext();
+  const busy = () => new Error('WooCommerce request failed with 503: {"code":"busy"}');
+  let reads = 0;
+  const value = await service.withTransientRetry(async () => {
+    reads += 1;
+    if (reads < 3) {
+      throw busy();
+    }
+    return 'ok';
+  }, 'a read', { idempotent: true });
+  assert.deepEqual([value, reads], ['ok', 3]);
+  let notes = 0;
+  await assert.rejects(service.withTransientRetry(async () => { notes += 1; throw busy(); }, 'an order note'), /503/u);
+  assert.equal(notes, 1);
+});
