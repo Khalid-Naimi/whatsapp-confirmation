@@ -17,6 +17,7 @@ import { StockAlertService } from './services/stock-alert-service.js';
 import { StockSyncService } from './services/stock-sync-service.js';
 import { SyncControl } from './services/sync-control.js';
 import { createTeamNotifier } from './services/team-notifier.js';
+import { createAlerts } from './services/alerts.js';
 import { HealthTracker, trackCalls } from './services/health-tracker.js';
 import { WasenderClient } from './services/wasender-client.js';
 import { WooCommerceClient } from './services/woocommerce-client.js';
@@ -103,7 +104,16 @@ for (const [name, value] of secretChecks) {
   }
 }
 
-const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, logger });
+// The one team alert path: WhatsApp (low-priority lane), deduplicated by key, email when WhatsApp fails.
+const alerts = createAlerts({
+  wasenderClient,
+  phones: config.messages.internalNotifyPhones,
+  mailService,
+  mailTo: config.alertEmailTo || config.mail.user,
+  store,
+  logger
+});
+const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, alerts, logger });
 
 const confirmationService = new ConfirmationService({
   store,
@@ -148,6 +158,7 @@ const stockSyncService = new StockSyncService({
   productMap: hdProductMap,
   matchingWatch: new MatchingWatch({ notify: notifyTeam, enabled: config.matchingAlertsEnabled, logger }),
   notify: notifyTeam,
+  alert: alerts.alert,
   config: config.stockSync,
   logger
 });
@@ -163,6 +174,7 @@ const app = createApp({
   hdClient: hdAutoSend.hdClient,
   stockSyncService,
   durableState,
+  alerts,
   logger
 });
 

@@ -70,6 +70,12 @@ Backend-only Node.js service that:
 - `SHOP_CONTACT_PHONE` (required): the number customers are told to write to with a question; it is put, as written (for example `+212 6xx-xxxxxx`), at the end of the default confirmation, invalid-reply and reminder texts. A text set in its own variable is used as it is.
 - `CONFIG_STRICT`: default on. See "Configuration check" below.
 
+## Team alerts
+
+Every server message to the team goes through one path (`src/services/alerts.js`): WhatsApp to `INTERNAL_NOTIFY_PHONES`, the same alert key at most once per 6 hours (some alerts set their own window), and an email (`ALERT_EMAIL_TO`, default `SMTP_USER`) when no phone could be reached. Routine notices use a low-priority lane in the Wasender queue, so they never delay a customer message. A failed hourly run (`POST /tasks/order-followups` answering 500) is told once per 6 hours. The window is kept in memory and in the local JSON file, which Render wipes on a restart: after a restart an alert can go out once more.
+
+- `ALERT_EMAIL_TO` (optional): where the email fallback goes; default `SMTP_USER`. Needs the SMTP settings.
+
 ## Outside monitor (free)
 
 Point a free monitor (UptimeRobot, cron-job.org) at `https://<service>/health/ready` with a 5 to 15 minute interval and email alerts. It tells you when the service is up but not working (cron stopped, WhatsApp session disconnected, WooCommerce keys broken). It needs no secret and shows no customer data. The authenticated `GET /api/health/details` also carries `contract: { api: 1, health: 1, linkDoc: 1 }` so the desktop app can tell which version it talks to.
@@ -114,7 +120,7 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
 - A variation batch counts a variation as written only when the shop answers for it without an error; an answer without one reply per variation stops the run (`write_failed`).
 - The sync runs after the hourly follow-ups answer has been sent, so the cron call never waits for it. With `STOCK_SYNC_MODE=off`, `?dryRun=1` computes and answers only (no history saved, no digest).
 - Back-in-stock WhatsApp alerts to customers are triggered by 0 to positive changes, hence `STOCK_SYNC_MAX_RESTOCKS`.
-- Team alerts (`INTERNAL_NOTIFY_PHONES`) for aborts go out only in `live` mode, at most once per reason per 6 hours.
+- Team alerts (`INTERNAL_NOTIFY_PHONES`) for aborts go out only in `live` mode, at most once per reason per 6 hours. The unresolved-order message is also told at most once per 6 hours for the same set of order lines (a new line is told at once).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

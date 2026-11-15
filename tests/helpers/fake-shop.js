@@ -102,11 +102,11 @@ export function makeShop({ products = [], variations = {}, orders = [], control 
   };
 }
 
-export function makeService(shop, { config = {}, notify = null, matchingWatch = null, now = NOW, productMap = loadProductMap('woo_product_name,highdelivery_product_name\n') } = {}) {
+export function makeService(shop, { config = {}, notify = null, alert = null, matchingWatch = null, now = NOW, productMap = loadProductMap('woo_product_name,highdelivery_product_name\n') } = {}) {
   const linkIndex = new LinkIndex({ wooClient: shop.wooClient });
   return new StockSyncService({
     wooClient: shop.wooClient, hdClient: shop.hdClient, linkIndex, syncControl: new SyncControl({ wooClient: shop.wooClient }),
-    productMap, matchingWatch, notify, config: { ...STOCK_CONFIG, ...config }, logger: quietLogger, now: () => now, sleepImpl: async () => {}
+    productMap, matchingWatch, notify, alert, config: { ...STOCK_CONFIG, ...config }, logger: quietLogger, now: () => now, sleepImpl: async () => {}
   });
 }
 

@@ -5,7 +5,7 @@ import { warehouseQuantity } from './services/hd-product-match.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 
-export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, hdClient = null, stockSyncService = null, durableState = null, logger = console, maxBodyBytes = MAX_BODY_BYTES }) {
+export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, hdClient = null, stockSyncService = null, durableState = null, alerts = null, logger = console, maxBodyBytes = MAX_BODY_BYTES }) {
   // The hourly task must never run twice at once (two runs could message the same customer twice).
   let followupsRunning = false;
 
@@ -285,6 +285,10 @@ export function createApp({ config, confirmationService, store, stockAlertServic
           const { result, hdStatus, followupsError } = await runHourlySteps();
           if (followupsError) {
             healthTracker?.recordRun({ ok: false, error: String(followupsError?.message || followupsError).slice(0, 120), hdStatus });
+            // Once per 6 hours while it keeps failing (the alert path deduplicates by key); never blocks the answer.
+            Promise.resolve()
+              .then(() => alerts?.alert({ key: 'hourly-followups-failed', level: 'critical', text: "Rhymat: la tache horaire (relances WhatsApp) a echoue. Voir Backend health dans l'app." }))
+              .catch(() => {});
             return sendJson(res, 500, { ok: false, error: 'Follow-ups failed', hdStatus });
           }
           // The follow-ups are recorded now, so they show in the health page even if the process dies mid-sync.

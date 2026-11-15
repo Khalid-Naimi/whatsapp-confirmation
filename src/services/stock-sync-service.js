@@ -407,7 +407,9 @@ class SyncAbort extends Error {
 // ---------------------------------------------------------------------------------------------------------------
 
 export class StockSyncService {
-  constructor({ wooClient, hdClient, linkIndex, syncControl, productMap, matchingWatch = null, notify = null, config, logger = console, now = () => new Date(), sleepImpl = sleep }) {
+  // `alert` (services/alerts.js alert({ key, text, windowMs })) is the one team alert path; without it the plain
+  // `notify(text)` is used as before.
+  constructor({ wooClient, hdClient, linkIndex, syncControl, productMap, matchingWatch = null, notify = null, alert = null, config, logger = console, now = () => new Date(), sleepImpl = sleep }) {
     this.wooClient = wooClient;
     this.hdClient = hdClient;
     this.linkIndex = linkIndex;
@@ -415,11 +417,14 @@ export class StockSyncService {
     this.productMap = productMap;
     this.matchingWatch = matchingWatch;
     this.notify = notify;
+    this.alert = alert;
     this.config = config;
     this.logger = logger;
     this.now = now;
     this.sleep = sleepImpl;
     this.running = false;
+    // The promise of the run in progress (null when idle), so a shutdown can wait for it.
+    this.runPromise = null;
     this.last = null; // { summary, plan, unlinked, mode, approvable } of the last run since this process started
     this.lastMode = null;
   }
@@ -435,11 +440,24 @@ export class StockSyncService {
       return { skipped: 'off', mode: { env: 'off', paused: null, effective: 'off', controlProblem: '' } };
     }
     this.running = true;
+    const promise = this.execute({ dryRun, approveHash });
+    this.runPromise = promise.catch(() => {});
     try {
-      return await this.execute({ dryRun, approveHash });
+      return await promise;
     } finally {
       this.running = false;
+      this.runPromise = null;
     }
+  }
+
+  // One team message through the alert path when there is one (deduplicated by key), else straight through notify.
+  // -> how many got it (0 when deduplicated).
+  async teamAlert({ key, text, windowMs }) {
+    if (this.alert) {
+      const outcome = await this.alert({ key, text, windowMs });
+      return outcome?.delivered ? Math.max(1, outcome.sent || 0) : 0;
+    }
+    return this.notify(text);
   }
 
   async execute({ dryRun, approveHash }) {
@@ -848,7 +866,7 @@ export class StockSyncService {
   // Only a live setup tells the team; a dry run week must stay quiet. Same reason again within 6 hours stays silent.
   async alertAbort(outcome, state) {
     const previous = state.last_abort_alert;
-    if (!outcome.aborted || this.config.mode !== 'live' || !this.notify) {
+    if (!outcome.aborted || this.config.mode !== 'live' || (!this.notify && !this.alert)) {
       return previous;
     }
     const recent = previous.reason === outcome.aborted && outcome.at.getTime() - Date.parse(previous.at) < ABORT_ALERT_GAP_MS;
@@ -857,22 +875,24 @@ export class StockSyncService {
     }
     let sent = 0;
     try {
-      sent = await this.notify(`Rhymat: synchro du stock arretee (${outcome.abortDetail || outcome.aborted}). ${outcome.written.length ? `${outcome.written.length} produits deja ecrits. ` : 'Rien n\'a ete ecrit. '}Voir Backend health dans l'app.`);
+      sent = await this.teamAlert({ key: `stock-sync-abort:${outcome.aborted}`, windowMs: ABORT_ALERT_GAP_MS, text: `Rhymat: synchro du stock arretee (${outcome.abortDetail || outcome.aborted}). ${outcome.written.length ? `${outcome.written.length} produits deja ecrits. ` : 'Rien n\'a ete ecrit. '}Voir Backend health dans l'app.` });
     } catch (error) {
       this.logger.warn(`[stock-sync] abort alert failed: ${shortReason(error)}`);
     }
     return sent ? { reason: outcome.aborted, at: outcome.at.toISOString() } : previous;
   }
 
-  // One team message per live run while open orders cannot be matched: their products are not being synced.
+  // A team message while open orders cannot be matched: their products are not being synced. Through the alert path
+  // the same set of lines is told once per 6 hours (not every hourly run); a new line is told at once.
   async alertUnresolved(outcome) {
-    if (outcome.unresolved.length === 0 || this.config.mode !== 'live' || !this.notify) {
+    if (outcome.unresolved.length === 0 || this.config.mode !== 'live' || (!this.notify && !this.alert)) {
       return;
     }
     const [first] = outcome.unresolved;
     const more = outcome.unresolved.length > 1 ? ` (+${outcome.unresolved.length - 1} autres lignes)` : '';
+    const key = `stock-sync-unresolved:${createHash('sha256').update(outcome.unresolved.map((line) => line.text).sort().join('\n')).digest('hex').slice(0, 16)}`;
     try {
-      await this.notify(`Rhymat: synchro du stock en pause pour un produit: ${shortReason(first.text)}${more}. Corriger le lien dans Matching ou fermer la commande.`);
+      await this.teamAlert({ key, text: `Rhymat: synchro du stock en pause pour un produit: ${shortReason(first.text)}${more}. Corriger le lien dans Matching ou fermer la commande.` });
     } catch (error) {
       this.logger.warn(`[stock-sync] unresolved-order alert failed: ${shortReason(error)}`);
     }

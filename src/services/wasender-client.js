@@ -21,20 +21,54 @@ export class WasenderClient {
     this.timeoutMs = timeoutMs;
     this.now = nowImpl;
     this.sleep = sleepImpl;
-    this.sendChain = Promise.resolve();
     this.nextAvailableAt = 0;
+    // One send at a time (the account is rate limited). Two lanes: customer messages first, routine team notices
+    // (priority 'low') only when no customer message is waiting, so a burst of alerts never delays a customer.
+    this.lanes = { normal: [], low: [] };
+    this.pumping = false;
   }
 
-  async sendMessage({ to, message }) {
-    const run = this.sendChain.then(() => this.sendMessageWithRetries({ to, message }));
-    this.sendChain = run.catch(() => {});
-    return run;
+  async sendMessage({ to, message, priority = 'normal' }) {
+    return this.enqueue(() => this.sendMessageWithRetries({ to, message }), priority);
   }
 
   async sendPoll({ to, question, options }) {
-    const run = this.sendChain.then(() => this.sendMessageWithRetries({ to, poll: { question, options, multiSelect: false } }));
-    this.sendChain = run.catch(() => {});
-    return run;
+    return this.enqueue(() => this.sendMessageWithRetries({ to, poll: { question, options, multiSelect: false } }), 'normal');
+  }
+
+  // Number of sends waiting per lane (for tests and logs).
+  queued() {
+    return { normal: this.lanes.normal.length, low: this.lanes.low.length };
+  }
+
+  enqueue(job, priority) {
+    const lane = priority === 'low' ? 'low' : 'normal';
+    return new Promise((resolve, reject) => {
+      this.lanes[lane].push({ job, resolve, reject });
+      this.pump();
+    });
+  }
+
+  async pump() {
+    if (this.pumping) {
+      return;
+    }
+    this.pumping = true;
+    try {
+      for (;;) {
+        const next = this.lanes.normal.shift() || this.lanes.low.shift();
+        if (!next) {
+          return;
+        }
+        try {
+          next.resolve(await next.job());
+        } catch (error) {
+          next.reject(error);
+        }
+      }
+    } finally {
+      this.pumping = false;
+    }
   }
 
   async sendMessageWithRetries({ to, message, poll }) {
