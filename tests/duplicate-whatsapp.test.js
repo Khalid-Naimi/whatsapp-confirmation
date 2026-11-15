@@ -131,14 +131,18 @@ test('hourly: an unchanged order still gets its reminder (the re-read does not b
   assert.equal(sends.length, 1);
 });
 
-test('hourly: a passing WooCommerce error on the order list is retried instead of skipping the hour', async () => {
+// The WooCommerce client retries GETs itself (no answer, 429, 5xx); the hourly run no longer adds a second layer of
+// retries on top, so an error that is still there after the client's retries fails this hour (the next hour runs).
+test('hourly: an order list error left after the client retries fails the hour, without a second retry layer', async () => {
   const sentAt = new Date(Date.now() - 25 * HOUR).toISOString();
   const order = baseOrder(13, { meta_data: meta({ rhymat_whatsapp_state: 'pending', rhymat_whatsapp_confirmation_sent_at: sentAt, rhymat_whatsapp_reminder_count: 0 }) });
   const { service, woo, sends } = makeContext({ orders: [order] });
   woo.listFailures = 1;
+  await assert.rejects(service.runOrderFollowups(), /503/u);
+  assert.equal(woo.listFailures, 0);
+  assert.equal(sends.length, 0);
   const summary = await service.runOrderFollowups();
   assert.equal(summary.remindersSent, 1);
-  assert.equal(sends.length, 1);
 });
 
 test('the first confirmation is never sent by both the 30-second timer and the hourly backfill', async () => {
@@ -384,4 +388,11 @@ test('withTransientRetry: only idempotent work is retried; a note or a create ge
   let notes = 0;
   await assert.rejects(service.withTransientRetry(async () => { notes += 1; throw busy(); }, 'an order note'), /503/u);
   assert.equal(notes, 1);
+});
+
+test('withTransientRetry: work the WooCommerce client already retries gets one attempt here', async () => {
+  const { service } = makeContext();
+  let reads = 0;
+  await assert.rejects(service.withTransientRetry(async () => { reads += 1; throw new Error('WooCommerce request failed with 503: {}'); }, 'a GET', { idempotent: true, clientRetries: true }), /503/u);
+  assert.equal(reads, 1);
 });
