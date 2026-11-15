@@ -104,10 +104,10 @@ export const OUTBOUND_SEND = machine('outbound_send', 'rhymat_whatsapp_<send>_st
 export const HD_SEND = machine('hd_send', 'rhymat_hd_api_state', {
   '': ['sending'],
   failed: ['sending'],
-  sending: ['sent', 'failed', 'unknown', ''],
+  sending: ['sent', 'failed', 'unknown'],
   sent: [],
   unknown: []
-}, 'sending = reserved before the warehouse/trust calls and the parcel creation; "" = released when nothing was sent (held, no match); unknown = no answer, the parcel may exist');
+}, 'sending = written right before the parcel creation (the claim rhymat_hd_api_claim is taken earlier, before the warehouse/trust checks); unknown = no answer, the parcel may exist');
 
 // sending, sent and unknown block any further automatic send.
 export const HD_BLOCKING_STATES = Object.freeze([HD_STATE.sending, HD_STATE.sent, HD_STATE.unknown]);

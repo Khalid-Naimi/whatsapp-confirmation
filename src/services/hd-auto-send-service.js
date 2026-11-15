@@ -214,14 +214,14 @@ export class HdAutoSendService {
       return { status: 'skipped', reason: 'invalid_order', detail: reason };
     }
 
-    // Reserve first, before the warehouse and trust calls: if we cannot record that we are sending, we must not send
-    // (a retry could create a second parcel). The reservation is also a claim another instance can see
-    // (services/claim.js): only the instance whose claim is still there after a short wait goes on.
+    // Claim first, before the warehouse and trust calls (services/claim.js): another instance that sees the claim, or
+    // loses the race for it, stops here. The claim alone does not touch the HighDelivery state: "sending" is only
+    // written right before the parcel creation, so a stuck "sending" always means a creation may have been attempted.
     let claimed;
     try {
       claimed = await claim(this.wooClient, orderId, HD_META.claim, {
         ttlMs: STUCK_SENDING_MS,
-        state: HD_STATE.sending,
+        state: 'checking',
         settleMs: this.claimSettleMs,
         sleep: this.sleep,
         instanceId: this.instanceId,
@@ -230,12 +230,7 @@ export class HdAutoSendService {
         check: (fresh) => {
           const state = metaValue(fresh, HD_META.state);
           return BLOCKING_STATES.has(state) ? `already_${state}` : '';
-        },
-        extraMeta: [
-          { key: HD_META.state, value: assertTransition(HD_SEND, previousState, HD_STATE.sending) },
-          { key: HD_META.error, value: '' },
-          { key: HD_META.sendingAt, value: new Date().toISOString() }
-        ]
+        }
       });
     } catch (error) {
       this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=reservation_failed ${error.message}`);
@@ -246,11 +241,8 @@ export class HdAutoSendService {
       this.logger.log(`[hd-auto-send] skipped orderId=${orderId} reason=${reason}`);
       return { status: 'skipped', reason };
     }
-    // Nothing was sent: the reservation and the claim are taken back, so the order can be sent later (by anyone).
-    const unreserve = () => this.safe(() => claimed.release([
-      { key: HD_META.state, value: assertTransition(HD_SEND, HD_STATE.sending, HD_STATE.none) },
-      { key: HD_META.sendingAt, value: '' }
-    ]));
+    // Nothing was sent: the claim is taken back, so the order can be sent later (by anyone).
+    const unreserve = () => this.releaseClaim(orderId, claimed);
 
     // Which warehouse products and quantities does this order take? Without a match the platform refuses the parcel.
     const parcel = { ...built.parcel };
@@ -288,6 +280,20 @@ export class HdAutoSendService {
       await unreserve();
       await this.note(orderId, `Auto-send to HighDelivery held for review: ${why} (${trust.totalOrders} parcels, ${trust.deliveredOrders} delivered, ${trust.failedOrders} failed). The order stays on-hold; decide from the desktop app.`);
       return { status: 'held', reason: 'low_trust', trust };
+    }
+
+    // Reserve right before the creation: if we cannot record that we are sending, we must not send (a retry could
+    // create a second parcel).
+    try {
+      await this.wooClient.updateOrderMeta(orderId, [
+        { key: HD_META.state, value: assertTransition(HD_SEND, previousState, HD_STATE.sending) },
+        { key: HD_META.error, value: '' },
+        { key: HD_META.sendingAt, value: new Date().toISOString() }
+      ]);
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=reservation_failed ${error.message}`);
+      await unreserve();
+      return { status: 'skipped', reason: 'reservation_failed' };
     }
 
     let result;
@@ -504,6 +510,20 @@ export class HdAutoSendService {
       }
     }
     return sentTo;
+  }
+
+  // Releases the claim when nothing was sent. A failed release is logged and tried once more; if it still fails the
+  // claim simply expires (STUCK_SENDING_MS) and blocks only other instances until then. Never throws.
+  async releaseClaim(orderId, claimed) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await claimed.release();
+        return true;
+      } catch (error) {
+        this.logger.warn(`[hd-auto-send] could not release the claim orderId=${orderId} attempt=${attempt}: ${error.message}`);
+      }
+    }
+    return false;
   }
 
   async note(orderId, text) {

@@ -42,7 +42,7 @@ test('every meta key is listed once with a known owner, and the old module expor
 
 // The full table: every pair (from, to) of the HighDelivery send states, allowed or not.
 test('HighDelivery send state transitions follow the table', () => {
-  const allowed = new Set(['->sending', 'failed->sending', 'sending->sent', 'sending->failed', 'sending->unknown', 'sending->']);
+  const allowed = new Set(['->sending', 'failed->sending', 'sending->sent', 'sending->failed', 'sending->unknown']);
   for (const from of HD_SEND.states) {
     for (const to of HD_SEND.states) {
       assert.equal(canTransition(HD_SEND, from, to), allowed.has(`${from}->${to}`), `${from} -> ${to}`);

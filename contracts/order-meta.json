@@ -755,13 +755,12 @@
         "sending": [
           "sent",
           "failed",
-          "unknown",
-          ""
+          "unknown"
         ],
         "sent": [],
         "unknown": []
       },
-      "notes": "sending = reserved before the warehouse/trust calls and the parcel creation; \"\" = released when nothing was sent (held, no match); unknown = no answer, the parcel may exist"
+      "notes": "sending = written right before the parcel creation (the claim rhymat_hd_api_claim is taken earlier, before the warehouse/trust checks); unknown = no answer, the parcel may exist"
     }
   },
   "hdBlockingStates": [
