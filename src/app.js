@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { secretMatchesAny, verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 import { buildHealthDetails, buildReadiness } from './services/health-tracker.js';
 import { warehouseQuantity } from './services/hd-product-match.js';
-import { redact } from './log.js';
+import { log, redact } from './log.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -35,7 +35,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
     try {
       await durableState?.ensureLoaded?.();
     } catch (error) {
-      logger.warn(`[task][order-followups] durable state not loaded: ${error.message}`);
+      logger.warn(`[task][order-followups] durable state not loaded: ${redact(error.message)}`);
     }
     try {
       result = await confirmationService.runOrderFollowups();
@@ -44,7 +44,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       );
     } catch (error) {
       followupsError = error;
-      logger.error(`[task][order-followups] follow-ups failed: ${error.message}`);
+      logger.error(`[task][order-followups] follow-ups failed: ${redact(error.message)}`);
     }
     // The same hourly call also copies HighDelivery parcel statuses to the orders (never breaks the follow-ups).
     let hdStatus = null;
@@ -52,7 +52,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       try {
         hdStatus = await hdStatusSyncService.run();
       } catch (error) {
-        logger.warn(`[task][order-followups] hd status sync failed: ${error.message}`);
+        logger.warn(`[task][order-followups] hd status sync failed: ${redact(error.message)}`);
       }
     }
     // Stock alerts held back by the quiet hours go out now.
@@ -60,7 +60,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       try {
         await stockAlertService.processQueue();
       } catch (error) {
-        logger.warn(`[task][order-followups] stock alert queue failed: ${error.message}`);
+        logger.warn(`[task][order-followups] stock alert queue failed: ${redact(error.message)}`);
       }
     }
     return { result, hdStatus, followupsError };
@@ -76,7 +76,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       const items = rows.map((row) => ({ id: row.id, name: String(row.name ?? ''), quantity: warehouseQuantity(row) }));
       return sendCorsJson(res, 200, { ok: true, fetchedAt: new Date(hdClient.warehouseProductsAt || Date.now()).toISOString(), items });
     } catch (error) {
-      logger.warn(`[api][matching] HighDelivery items unavailable: ${error.message}`);
+      logger.warn(`[api][matching] HighDelivery items unavailable: ${redact(error.message)}`);
       return sendCorsJson(res, 502, { ok: false, error: 'hd_unavailable' });
     }
   }
@@ -86,11 +86,11 @@ export function createApp({ config, confirmationService, store, stockAlertServic
     Promise.resolve()
       .then(() => stockSyncService.run())
       .then((stockSync) => stockSync?.summary || null, (error) => {
-        logger.warn(`[task][order-followups] stock sync failed: ${error.message}`);
+        logger.warn(`[task][order-followups] stock sync failed: ${redact(error.message)}`);
         return null;
       })
       .then((stockSync) => healthTracker?.attachToRun(runAt, { stockSync }))
-      .catch((error) => logger.warn(`[task][order-followups] could not record the stock sync: ${error.message}`));
+      .catch((error) => logger.warn(`[task][order-followups] could not record the stock sync: ${redact(error.message)}`));
   }
 
   return async function handler(req, res) {
@@ -233,7 +233,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         } catch (error) {
           // A valid delivery is answered 200 even when processing breaks: WooCommerce disables a webhook after repeated
           // failures, and the hourly follow-ups pick the order up again from WooCommerce itself.
-          logger.error(`[webhook][woocommerce] processing failed orderId=${String(body.id || '')}: ${error.message}`);
+          logger.error(`[webhook][woocommerce] processing failed orderId=${String(body.id || '')}: ${redact(error.message)}`);
           return sendJson(res, 200, { ok: false, reason: 'processing_failed' });
         }
         logger.log(
@@ -357,7 +357,8 @@ export function createApp({ config, confirmationService, store, stockAlertServic
 
       return sendJson(res, 404, { ok: false, error: 'Not found' });
     } catch (error) {
-      logger.error(error);
+      // One redacted JSON line instead of the raw error object (its text can carry a phone or a provider reply).
+      log('error', 'http_handler_failed', { method: req.method, path: String(req.url || '').split('?')[0], message: String(error?.message || error).slice(0, 300) }, { logger });
       return sendJson(res, 500, { ok: false, error: 'Internal server error' });
     }
   };

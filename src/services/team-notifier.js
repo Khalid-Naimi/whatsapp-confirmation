@@ -1,3 +1,4 @@
+import { redact } from '../log.js';
 import { maskPhone } from '../utils/format.js';
 
 // One WhatsApp message to every team phone (not subject to the customers' quiet hours).
@@ -9,7 +10,7 @@ export function createTeamNotifier({ wasenderClient, phones, alerts = null, logg
       try {
         return await alerts.notify(message);
       } catch (error) {
-        logger.warn(`[team-alert] could not notify the team: ${error.message}`);
+        logger.warn(`[team-alert] could not notify the team: ${redact(error.message)}`);
         return 0;
       }
     };
@@ -21,7 +22,7 @@ export function createTeamNotifier({ wasenderClient, phones, alerts = null, logg
         await wasenderClient.sendMessage({ to: phone, message });
         sent += 1;
       } catch (error) {
-        logger.warn(`[team-alert] could not notify ${maskPhone(phone)}: ${error.message}`);
+        logger.warn(`[team-alert] could not notify ${maskPhone(phone)}: ${redact(error.message)}`);
       }
     }
     return sent;

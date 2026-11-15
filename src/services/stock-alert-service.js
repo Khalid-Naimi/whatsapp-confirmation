@@ -1,4 +1,5 @@
 import { interpolateTemplate, validatePhone } from '../utils/format.js';
+import { log, redact } from '../log.js';
 
 const DEFAULT_TEMPLATE =
   'Salut ! \u{1F525} La taille {{size}} de {{productName}} est de retour en stock.\nFonce avant qu\u2019elle ne parte : {{productUrl}}\n\nPour ne plus recevoir nos messages, r\u00e9ponds "STOP".';
@@ -103,7 +104,7 @@ export class StockAlertService {
     }
 
     if (accepted.length && this.autoProcess) {
-      this.processQueue().catch((error) => this.logger.error(error));
+      this.processQueue().catch((error) => log('error', 'stock_alert_queue_failed', { message: String(error?.message || error).slice(0, 300) }, { logger: this.logger }));
     }
 
     return { accepted, skipped };
@@ -166,7 +167,7 @@ export class StockAlertService {
         // alert over again on its next retry, and a failed alert is then queued once more.
         this.setStatus(next.id, { status: 'failed', attempts, lastError: String(error?.message || error).slice(0, 300) });
         await this.saveDurably(next.id, 'failed');
-        this.logger.warn(`[stock-alert] send failed id=${next.id} attempts=${attempts} error=${error?.message}`);
+        this.logger.warn(`[stock-alert] send failed id=${next.id} attempts=${attempts} error=${redact(error?.message)}`);
       }
     }
   }
@@ -178,7 +179,7 @@ export class StockAlertService {
     try {
       await this.durableState.recordStockAlert(id, status);
     } catch (error) {
-      this.logger.warn(`[stock-alert] could not save the outcome of id=${id} durably: ${error.message}`);
+      this.logger.warn(`[stock-alert] could not save the outcome of id=${id} durably: ${redact(error.message)}`);
     }
   }
 

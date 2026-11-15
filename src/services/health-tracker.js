@@ -1,3 +1,4 @@
+import { redact } from '../log.js';
 import { isQuietHours } from '../utils/quiet-hours.js';
 
 const MAX_RUNS = 48;
@@ -37,7 +38,7 @@ export class HealthTracker {
     this.down.set(name, isOutage(error));
     entry.lastFailAt = this.now().toISOString();
     // Only a short plain reason: never a token, URL or customer detail.
-    entry.lastError = String(error?.message || error || 'error').replace(/https?:\/\/\S+/g, '').trim().slice(0, 120);
+    entry.lastError = redact(String(error?.message || error || 'error').replace(/https?:\/\/\S+/g, '')).trim().slice(0, 120);
   }
 
   // -> the time stamp of the new run, so a later result of that run can be attached to it.
