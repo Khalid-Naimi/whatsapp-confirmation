@@ -2,16 +2,19 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const EMPTY_DB = {
-  orders: [],
-  messages: [],
-  events: [],
-  contacts: []
-};
+// The file lives on the server's own disk, which Render wipes on every deploy or restart: it is a fast local cache and a
+// debug history, never the only copy of anything that must survive (see services/durable-state.js).
+export const STORE_LIMITS = Object.freeze({ events: 5000, messages: 5000, stockAlerts: 5000 });
+
+function emptyDb() {
+  return { orders: [], messages: [], events: [], contacts: [] };
+}
 
 export class JsonStore {
-  constructor(filePath) {
+  constructor(filePath, { logger = console, limits = STORE_LIMITS } = {}) {
     this.filePath = filePath;
+    this.logger = logger;
+    this.limits = { ...STORE_LIMITS, ...(limits || {}) };
     this.ensureFile();
   }
 
@@ -19,17 +22,74 @@ export class JsonStore {
     const dir = path.dirname(this.filePath);
     fs.mkdirSync(dir, { recursive: true });
     if (!fs.existsSync(this.filePath)) {
-      fs.writeFileSync(this.filePath, JSON.stringify(EMPTY_DB, null, 2));
+      this.write(emptyDb());
     }
   }
 
+  // A missing or empty file is an empty store. A file that cannot be parsed is moved aside (never deleted) and the
+  // service starts empty, so one bad write can never stop the webhooks.
   read() {
     this.ensureFile();
-    return JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
+    let text = '';
+    try {
+      text = fs.readFileSync(this.filePath, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        return emptyDb();
+      }
+      throw error;
+    }
+    if (!text.trim()) {
+      return emptyDb();
+    }
+    let db;
+    try {
+      db = JSON.parse(text);
+    } catch {
+      db = null;
+    }
+    if (!db || typeof db !== 'object' || Array.isArray(db)) {
+      return this.quarantineCorruptFile();
+    }
+    for (const key of ['orders', 'messages', 'events', 'contacts']) {
+      if (!Array.isArray(db[key])) {
+        db[key] = [];
+      }
+    }
+    return db;
   }
 
+  quarantineCorruptFile() {
+    const aside = `${this.filePath}.corrupt-${new Date().toISOString().replace(/[:.]/gu, '-')}`;
+    try {
+      fs.renameSync(this.filePath, aside);
+      this.logger.error(`[store] the data file could not be read; it was moved to ${path.basename(aside)} and the service starts with an empty local cache`);
+    } catch (error) {
+      this.logger.error(`[store] the data file could not be read and could not be moved aside (${error.message}); starting with an empty local cache`);
+    }
+    const db = emptyDb();
+    this.write(db);
+    return db;
+  }
+
+  // Atomic: the new content goes to a temporary file in the same folder and replaces the old file in one rename, so a
+  // crash mid-write leaves either the old or the new file, never half of one. The history lists are capped.
   write(db) {
-    fs.writeFileSync(this.filePath, JSON.stringify(db, null, 2));
+    capList(db, 'events', this.limits.events);
+    capList(db, 'messages', this.limits.messages);
+    capList(db, 'stockAlerts', this.limits.stockAlerts);
+    const tmp = `${this.filePath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
+      fs.renameSync(tmp, this.filePath);
+    } catch (error) {
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        // nothing left to clean
+      }
+      throw error;
+    }
   }
 
   transaction(mutator) {
@@ -55,7 +115,8 @@ export class JsonStore {
         id: crypto.randomUUID(),
         source,
         eventKey,
-        payload,
+        // Only a small summary: the full webhook body (customer names, addresses, phones) is not kept on disk.
+        payload: summarizeEventPayload(payload),
         status,
         createdAt: new Date().toISOString()
       };
@@ -215,6 +276,28 @@ export class JsonStore {
   isPhoneOptedOut(phone) {
     return Boolean(this.getContact(phone)?.marketingStatus === 'opted_out');
   }
+}
+
+function capList(db, key, max) {
+  if (Array.isArray(db?.[key]) && Number.isFinite(max) && max > 0 && db[key].length > max) {
+    db[key] = db[key].slice(-max);
+  }
+}
+
+// Ids, status and the shape of a webhook body: enough to debug, nothing personal.
+export function summarizeEventPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const summary = {};
+  for (const key of ['id', 'status', 'event', 'eventKey', 'index', 'providerMessageId']) {
+    const value = payload[key];
+    if (['string', 'number', 'boolean'].includes(typeof value)) {
+      summary[key] = typeof value === 'string' ? value.slice(0, 120) : value;
+    }
+  }
+  summary.keys = Object.keys(payload).sort().slice(0, 30);
+  return summary;
 }
 
 function compareActiveSelfTestOrders(left, right) {
