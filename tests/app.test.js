@@ -5218,3 +5218,61 @@ test('a cancelled reply never triggers an auto-send', async () => {
   assert.equal(hdCalls.length, 0);
   assert.equal(context.store.getOrder('9106').confirmationState, 'cancelled');
 });
+
+// --- matching and stock sync routes ---
+
+const noLogs = { log() {}, warn() {}, error() {} };
+const CUSTOMER_KEYS = /"(billing|shipping|phone|email|address\w*)":/u;
+
+function createMatchingApp({ hdClient = null, stockSyncService = null, followupExtras = {} } = {}) {
+  const store = new JsonStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'matching-routes-')), 'db.json'));
+  const confirmationService = { async runOrderFollowups() { return { backfilled: 0 }; } };
+  return createApp({
+    config: { tasks: { secret: 'task-secret' } },
+    confirmationService,
+    store,
+    hdClient,
+    stockSyncService,
+    logger: noLogs,
+    ...followupExtras
+  });
+}
+const withSecret = { 'x-task-secret': 'task-secret' };
+
+test('the matching items route needs the task secret and lists id, name and quantity only', async () => {
+  const hdClient = {
+    warehouseProductsAt: Date.parse('2026-11-15T10:00:00Z'),
+    async listWarehouseProducts() {
+      return [{ id: 512, name: 'Zip up Hoodie Saumon XL', quantity_available: 2, owner_phone: '+212600000000' }, { id: 7, name: 'Cap', quantityAvailable: 4 }];
+    }
+  };
+  const app = createMatchingApp({ hdClient });
+  assert.equal((await dispatch(app, { method: 'GET', url: '/api/matching/hd-items' })).statusCode, 401);
+  assert.equal((await dispatch(app, { method: 'GET', url: '/api/matching/hd-items', headers: { 'x-task-secret': 'nope' } })).statusCode, 401);
+  const result = await dispatch(app, { method: 'GET', url: '/api/matching/hd-items', headers: withSecret });
+  assert.equal(result.statusCode, 200);
+  assert.deepEqual(result.body, {
+    ok: true,
+    fetchedAt: '2026-11-15T10:00:00.000Z',
+    items: [{ id: 512, name: 'Zip up Hoodie Saumon XL', quantity: 2 }, { id: 7, name: 'Cap', quantity: 4 }]
+  });
+  assert.doesNotMatch(JSON.stringify(result.body), CUSTOMER_KEYS);
+});
+
+test('the matching items route answers 502 when HighDelivery cannot be read and 503 when it is not set up', async () => {
+  const broken = createMatchingApp({ hdClient: { async listWarehouseProducts() { throw new HighDeliveryError('down', { status: 500 }); } } });
+  const failed = await dispatch(broken, { method: 'GET', url: '/api/matching/hd-items', headers: withSecret });
+  assert.deepEqual([failed.statusCode, failed.body], [502, { ok: false, error: 'hd_unavailable' }]);
+  const none = await dispatch(createMatchingApp(), { method: 'GET', url: '/api/matching/hd-items', headers: withSecret });
+  assert.equal(none.statusCode, 503);
+});
+
+test('the stock sync status route needs the task secret and passes the service answer through', async () => {
+  const stockSyncService = { async status() { return { mode: { env: 'dry_run', paused: false, effective: 'dry_run' }, running: false }; } };
+  const app = createMatchingApp({ stockSyncService });
+  assert.equal((await dispatch(app, { method: 'GET', url: '/api/stock-sync/status' })).statusCode, 401);
+  const result = await dispatch(app, { method: 'GET', url: '/api/stock-sync/status', headers: withSecret });
+  assert.deepEqual(result.body, { ok: true, mode: { env: 'dry_run', paused: false, effective: 'dry_run' }, running: false });
+  const off = await dispatch(createMatchingApp(), { method: 'GET', url: '/api/stock-sync/status', headers: withSecret });
+  assert.equal(off.statusCode, 503);
+});

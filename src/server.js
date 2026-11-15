@@ -127,6 +127,7 @@ const app = createApp({
   stockAlertService,
   hdStatusSyncService,
   healthTracker,
+  hdClient: hdAutoSend.hdClient,
   logger
 });
 

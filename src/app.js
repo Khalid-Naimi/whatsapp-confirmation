@@ -1,10 +1,27 @@
 import { createHash } from 'node:crypto';
 import { verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 import { buildHealthDetails } from './services/health-tracker.js';
+import { warehouseQuantity } from './services/hd-product-match.js';
 
-export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, logger = console }) {
+export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, hdClient = null, stockSyncService = null, logger = console }) {
   // The hourly task must never run twice at once (two runs could message the same customer twice).
   let followupsRunning = false;
+
+  // The HighDelivery items with their ids, so the desktop app links products to ids and not to names.
+  async function sendHdItems(res) {
+    if (!hdClient) {
+      return sendCorsJson(res, 503, { ok: false, error: 'HighDelivery is not enabled' });
+    }
+    try {
+      const rows = await hdClient.listWarehouseProducts();
+      const items = rows.map((row) => ({ id: row.id, name: String(row.name ?? ''), quantity: warehouseQuantity(row) }));
+      return sendCorsJson(res, 200, { ok: true, fetchedAt: new Date(hdClient.warehouseProductsAt || Date.now()).toISOString(), items });
+    } catch (error) {
+      logger.warn(`[api][matching] HighDelivery items unavailable: ${error.message}`);
+      return sendCorsJson(res, 502, { ok: false, error: 'hd_unavailable' });
+    }
+  }
+
   return async function handler(req, res) {
     try {
       const parsedUrl = new URL(req.url, 'http://localhost');
@@ -29,6 +46,17 @@ export function createApp({ config, confirmationService, store, stockAlertServic
             return sendCorsJson(res, 503, { ok: false, error: 'Health details are not enabled' });
           }
           return sendCorsJson(res, 200, { ok: true, ...buildHealthDetails({ store, tracker: healthTracker, config }) });
+        }
+
+        if (pathname === '/api/matching/hd-items') {
+          return sendHdItems(res);
+        }
+
+        if (pathname === '/api/stock-sync/status') {
+          if (!stockSyncService) {
+            return sendCorsJson(res, 503, { ok: false, error: 'Stock sync is not enabled' });
+          }
+          return sendCorsJson(res, 200, { ok: true, ...(await stockSyncService.status()) });
         }
 
         if (pathname === '/api/orders/summary') {

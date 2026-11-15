@@ -83,6 +83,10 @@ export function loadProductMapFile(filePath) {
   return loadProductMap(fs.readFileSync(filePath, 'utf8'));
 }
 
+export function warehouseQuantity(product) {
+  return Number(product?.quantity_available ?? product?.quantityAvailable ?? 0);
+}
+
 // Builds the warehouse items for a parcel from the Woo order lines.
 // Returns { ok, items: [{ productId, name, quantity }], problems: [...] }.
 // Any line that cannot be matched, or whose stock is too low, is named so the order can stay on-hold for a human.
@@ -119,7 +123,7 @@ export function resolveWarehouseItems(lineItems, productMap, warehouseProducts) 
 
   const items = [];
   for (const { product, quantity } of wanted.values()) {
-    const available = Number(product.quantity_available ?? product.quantityAvailable ?? 0);
+    const available = warehouseQuantity(product);
     if (available < quantity) {
       problems.push(`not enough "${product.name}" in the HighDelivery warehouse (${available} available, ${quantity} needed)`);
     }
