@@ -24,6 +24,7 @@ import {
   isConfirmationMessageKind,
   summarizeWasenderRequestStatus
 } from './confirmation/inbound/wasender-parser.js';
+import { optOutMethods } from './confirmation/opt-out.js';
 import {
   buildDecisionMetaUpdate,
   buildLogicalSendMetaUpdate,
@@ -513,92 +514,6 @@ export class ConfirmationService {
       `[feedback] route=feedback_unmatched senderPhone=${maskPhone(message.senderPhone)} senderRaw=${redactPhones(message.senderRaw)} recipient=${redactPhones(message.recipientRaw)} kind=${message.kind || 'unknown'} source=${feedbackMatch.source || 'unknown'} reason=${feedbackMatch.reason || 'no_match'} messageKey=${message.messageKey}`
     );
     return this.processFeedbackMatchResult(message, feedbackMatch);
-  }
-
-  async handleOptOut(message) {
-    const phone = message.senderPhone;
-    const now = new Date().toISOString();
-    const lastMessageText = message.textBody || message.captionText || '';
-
-    this.store.upsertContact({
-      phone,
-      marketingStatus: 'opted_out',
-      optedOutAt: now,
-      optOutSource: 'inbound_whatsapp',
-      lastMessageText,
-      lastMessageAt: message.timestamp || now
-    });
-
-    let savedDurably = false;
-    if (this.durableState) {
-      try {
-        savedDurably = await this.durableState.recordOptOut(phone, now);
-      } catch (error) {
-        this.logger.warn(`[opt-out] durable save failed phone=${maskPhone(phone)}: ${error.message}`);
-      }
-    }
-
-    await this.persistOptOutToLatestWooOrder({
-      phone,
-      replyText: lastMessageText,
-      optedOutAt: now,
-      messageKey: message.messageKey
-    });
-
-    if (!savedDurably && !this.wordpressClient?.isConfigured) {
-      this.logger.warn(
-        `[opt-out] Opt-out saved only locally for now (WooCommerce not reachable; retried on the next write). phone=${maskPhone(phone)} messageKey=${message.messageKey}`
-      );
-    }
-    if (this.wordpressClient?.isConfigured) {
-      this.wordpressClient
-        .optOutContact(phone, {
-          optOutSource: 'inbound_whatsapp',
-          lastMessageText,
-          providerMessageId: message.providerMessageId || null,
-          messageKey: message.messageKey
-        })
-        .catch((err) => {
-          this.logger.warn(`[opt-out] wordpress_sync_failed phone=${maskPhone(phone)} messageKey=${message.messageKey} error=${err.message}`);
-        });
-    }
-
-    this.logger.log(
-      `[opt-out] phone=${maskPhone(phone)} messageKey=${message.messageKey} source=inbound_whatsapp text=${JSON.stringify(lastMessageText)}`
-    );
-
-    return {
-      ok: true,
-      ignored: false,
-      duplicate: false,
-      failed: false,
-      route: 'opt_out',
-      eventStatus: 'opt_out'
-    };
-  }
-
-  async persistOptOutToLatestWooOrder({ phone, replyText, optedOutAt, messageKey }) {
-    try {
-      const orders = await this.listOrdersForStatuses(RECONCILIATION_STATUSES);
-      const matches = orders
-        .filter((order) => normalizeWooOrder(order, this.messages).phone === phone)
-        .sort(compareOrdersByRecency);
-
-      const latestOrder = matches[0];
-      if (!latestOrder) {
-        this.logger.warn(`[opt-out] no_matching_woo_order phone=${maskPhone(phone)} messageKey=${messageKey}`);
-        return;
-      }
-
-      const note = buildOptOutWooOrderNote({
-        replyText,
-        optedOutAt
-      });
-      await this.safeAddOrderNote(String(latestOrder.id), note);
-      this.logger.log(`[opt-out] woo_marker_saved phone=${maskPhone(phone)} orderId=${latestOrder.id} messageKey=${messageKey}`);
-    } catch (error) {
-      this.logger.warn(`[opt-out] woo_marker_failed phone=${maskPhone(phone)} messageKey=${messageKey} error=${error.message}`);
-    }
   }
 
   async routeConfirmationInboundMessage(message, options = {}, replyContext = null) {
@@ -1868,6 +1783,7 @@ export class ConfirmationService {
 Object.assign(ConfirmationService.prototype, reservedSendMethods);
 Object.assign(ConfirmationService.prototype, followupMethods);
 Object.assign(ConfirmationService.prototype, feedbackMethods);
+Object.assign(ConfirmationService.prototype, optOutMethods);
 
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -2023,17 +1939,6 @@ function isLocalOnlyApiStatus(status) {
 
 function hasDecisionMetaValue(value) {
   return value !== undefined && value !== null && value !== '';
-}
-
-function buildOptOutWooOrderNote({ replyText, optedOutAt }) {
-  return `RHYMAT_OPT_OUT=YES; source=whatsapp; reply=${sanitizeOptOutNoteValue(replyText)}; at=${sanitizeOptOutNoteValue(optedOutAt)}`;
-}
-
-function sanitizeOptOutNoteValue(value) {
-  return String(value || '')
-    .replace(/[;\r\n]+/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim();
 }
 
 function hashPayload(value) {
