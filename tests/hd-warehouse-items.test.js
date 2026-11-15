@@ -288,3 +288,25 @@ test('links shadow never delays the send: a link lookup that never answers chang
   assert.equal(result.status, 'sent');
   assert.deepEqual(created[0].items, [{ productId: 30, name: 'Military Cargo S', quantity: 1 }]);
 });
+
+// --- paging without a total ---
+
+const stockRows = (count, start = 1) => Array.from({ length: count }, (_, i) => ({ id: start + i, name: `Item ${start + i}`, quantity_available: 1 }));
+
+test('warehouse paging without a total keeps going until a short page', async () => {
+  const { client, calls } = makeClient([token(), ok({ products: stockRows(100) }), ok({ products: stockRows(100, 101) }), ok({ products: stockRows(7, 201) })]);
+  assert.equal((await client.listWarehouseProducts()).length, 207);
+  assert.equal(calls.filter((call) => call.url.includes('/warehouse/products')).length, 3);
+});
+
+test('warehouse paging with a total of 0 is treated like no total', async () => {
+  const { client } = makeClient([token(), ok({ products: stockRows(100), total: 0 }), ok({ products: stockRows(2, 101), total: 0 })]);
+  assert.equal((await client.listWarehouseProducts()).length, 102);
+});
+
+test('warehouse paging stops at the reported total, and a list that never ends is an error, not a silent cut', async () => {
+  const exact = makeClient([token(), ok({ products: stockRows(100), total: 100 })]);
+  assert.equal((await exact.client.listWarehouseProducts()).length, 100);
+  const endless = makeClient([token(), ...Array.from({ length: 20 }, () => ok({ products: stockRows(100) }))]);
+  await assert.rejects(endless.client.listWarehouseProducts(), /longer than 20 pages/u);
+});

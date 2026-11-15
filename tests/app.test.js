@@ -5354,3 +5354,11 @@ test('the hourly task still needs the secret and runs no stock sync without it',
   await tick();
   assert.equal(ran, false);
 });
+
+test('the stock sync task is POST-only: a GET is a plain 404 and runs nothing', async () => {
+  let ran = false;
+  const app = createMatchingApp({ stockSyncService: { async run() { ran = true; return {}; } } });
+  const result = await dispatch(app, { method: 'GET', url: '/tasks/stock-sync?dryRun=1', headers: withSecret });
+  assert.equal(result.statusCode, 404);
+  assert.equal(ran, false);
+});

@@ -185,17 +185,20 @@ export class HighDeliveryClient {
   async listWarehouseProducts() {
     if (!this.warehouseProducts || this.now() - this.warehouseProductsAt > 60 * 1000) {
       const all = [];
-      for (let page = 1; page <= 20; page += 1) {
+      let complete = false;
+      for (let page = 1; page <= 20 && !complete; page += 1) {
         const payload = await this.request('GET', `/client/warehouse/products?page=${page}&limit=100`);
         const rows = payload?.data?.products;
         if (!Array.isArray(rows)) {
           throw new HighDeliveryError('HighDelivery warehouse product list is missing.');
         }
         all.push(...rows);
-        const total = Number(payload?.data?.total ?? 0);
-        if (rows.length === 0 || all.length >= total) {
-          break;
-        }
+        // Without a usable total the only sign of the last page is a short one: never stop at the first page by guessing.
+        const total = Number(payload?.data?.total);
+        complete = rows.length === 0 || (Number.isFinite(total) && total > 0 ? all.length >= total : rows.length < 100);
+      }
+      if (!complete) {
+        throw new HighDeliveryError('HighDelivery warehouse product list is longer than 20 pages.');
       }
       this.warehouseProducts = all;
       this.warehouseProductsAt = this.now();
