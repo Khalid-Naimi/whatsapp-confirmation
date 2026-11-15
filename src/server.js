@@ -90,7 +90,10 @@ if (config.highDelivery.autoSendEnabled) {
   logger.log(`HighDelivery auto-send is ON (${hdAutoSend.hdClient.isConfigured() ? 'credentials set' : 'WARNING: HD_API_PHONE / HD_API_PASSWORD missing, orders will stay on-hold'}).`);
 }
 
-for (const [name, value] of [['WOOCOMMERCE_WEBHOOK_SECRET', config.woo.webhookSecret], ['WASENDER_WEBHOOK_SECRET', config.wasender.webhookSecret], ['TASK_SECRET', config.tasks.secret]]) {
+const secretChecks = [['WOOCOMMERCE_WEBHOOK_SECRET', config.woo.webhookSecret], ['WASENDER_WEBHOOK_SECRET', config.wasender.webhookSecret], ['TASK_SECRET', config.tasks.secret]];
+// Only whether each secret is set, never its value.
+logger.log(`Secrets: ${secretChecks.map(([name, value]) => `${name}=${value ? 'set' : 'missing'}`).join(' ')}`);
+for (const [name, value] of secretChecks) {
   if (!value) {
     logger.warn(`WARNING: ${name} is not set; the endpoint it protects refuses every request (503) until it is set.`);
   }

@@ -1750,7 +1750,21 @@ export class ConfirmationService {
       }
       const workflow = getWorkflowMeta(order);
       const updates = [];
-      for (const logicalKey of stale) {
+      // A reservation whose send is known to have failed cleanly is simply cleared: the message is sent again later.
+      const cleanFailures = stale.filter((logicalKey) => {
+        const meta = getOutboundReservationMeta(order, logicalKey);
+        return meta.failedFor && meta.failedFor === meta.reservedAt;
+      });
+      for (const logicalKey of cleanFailures) {
+        updates.push(...buildLogicalSendMetaUpdate(order, logicalKey, { state: '', reservedAt: '' }));
+      }
+      const unanswered = stale.filter((logicalKey) => !cleanFailures.includes(logicalKey));
+      if (!unanswered.length) {
+        const cleared = await this.wooClient.updateOrderMeta(orderId, mergeMetaUpdates(updates));
+        this.logger.warn(`[task][order-followups] failed_send_cleared orderId=${orderId} kinds=${cleanFailures.map((key) => key.replace('customer:', '')).join(', ')}`);
+        return cleared && typeof cleared === 'object' && Array.isArray(cleared.meta_data) ? cleared : order;
+      }
+      for (const logicalKey of unanswered) {
         const meta = getOutboundReservationMeta(order, logicalKey);
         const at = meta.reservedAt;
         updates.push(...buildLogicalSendMetaUpdate(order, logicalKey, {
@@ -1770,12 +1784,12 @@ export class ConfirmationService {
         }
       }
       const updated = await this.wooClient.updateOrderMeta(orderId, mergeMetaUpdates(updates));
-      const kinds = stale.map((key) => key.replace('customer:', '')).join(', ');
+      const kinds = unanswered.map((key) => key.replace('customer:', '')).join(', ');
       this.logger.warn(`[task][order-followups] stale_send_closed orderId=${orderId} kinds=${kinds}`);
-      await this.safeAddOrderNote(orderId, `WhatsApp ${kinds}: no answer from the WhatsApp provider for more than 2 hours. Counted as sent (not sent again); check the conversation if needed.`);
+      await this.safeAddOrderNote(orderId, `WhatsApp ${kinds}: no answer from the WhatsApp provider for more than 2 hours, so it may NOT have been sent. It is not sent again automatically; check the conversation.`);
       if (this.notifyTeam) {
         try {
-          await this.notifyTeam(`ATTENTION: message WhatsApp sans reponse du fournisseur (commande ${orderId}: ${kinds}). Compte comme envoye, pas renvoye. Verifier la conversation si besoin.`);
+          await this.notifyTeam(`ATTENTION: message WhatsApp peut-etre PAS envoye (pas de reponse du fournisseur), commande ${orderId}: ${kinds}. Pas renvoye automatiquement. Verifier la conversation.`);
         } catch (error) {
           this.logger.warn(`[task][order-followups] team alert failed orderId=${orderId}: ${error.message}`);
         }
@@ -1798,10 +1812,17 @@ export class ConfirmationService {
       || decisionMeta.decision !== 'confirmed'
       || getHdAutoSendState(order)
       || readOrderMeta(order, HD_RETRY_META)
+      || HD_PARCEL_TRACE_META.some((key) => readOrderMeta(order, key))
       || Number(decisionMeta.wooSyncAttempts || 0) < 2
       || Number.isNaN(decidedMs)
       || now.getTime() - decidedMs > HD_RETRY_MAX_AGE_MS
       || !wooStatusMatchesTarget(order.status, this.wooStatuses.confirmed)) {
+      return false;
+    }
+    // Any order note about HighDelivery (a held or skipped auto-send, a parcel made by hand) means a human or an
+    // earlier run already dealt with it. Notes that cannot be read count as "maybe": no retry.
+    if (await this.hasHighDeliveryNote(orderId)) {
+      this.logger.log(`[hd-auto-send] retry skipped orderId=${orderId} reason=highdelivery_note_or_unreadable`);
       return false;
     }
     try {
@@ -1813,6 +1834,22 @@ export class ConfirmationService {
     this.logger.log(`[hd-auto-send] retrying an auto-send that never ran orderId=${orderId}`);
     this.scheduleHdAutoSend({ ...normalizeWooOrder(order, this.messages), rawOrder: order });
     return true;
+  }
+
+  async hasHighDeliveryNote(orderId) {
+    if (typeof this.wooClient.request !== 'function') {
+      return true;
+    }
+    try {
+      const notes = await this.wooClient.request(`/wp-json/wc/v3/orders/${encodeURIComponent(orderId)}/notes`, { method: 'GET' });
+      if (!Array.isArray(notes)) {
+        return true;
+      }
+      return notes.some((note) => /high ?delivery/iu.test(String(note?.note || '')));
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] could not read the notes orderId=${orderId}: ${error.message}`);
+      return true;
+    }
   }
 
   pruneRecentInboundMessageKeys() {
@@ -1881,16 +1918,24 @@ export class ConfirmationService {
         this.logger.warn(`[outbound] ambiguous_send_timeout orderId=${orderId} logicalKey=${logicalKey}`);
         return { ok: false, duplicate: true, ambiguous: true, orderPayload };
       }
+      // A clean refusal: nothing went out. The reservation is cleared, and the failure is also recorded on its own
+      // (the reservation time it belongs to), so a reservation left behind is never mistaken for a sent message.
       try {
         await this.wooClient.updateOrderMeta(
           orderId,
           buildLogicalSendMetaUpdate(reservationOrder, logicalKey, {
             state: '',
-            reservedAt: ''
+            reservedAt: '',
+            failedFor: nowIso
           })
         );
       } catch (clearError) {
         this.logger.warn(`[outbound] unable to clear failed reservation orderId=${orderId} logicalKey=${logicalKey} error=${clearError.message}`);
+        try {
+          await this.wooClient.updateOrderMeta(orderId, buildLogicalSendMetaUpdate(reservationOrder, logicalKey, { failedFor: nowIso }));
+        } catch (markError) {
+          this.logger.warn(`[outbound] unable to record the failed send orderId=${orderId} logicalKey=${logicalKey} error=${markError.message}`);
+        }
       }
       throw error;
     }
@@ -3055,6 +3100,8 @@ export class ConfirmationService {
 
 const HD_RETRY_META = 'rhymat_hd_api_retry_at';
 const HD_STATE_META = 'rhymat_hd_api_state';
+// Traces of a parcel that already exists: the auto-send's tracking number, or a status copied from HighDelivery.
+const HD_PARCEL_TRACE_META = ['rhymat_hd_api_tracking', 'rhymat_hd_api_sent_at', 'rhymat_hd_status'];
 const HD_RETRY_MAX_AGE_MS = 72 * 60 * 60 * 1000;
 const AMBIGUOUS_CHECK_KEYS = [
   OUTBOUND_LOGICAL_KEYS.confirmationRequest,
@@ -4012,8 +4059,14 @@ function getOutboundReservationMeta(order, logicalKey) {
     state: String(metaValue(keys.state) || ''),
     reservedAt: String(metaValue(keys.reservedAt) || ''),
     sentAt: keys.sentAt ? String(metaValue(keys.sentAt) || '') : '',
-    messageId: keys.messageId ? String(metaValue(keys.messageId) || '') : ''
+    messageId: keys.messageId ? String(metaValue(keys.messageId) || '') : '',
+    failedFor: String(metaValue(failureKeyFor(keys)) || '')
   };
+}
+
+// The reservation time of the last send that failed cleanly (nothing went out), kept apart from the state.
+function failureKeyFor(keys) {
+  return keys.state.replace(/_state$/u, '_failed_for');
 }
 
 function buildLogicalSendMetaUpdate(order, logicalKey, values) {
@@ -4027,7 +4080,8 @@ function buildLogicalSendMetaUpdate(order, logicalKey, values) {
     [keys.state]: values.state,
     [keys.reservedAt]: values.reservedAt,
     [keys.sentAt]: values.sentAt,
-    [keys.messageId]: values.messageId
+    [keys.messageId]: values.messageId,
+    [failureKeyFor(keys)]: values.failedFor
   })
     .filter(([key, value]) => key && value !== undefined)
     .map(([key, value]) => {

@@ -47,6 +47,14 @@ export function parseStockAlerts(text) {
   return alerts;
 }
 
+// Empty (never written) or a document this version understands. Anything else is not overwritten.
+export function isReadableBlob(text) {
+  if (!text) {
+    return true;
+  }
+  return parseObject(text)?.schema === SCHEMA;
+}
+
 function parseObject(text) {
   if (!text) {
     return null;
@@ -75,6 +83,10 @@ export class DurableState {
     this.lastError = '';
     this.lastSavedAt = '';
     this.dirty = new Set();
+    // Bumped on every change, so a save only marks a record clean when nothing changed while it was being written.
+    this.versions = { optOuts: 0, stockAlerts: 0 };
+    // Stored values this version cannot read: never written over (a newer server or a hand edit may own them).
+    this.unreadable = new Set();
     this.chain = Promise.resolve();
     this.loading = null;
   }
@@ -135,7 +147,20 @@ export class DurableState {
     return product;
   }
 
+  markDirty(key) {
+    this.dirty.add(key);
+    this.versions[key] += 1;
+  }
+
   mergeRemote(product) {
+    for (const [key, metaKey] of [['optOuts', DURABLE_META.optOuts], ['stockAlerts', DURABLE_META.stockAlerts]]) {
+      if (isReadableBlob(readMeta(product, metaKey))) {
+        this.unreadable.delete(key);
+      } else if (!this.unreadable.has(key)) {
+        this.unreadable.add(key);
+        this.logger.warn(`[durable] WARNING: the stored ${metaKey} value cannot be read; it is left as it is (not overwritten) and ${key} stay in the local cache only`);
+      }
+    }
     for (const [phone, day] of parseOptOuts(readMeta(product, DURABLE_META.optOuts))) {
       if (!this.optOuts.has(phone)) {
         this.optOuts.set(phone, day);
@@ -165,7 +190,7 @@ export class DurableState {
         const phone = normalizePhone(typeof row === 'string' ? row : row?.phone);
         if (PHONE.test(phone) && !this.optOuts.has(phone)) {
           this.optOuts.set(phone, String(row?.optedOutAt || row?.opted_out_at || '').slice(0, 10));
-          this.dirty.add('optOuts');
+          this.markDirty('optOuts');
           added += 1;
         }
       }
@@ -204,9 +229,10 @@ export class DurableState {
     }
     if (!this.optOuts.has(phone)) {
       this.optOuts.set(phone, String(at).slice(0, 10));
-      this.dirty.add('optOuts');
+      this.markDirty('optOuts');
     }
-    return this.flush();
+    await this.flush();
+    return !this.dirty.has('optOuts');
   }
 
   stockAlertStatus(id) {
@@ -219,8 +245,9 @@ export class DurableState {
       return false;
     }
     this.stockAlerts.set(key, { status, at: Math.floor(this.now() / 1000) });
-    this.dirty.add('stockAlerts');
-    return this.flush();
+    this.markDirty('stockAlerts');
+    await this.flush();
+    return !this.dirty.has('stockAlerts');
   }
 
   // One write at a time; every call waits for the write that covers its change. Never throws.
@@ -231,9 +258,18 @@ export class DurableState {
   }
 
   async writeDirty() {
-    if (!this.dirty.size) {
-      return true;
+    // A change that arrives while a save is running bumps the version: the loop then saves again.
+    const writable = () => [...this.dirty].filter((key) => !this.unreadable.has(key));
+    for (let round = 0; round < 3 && (writable().length || !this.loaded); round += 1) {
+      const saved = await this.writeOnce();
+      if (!saved) {
+        break;
+      }
     }
+    return this.dirty.size === 0;
+  }
+
+  async writeOnce() {
     // Load (or reload) first and merge, so a write never replaces records it has not seen.
     const product = await this.readProduct();
     if (!product) {
@@ -244,7 +280,11 @@ export class DurableState {
       this.loaded = true;
       this.copyOptOutsToStore();
     }
-    const keys = [...this.dirty];
+    const keys = [...this.dirty].filter((key) => !this.unreadable.has(key));
+    if (!keys.length) {
+      return false;
+    }
+    const snapshot = { ...this.versions };
     const meta = [];
     if (keys.includes('optOuts')) {
       meta.push({ key: DURABLE_META.optOuts, value: this.serializeOptOuts() });
@@ -260,7 +300,9 @@ export class DurableState {
       return false;
     }
     for (const key of keys) {
-      this.dirty.delete(key);
+      if (this.versions[key] === snapshot[key]) {
+        this.dirty.delete(key);
+      }
     }
     this.lastError = '';
     this.lastSavedAt = new Date(this.now()).toISOString();

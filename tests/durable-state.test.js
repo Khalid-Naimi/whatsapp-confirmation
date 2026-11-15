@@ -182,3 +182,45 @@ test('an inbound STOP is saved durably through the confirmation service', async 
   await service.handleOptOut({ senderPhone: '+212600000501', textBody: 'STOP', messageKey: 'k1', timestamp: '' });
   assert.ok(JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones['+212600000501']);
 });
+
+test('a change that arrives while a save is running is saved too (no lost write)', async () => {
+  const shop = fakeShop();
+  const state = new DurableState({ wooClient: shop, logger: quiet });
+  await state.load();
+  const original = shop.updateProduct;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let first = true;
+  shop.updateProduct = async (id, body) => {
+    if (first) {
+      first = false;
+      await gate;
+    }
+    return original(id, body);
+  };
+  const a = state.recordOptOut('+212600000601');
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  // Arrives while the first save is waiting on WooCommerce.
+  state.optOuts.set('+212600000602', '2026-11-15');
+  state.markDirty('optOuts');
+  release();
+  await a;
+  await state.flush();
+  const phones = JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones;
+  assert.deepEqual(Object.keys(phones).sort(), ['+212600000601', '+212600000602']);
+  assert.equal(state.status().pendingWrites.length, 0);
+});
+
+test('a stored value that cannot be read is never overwritten; the change stays in the local cache', async () => {
+  const shop = fakeShop();
+  shop.product.meta_data.push({ key: DURABLE_META.optOuts, value: '{"schema":9,"phones":{}}' });
+  const warnings = [];
+  const state = new DurableState({ wooClient: shop, logger: { ...quiet, warn: (message) => warnings.push(message) } });
+  await state.load();
+  assert.equal(await state.recordOptOut('+212600000701'), false);
+  assert.equal(metaOf(shop, DURABLE_META.optOuts), '{"schema":9,"phones":{}}');
+  assert.equal(state.isOptedOut('+212600000701'), true);
+  assert.ok(warnings.some((message) => message.includes('cannot be read')));
+  // The other record is still saved normally.
+  assert.equal(await state.recordStockAlert('ok-1', 'sent'), true);
+});

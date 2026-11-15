@@ -84,7 +84,15 @@ function makeContext({ orders = [], listed = null, notify = false, hdAutoSend = 
     },
     async updateOrderMeta(id, rows) { return woo.updateOrder(id, { meta_data: rows }); },
     async updateOrderStatus(id, status) { return woo.updateOrder(id, { status }); },
-    async addOrderNote(id, note) { notes.push({ id: String(id), note }); return {}; }
+    async addOrderNote(id, note) { notes.push({ id: String(id), note }); return {}; },
+    // Only the order notes route is used through the generic request.
+    async request(urlPath, { method }) {
+      const match = urlPath.match(/\/orders\/(\d+)\/notes$/u);
+      if (method !== 'GET' || !match) {
+        throw new Error(`unexpected request ${urlPath}`);
+      }
+      return notes.filter((item) => item.id === match[1]).map((item) => ({ note: item.note }));
+    }
   };
   const store = new JsonStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dup-wa-')), 'db.json'), { logger: quiet });
   const service = new ConfirmationService({
@@ -280,4 +288,83 @@ test('a confirmed order that the normal path already handed to HighDelivery is n
   await service.runOrderFollowups();
   await service.drainBackgroundTasks();
   assert.deepEqual(autoSends, []);
+});
+
+function retryCandidate(id, extraMeta = {}) {
+  return baseOrder(id, {
+    status: 'processing',
+    meta_data: meta({
+      rhymat_whatsapp_state: 'confirmed',
+      rhymat_whatsapp_confirmation_sent_at: new Date(Date.now() - 2 * HOUR).toISOString(),
+      rhymat_whatsapp_decision: 'confirmed',
+      rhymat_whatsapp_decision_at: new Date(Date.now() - HOUR).toISOString(),
+      rhymat_whatsapp_woo_sync_status: 'pending_retry',
+      rhymat_whatsapp_woo_sync_attempts: 1,
+      rhymat_whatsapp_customer_reply_sent: 'yes',
+      ...extraMeta
+    })
+  });
+}
+
+test('the one-time HighDelivery retry is skipped when a parcel trace or a HighDelivery note exists', async () => {
+  const autoSends = [];
+  const hdAutoSend = { enabled: true, async autoSend(order) { autoSends.push(order.orderId); return { status: 'sent' }; } };
+  const traced = makeContext({ orders: [retryCandidate(63, { rhymat_hd_status: 'picked_up' })], hdAutoSend });
+  await traced.service.runOrderFollowups();
+  await traced.service.drainBackgroundTasks();
+
+  const noted = makeContext({ orders: [retryCandidate(64)], hdAutoSend });
+  await noted.woo.addOrderNote(64, 'Auto-send to HighDelivery held for review: low trust score.');
+  await noted.service.runOrderFollowups();
+  await noted.service.drainBackgroundTasks();
+
+  const unreadable = makeContext({ orders: [retryCandidate(65)], hdAutoSend });
+  unreadable.woo.request = async () => { throw new Error('notes down'); };
+  await unreadable.service.runOrderFollowups();
+  await unreadable.service.drainBackgroundTasks();
+
+  assert.deepEqual(autoSends, []);
+});
+
+test('a reservation left behind by a clean send failure is cleared (so it is sent again), not counted as sent', async () => {
+  const reservedAt = new Date(Date.now() - 3 * HOUR).toISOString();
+  const order = baseOrder(32, { meta_data: meta({
+    rhymat_whatsapp_confirmation_request_state: 'reserved',
+    rhymat_whatsapp_confirmation_request_reserved_at: reservedAt,
+    rhymat_whatsapp_confirmation_request_failed_for: reservedAt
+  }) });
+  const { service, sends, teamAlerts, metaOf } = makeContext({ orders: [order], notify: true });
+  const summary = await service.runOrderFollowups();
+  assert.equal(teamAlerts.length, 0);
+  // Cleared, then the backfill sends the first message once.
+  assert.equal(summary.backfilled, 1);
+  assert.equal(sends.length, 1);
+  assert.notEqual(metaOf(32, 'rhymat_whatsapp_confirmation_message_id'), 'unconfirmed_timeout');
+});
+
+test('a clean send failure is recorded on the order even when clearing the reservation fails', async () => {
+  const order = baseOrder(33);
+  const { service, woo, metaOf } = makeContext({ orders: [order] });
+  service.wasenderClient.sendMessage = async () => { const error = new Error('rejected'); error.status = 500; throw error; };
+  let writes = 0;
+  const original = woo.updateOrderMeta;
+  woo.updateOrderMeta = async (id, rows) => {
+    writes += 1;
+    if (writes === 2) {
+      throw new Error('clear failed');
+    }
+    return original(id, rows);
+  };
+  await service.sendInitialConfirmation(structuredClone(order));
+  assert.equal(metaOf(33, 'rhymat_whatsapp_confirmation_request_state'), 'reserved');
+  assert.equal(metaOf(33, 'rhymat_whatsapp_confirmation_request_failed_for'), metaOf(33, 'rhymat_whatsapp_confirmation_request_reserved_at'));
+});
+
+test('the stale-send alert says the message may not have been sent', async () => {
+  const reservedAt = new Date(Date.now() - 3 * HOUR).toISOString();
+  const order = baseOrder(34, { meta_data: meta({ rhymat_whatsapp_reminder_1_state: 'reserved', rhymat_whatsapp_reminder_1_reserved_at: reservedAt, rhymat_whatsapp_state: 'pending', rhymat_whatsapp_confirmation_sent_at: new Date(Date.now() - 26 * HOUR).toISOString() }) });
+  const { service, teamAlerts } = makeContext({ orders: [order], notify: true });
+  await service.runOrderFollowups();
+  assert.equal(teamAlerts.length, 1);
+  assert.match(teamAlerts[0], /peut-etre PAS envoye/u);
 });
