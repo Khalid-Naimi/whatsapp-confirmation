@@ -84,10 +84,13 @@ function rowFor(product, key, unit) {
 //   variationsByProduct  Map productId -> variations
 //   warehouse            HighDelivery rows
 //   reservations         Map hdId -> quantity
-function planUnit(product, key, unit, { variationsByProduct, hdById, reservations }) {
+//   preview              true on a run that cannot write: units the desktop app writes also get a number, as
+//                        "preview_write" / "preview_same" rows, which no write path ever picks up
+function planUnit(product, key, unit, { variationsByProduct, hdById, reservations, preview }) {
   const row = rowFor(product, key, unit);
   const skip = (action, why) => ({ ...row, action, why });
-  if (unit.writer !== 'server') {
+  const previewOnly = unit.writer !== 'server';
+  if (previewOnly && !preview) {
     return skip('skip_writer_desktop', 'the desktop app writes this unit');
   }
   if (!unit.sync) {
@@ -107,7 +110,8 @@ function planUnit(product, key, unit, { variationsByProduct, hdById, reservation
   const finish = (target, hd, reserved) => {
     const same = stock.managed && stock.current === target;
     const filled = { ...base, hd, reserved, target };
-    return { ...filled, action: same ? 'same' : 'write', why: explain({ hd, reserved, unit, target }) };
+    const action = same ? 'same' : 'write';
+    return { ...filled, action: previewOnly ? `preview_${action}` : action, why: explain({ hd, reserved, unit, target }) };
   };
   if (unit.hold) {
     return finish(0, null, 0);
@@ -124,9 +128,9 @@ function planUnit(product, key, unit, { variationsByProduct, hdById, reservation
   return finish(computeTarget(hd, reserved, unit), hd, reserved);
 }
 
-export function computeStockPlan({ products, variationsByProduct, warehouse, reservations }) {
+export function computeStockPlan({ products, variationsByProduct, warehouse, reservations, preview = false }) {
   const hdById = new Map(warehouse.map((row) => [Number(row.id), row]));
-  const context = { variationsByProduct, hdById, reservations };
+  const context = { variationsByProduct, hdById, reservations, preview };
   const rows = [];
   for (const { product, link } of products) {
     if (!link.ok) {
@@ -172,12 +176,12 @@ export function checkGuards(plan, { warehouse, limits }) {
     fail('hd_too_few_items', `HighDelivery returned only ${warehouse.length} items (at least ${limits.minHdItems} expected)`, false);
   }
   const unreadable = (row) => row.action === 'skip_hd_missing' || row.action === 'skip_hd_bad';
-  const linkedIds = new Set(plan.filter((row) => row.hdId !== null && (['write', 'same'].includes(row.action) || unreadable(row))).map((row) => row.hdId));
+  const linkedIds = new Set(plan.filter((row) => row.hdId !== null && (['write', 'same', 'preview_write', 'preview_same'].includes(row.action) || unreadable(row))).map((row) => row.hdId));
   const missingIds = new Set(plan.filter(unreadable).map((row) => row.hdId));
   if (linkedIds.size > 0 && missingIds.size / linkedIds.size > MAX_MISSING_HD_SHARE) {
     fail('hd_ids_missing', `${missingIds.size} of ${linkedIds.size} linked HighDelivery items are missing or unreadable in its list`, false);
   }
-  if (plan.some((row) => row.action === 'write' && !(Number.isInteger(row.target) && row.target >= 0))) {
+  if (plan.some((row) => (row.action === 'write' || row.action === 'preview_write') && !(Number.isInteger(row.target) && row.target >= 0))) {
     fail('bad_target', 'a planned stock value is not a whole number of 0 or more', false);
   }
 
@@ -312,7 +316,7 @@ export class StockSyncService {
     outcome.warehouse = warehouse;
     const reservations = await this.readReservations(warehouse, outcome);
     const variationsByProduct = await this.readVariations(products, outcome);
-    outcome.plan = computeStockPlan({ products, variationsByProduct, warehouse, reservations });
+    outcome.plan = computeStockPlan({ products, variationsByProduct, warehouse, reservations, preview: outcome.runMode !== 'live' });
     outcome.hash = planHash(outcome.plan);
     outcome.guards = checkGuards(outcome.plan, { warehouse, limits: this.config });
     outcome.unlinked = findUnlinked({ products, variationsByProduct, warehouse, control: outcome.controlRead.control });

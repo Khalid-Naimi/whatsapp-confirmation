@@ -11,8 +11,8 @@ const limits = STOCK_CONFIG;
 
 // [{ product, link }] the way the LinkIndex hands them over.
 const entry = (product) => ({ product, link: parseLinkDoc(product.meta_data[0]?.value || '') });
-const plan = (products, { variations = {}, warehouse = hdRows([512, 2], [24, 20]), reservations = new Map() } = {}) =>
-  computeStockPlan({ products: products.map(entry), variationsByProduct: new Map(Object.entries(variations).map(([id, rows]) => [Number(id), rows])), warehouse, reservations });
+const plan = (products, { variations = {}, warehouse = hdRows([512, 2], [24, 20]), reservations = new Map(), preview = false } = {}) =>
+  computeStockPlan({ products: products.map(entry), variationsByProduct: new Map(Object.entries(variations).map(([id, rows]) => [Number(id), rows])), warehouse, reservations, preview });
 
 test('computeTarget gives the shared fixture answers', () => {
   for (const { name, hd, reserved, unit, expected } of fixture.targets) {
@@ -70,6 +70,17 @@ test('units the server must not write get a skip row and no target', () => {
   assert.deepEqual(rows.map((row) => [row.unit, row.action, row.target]), [
     ['1', 'skip_writer_desktop', null], ['2', 'skip_no_sync', null], ['3', 'skip_bundle', null], ['4', 'skip_hd_missing', null]
   ]);
+});
+
+test('a preview run gives desktop-written units a number that no write path can pick up', () => {
+  const doc = linkDoc({ 1: linkUnit({ writer: 'desktop' }), 2: linkUnit({ writer: 'desktop' }), 3: linkUnit({ writer: 'server' }) });
+  const product = wooProduct(9, { type: 'variable', doc });
+  const variations = { 9: [wooVariation(1, 'a', { stock: 0 }), wooVariation(2, 'b', { stock: 2 }), wooVariation(3, 'c', { stock: 0 })] };
+  const rows = plan([product], { variations, preview: true });
+  assert.deepEqual(rows.map((row) => [row.unit, row.action, row.target]), [['1', 'preview_write', 2], ['2', 'preview_same', 2], ['3', 'write', 2]]);
+  assert.equal(planHash(rows), planHash(rows.filter((row) => row.unit === '3')));
+  const live = plan([product], { variations });
+  assert.deepEqual(live.map((row) => row.action), ['skip_writer_desktop', 'skip_writer_desktop', 'write']);
 });
 
 test('a missing variation, an unreadable document and a product without a document are not planned as writes', () => {
