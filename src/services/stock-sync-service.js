@@ -468,10 +468,13 @@ export class StockSyncService {
     };
     this.last = { summary, plan, unlinked: outcome.unlinked, approvable: outcome.approvable };
 
-    const state = outcome.controlRead.state;
-    const watched = await this.watchUnlinked(outcome, state);
-    const alertedAbort = await this.alertAbort(outcome, state);
-    await this.saveRun(outcome, summary, { ...state, alerted: watched, last_abort_alert: alertedAbort });
+    // With the mode off a manual preview only computes and answers: nothing is saved and nobody is messaged.
+    if (outcome.mode.effective !== 'off') {
+      const state = outcome.controlRead.state;
+      const watched = await this.watchUnlinked(outcome, state);
+      const alertedAbort = await this.alertAbort(outcome, state);
+      await this.saveRun(outcome, summary, { ...state, alerted: watched, last_abort_alert: alertedAbort });
+    }
 
     this.logger.log(`[stock-sync] ${summary.aborted ? 'aborted' : 'completed'} mode=${summary.mode} checked=${summary.checked} changed=${summary.changed} skipped=${summary.skipped} errors=${summary.errors} aborted=${summary.aborted} hash=${summary.planHash.slice(0, 8)}`);
     return { mode: outcome.mode, summary, plan, ...(outcome.approval ? { approval: outcome.approval } : {}) };

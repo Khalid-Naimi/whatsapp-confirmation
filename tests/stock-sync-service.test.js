@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LINK_META } from '../src/services/product-links.js';
+import { MatchingWatch } from '../src/services/matching-watch.js';
 import { FILLER, controlProduct, hdRows, linkDoc, linkUnit, makeService, makeShop, simpleProduct, wooProduct, wooVariation } from './helpers/fake-shop.js';
 
 const FORBIDDEN_KEYS = /"(billing|shipping|phone|email|address\w*)":/u;
@@ -199,6 +200,21 @@ test('the hourly sync with the mode off makes no call at all; a dry run can stil
   const preview = await service.run({ dryRun: true });
   assert.equal(preview.summary.mode, 'dry_run');
   assert.equal(shop.stockWrites().length, 0);
+});
+
+test('with the mode off a manual preview saves nothing and sends no digest', async () => {
+  const sent = [];
+  const watch = new MatchingWatch({ notify: async (m) => { sent.push(m); return 2; }, enabled: true });
+  const shop = standardShop();
+  shop.products.push(wooProduct(555, { name: 'Brand new hoodie' }));
+  const result = await makeService(shop, { config: { mode: 'off' }, matchingWatch: watch }).run({ dryRun: true });
+  assert.ok(result.plan.length > 0);
+  assert.equal(shop.writes.length, 0);
+  assert.deepEqual(sent, []);
+  // the same preview in dry_run mode does save its history and may send the digest
+  await makeService(shop, { config: { mode: 'dry_run' }, matchingWatch: watch }).run({ dryRun: true });
+  assert.equal(shop.stateWrites().length, 1);
+  assert.equal(sent.length, 1);
 });
 
 test('two runs at the same time: the second says already_running', async () => {
