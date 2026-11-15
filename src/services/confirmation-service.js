@@ -289,6 +289,16 @@ export class ConfirmationService {
             ...normalizedOrder,
             rawOrder: payload
           });
+          const payloadDecision = getDecisionMeta(payload);
+          const knownDecision = payloadDecision.decision || existing?.decision || '';
+          // The service's own status change after the customer's answer (or the auto-send / delivery after it) comes
+          // back as an order update: it is not a manual change.
+          if (workflowStarted && knownDecision && isExpectedStatusForDecision(payload.status, knownDecision, this.wooStatuses)) {
+            return { status: 200, body: { ok: true, skipped: true, reason: 'own_status_change' } };
+          }
+          if (workflowStarted && payloadDecision.manualOverride === 'yes' && payloadDecision.manualOverrideStatus === String(payload.status || '')) {
+            return { status: 200, body: { ok: true, skipped: true, reason: 'manual_override' } };
+          }
           if (workflowStarted) {
             await this.markManualOverride({
               order: {
@@ -325,6 +335,8 @@ export class ConfirmationService {
         ? 'duplicate_order'
         : result.body?.reason === 'manual_override'
           ? 'manual_override'
+        : result.body?.reason === 'own_status_change'
+          ? 'own_status_change'
           : result.body?.reason === 'inactive_status'
             ? 'inactive_status'
         : result.body?.reason === 'feedback_self_test'
@@ -375,6 +387,9 @@ export class ConfirmationService {
           continue;
         }
 
+        // Marked before routing (not after): a second delivery of the same message arriving while this one is still
+        // being handled is a duplicate, not a second reply.
+        this.recentInboundMessageKeys.set(message.messageKey, Date.now());
         let result;
         try {
           result = await this.routeInboundMessage(message);
@@ -695,7 +710,7 @@ export class ConfirmationService {
   }
 
   async processConfirmationInboundMessage(message, replyContext) {
-    const pendingOrder = replyContext.pendingOrder;
+    let pendingOrder = replyContext.pendingOrder;
     const latestOrder = replyContext.latestOrder;
 
     this.appendInboundMessage({
@@ -705,8 +720,30 @@ export class ConfirmationService {
     });
 
     const result = await this.withOrderLock(pendingOrder.orderId, async () => {
+      // The order meta is the record that survives a restart: read it again inside the lock, so a reply that was
+      // already handled (same message key, decision already written) is recognised even with an empty local cache.
+      if (typeof this.wooClient.getOrder === 'function') {
+        try {
+          const fresh = await this.wooClient.getOrder(pendingOrder.orderId);
+          if (fresh && typeof fresh === 'object') {
+            pendingOrder = { ...pendingOrder, rawOrder: fresh };
+          }
+        } catch (error) {
+          this.logger.warn(`[confirmation] could not re-read orderId=${pendingOrder.orderId} before the reply: ${error.message}`);
+        }
+      }
       const reply = message.kind === 'audio' ? '' : String(message.textBody || '').trim();
       const decisionMeta = getDecisionMeta(pendingOrder.rawOrder || {});
+      if (decisionMeta.lastConfirmationMessageKey && decisionMeta.lastConfirmationMessageKey === message.messageKey) {
+        return {
+          ok: true,
+          ignored: false,
+          duplicate: true,
+          failed: false,
+          route: 'confirmation',
+          eventStatus: 'duplicate_confirmation_message'
+        };
+      }
       const lastConfirmationMessageKey = pendingOrder.lastConfirmationMessageKey || decisionMeta.lastConfirmationMessageKey || '';
       const currentInvalidReplyCount = Number(
         pendingOrder.invalidReplyCount
@@ -1151,7 +1188,7 @@ export class ConfirmationService {
   }
 
   async processFeedbackInboundMessage(message, feedbackMatch) {
-    const feedbackOrder = feedbackMatch.order || await this.wooClient.getOrder(feedbackMatch.orderId);
+    let feedbackOrder = feedbackMatch.order || await this.wooClient.getOrder(feedbackMatch.orderId);
     const normalizedOrder = normalizeWooOrder(feedbackOrder, this.messages);
     const localOrder = this.store.getOrder(normalizedOrder.orderId);
     this.appendInboundMessage({
@@ -1161,6 +1198,14 @@ export class ConfirmationService {
     });
 
     const result = await this.withOrderLock(normalizedOrder.orderId, async () => {
+      // Read again inside the lock: the reply may already be recorded (a webhook retry, or a restart in between).
+      if (feedbackMatch.order) {
+        try {
+          feedbackOrder = (await this.wooClient.getOrder(normalizedOrder.orderId)) || feedbackOrder;
+        } catch (error) {
+          this.logger.warn(`[feedback] could not re-read orderId=${normalizedOrder.orderId}: ${error.message}`);
+        }
+      }
       const replyAt = resolveInboundTimestamp(message.timestamp);
       const providerMessageId = message.providerMessageId || message.messageKey;
       const feedbackMeta = getFeedbackMeta(feedbackOrder);
@@ -1276,12 +1321,22 @@ export class ConfirmationService {
     // Open orders are always checked. Closed orders (the long history) only if created in the last 45 days: older
     // ones can no longer need a reminder, a backfill or a reply, and reading ~1,900 of them every hour is slow.
     const closedStatuses = ['cancelled', 'completed', 'delivered', 'refunded'];
+    // A WooCommerce hiccup (timeout, 5xx) is retried a few times instead of skipping the whole hour.
     const orders = [
-      ...await this.listOrdersForStatuses(RECONCILIATION_STATUSES.filter((status) => !closedStatuses.includes(status))),
-      ...await this.listOrdersForStatuses(closedStatuses, { after: new Date(now.getTime() - 45 * 24 * 60 * 60 * 1000).toISOString() })
+      ...await this.withTransientRetry(() => this.listOrdersForStatuses(RECONCILIATION_STATUSES.filter((status) => !closedStatuses.includes(status))), 'open order list'),
+      ...await this.withTransientRetry(() => this.listOrdersForStatuses(closedStatuses, { after: new Date(now.getTime() - 45 * 24 * 60 * 60 * 1000).toISOString() }), 'closed order list')
     ];
 
-    for (const order of orders) {
+    for (let index = 0; index < orders.length; index += 1) {
+      const order = orders[index];
+      // A HighDelivery send that died half way (restart while "sending") becomes "unknown" and the team hears once.
+      if (this.hdAutoSend?.reviewStuckSend && getHdAutoSendState(order) === 'sending') {
+        try {
+          await this.hdAutoSend.reviewStuckSend(order, now);
+        } catch (error) {
+          this.logger.warn(`[task][order-followups] stuck HighDelivery send check failed orderId=${String(order.id)}: ${error.message}`);
+        }
+      }
       if (!hasAmbiguousCustomerOutboundState(order, now)) {
         continue;
       }
@@ -1293,16 +1348,51 @@ export class ConfirmationService {
         lastError: 'ambiguous_send_state'
       });
       summary.ambiguous += 1;
+      // A WhatsApp send that never got an answer, more than 2 hours ago: counted as sent (never resent), the team is
+      // told once, and the reminders / auto-cancel go on from there.
+      try {
+        const closed = await this.closeStaleReservations(order, now);
+        if (closed) {
+          orders[index] = closed;
+        }
+      } catch (error) {
+        this.logger.warn(`[task][order-followups] could not close a stale send orderId=${normalizedOrder.orderId}: ${error.message}`);
+      }
     }
 
-    for (const order of orders) {
-      const workflow = getWorkflowMeta(order);
-      const decisionMeta = getDecisionMeta(order);
-      const localOrder = this.store.getOrder(String(order.id));
-      const orderId = String(order.id);
+    for (const listedOrder of orders) {
+      const orderId = String(listedOrder.id);
 
       try {
         const action = await this.withOrderLock(orderId, async () => {
+          let order = listedOrder;
+          let workflow = getWorkflowMeta(order);
+          let decisionMeta = getDecisionMeta(order);
+          let localOrder = this.store.getOrder(orderId);
+          // The list was read once at the start and this loop can take minutes: before anything is sent or written,
+          // the order is read again (inside the lock) and the step is skipped when it changed in the meantime.
+          let verified = false;
+          const stillSame = async () => {
+            if (verified) {
+              return true;
+            }
+            const fresh = await this.rereadForFollowup(orderId, listedOrder);
+            if (!fresh) {
+              this.logFollowupDecision({ orderId, orderStatus: order.status, workflowState: workflow.state, confirmationSentAt: workflow.confirmationSentAt, reminderCount: workflow.reminderCount, action: 'skip_reread_failed' });
+              return false;
+            }
+            if (followupSignature(fresh) !== followupSignature(listedOrder)) {
+              this.logFollowupDecision({ orderId, orderStatus: fresh.status, workflowState: getWorkflowMeta(fresh).state, confirmationSentAt: getWorkflowMeta(fresh).confirmationSentAt, reminderCount: getWorkflowMeta(fresh).reminderCount, action: 'skip_changed_since_listing' });
+              return false;
+            }
+            order = fresh;
+            workflow = getWorkflowMeta(order);
+            decisionMeta = getDecisionMeta(order);
+            localOrder = this.store.getOrder(orderId);
+            verified = true;
+            return true;
+          };
+
           if (hasAmbiguousCustomerOutboundState(order, now)) {
             this.logFollowupDecision({
               orderId,
@@ -1346,21 +1436,27 @@ export class ConfirmationService {
             }
 
             // A "thank you / cancelled" reply that was held back by the quiet hours goes out now.
-            if ((wooStatusMatchesTarget(order.status, targetWooStatus) || (effectiveDecision === 'confirmed' && ['completed', 'delivered'].includes(String(order.status || '')))) && await this.sendDeferredDecisionReply({ order, nextOrderState, decisionMeta, effectiveDecision, now })) {
+            const replyKey = effectiveDecision === 'confirmed' ? OUTBOUND_LOGICAL_KEYS.confirmationSuccess : OUTBOUND_LOGICAL_KEYS.cancellationSuccess;
+            if (isExpectedStatusForDecision(order.status, effectiveDecision, this.wooStatuses)
+              && getOutboundReservationMeta(order, replyKey).state === 'deferred'
+              && await stillSame()
+              && await this.sendDeferredDecisionReply({ order, nextOrderState: { ...nextOrderState, rawOrder: order }, decisionMeta, effectiveDecision, now })) {
               summary.deferredReplies += 1;
             }
 
-            if (!wooStatusMatchesTarget(order.status, targetWooStatus) && currentSyncStatus !== 'pending_retry') {
+            // markManualOverride reads the order again itself before writing anything.
+            if (!isExpectedStatusForDecision(order.status, effectiveDecision, this.wooStatuses) && currentSyncStatus !== 'pending_retry') {
               await this.markManualOverride({
-                order: nextOrderState,
+                order: { ...nextOrderState, rawOrder: order },
                 status: order.status
               });
               return 'skipped';
             }
 
+            // Status and decision writes are absolute values (repeating them is harmless) and send nothing: no re-read.
             if (currentSyncStatus === 'pending_retry') {
               const reconciliation = await this.reconcileWooDecision({
-                order: nextOrderState,
+                order: { ...nextOrderState, rawOrder: order },
                 targetState: effectiveDecision,
                 targetWooStatus,
                 note: effectiveDecision === 'confirmed'
@@ -1368,14 +1464,22 @@ export class ConfirmationService {
                   : 'Customer cancelled order via WhatsApp.',
                 nowIso: decisionMeta.decisionAt || localOrder?.decisionAt || now.toISOString()
               });
+              if (reconciliation.success && effectiveDecision === 'confirmed') {
+                // The first status write failed, so the HighDelivery auto-send never ran: it runs now.
+                await this.maybeRetryHdAutoSend(reconciliation.rawOrder || order, now);
+              }
               return reconciliation.success ? 'skipped' : 'error';
+            }
+
+            if (effectiveDecision === 'confirmed' && currentSyncStatus === 'synced') {
+              await this.maybeRetryHdAutoSend(order, now);
             }
 
             return 'skipped';
           }
 
           if (!ACTIVE_CONFIRMATION_STATUSES.includes(String(order.status || ''))) {
-            if (workflow.confirmationSentAt) {
+            if (workflow.confirmationSentAt && decisionMeta.manualOverride !== 'yes') {
               await this.markManualOverride({
                 order: {
                   ...localOrder,
@@ -1427,6 +1531,19 @@ export class ConfirmationService {
                 reminderCount: workflow.reminderCount,
                 action: 'skip_backfill_too_old'
               });
+              return 'skipped';
+            }
+
+            // The 30-second timer of the webhook owns this first message: never send it from here as well.
+            if (this.pendingInitialConfirmations.has(orderId)) {
+              this.logFollowupDecision({ orderId, orderStatus: order.status, workflowState: workflow.state, confirmationSentAt: workflow.confirmationSentAt, reminderCount: workflow.reminderCount, action: 'skip_confirmation_scheduled' });
+              return 'skipped';
+            }
+            if (!await stillSame()) {
+              return 'skipped';
+            }
+            if (workflow.confirmationSentAt || isConfirmationAlreadyStarted(workflow, this.store.getOrder(orderId))) {
+              this.logFollowupDecision({ orderId, orderStatus: order.status, workflowState: workflow.state, confirmationSentAt: workflow.confirmationSentAt, reminderCount: workflow.reminderCount, action: 'skip_already_started' });
               return 'skipped';
             }
 
@@ -1494,6 +1611,9 @@ export class ConfirmationService {
               ageMs,
               action: 'send_reminder_2'
             });
+            if (!await stillSame()) {
+              return 'skipped';
+            }
             return await this.sendReminder(order, 2, now) ? 'reminderSent' : 'skipped';
           }
 
@@ -1507,6 +1627,9 @@ export class ConfirmationService {
               ageMs,
               action: 'send_reminder_1'
             });
+            if (!await stillSame()) {
+              return 'skipped';
+            }
             return await this.sendReminder(order, 1, now) ? 'reminderSent' : 'skipped';
           }
 
@@ -1535,6 +1658,9 @@ export class ConfirmationService {
                 ageMs: afterSecondReminderMs,
                 action: 'auto_cancel'
               });
+              if (!await stillSame()) {
+                return 'skipped';
+              }
               await this.autoCancelPendingOrder(order, now);
               return 'autoCancelled';
             }
@@ -1577,6 +1703,116 @@ export class ConfirmationService {
     this.logger.log(
       `[task][order-followups] orderId=${orderId} status=${String(orderStatus || '')} workflowState=${String(workflowState || '')} confirmationSentAt=${String(confirmationSentAt || '')} reminderCount=${Number(reminderCount || 0)} ageHours=${ageHours} action=${action}`
     );
+  }
+
+  // Retries a WooCommerce read that failed for a passing reason (timeout, network, 429, 5xx); anything else is thrown.
+  async withTransientRetry(work, label, attempts = 3) {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await work();
+      } catch (error) {
+        if (attempt >= attempts || !isTransientWooError(error)) {
+          throw error;
+        }
+        this.logger.warn(`[woo] ${label} failed (${error.message}); retry ${attempt + 1} of ${attempts}`);
+        await this.sleep(2000 * attempt);
+      }
+    }
+  }
+
+  // The order as WooCommerce has it now, or null when it cannot be read (the step is then skipped this hour).
+  async rereadForFollowup(orderId, listedOrder) {
+    if (typeof this.wooClient.getOrder !== 'function') {
+      return listedOrder;
+    }
+    try {
+      return (await this.withTransientRetry(() => this.wooClient.getOrder(orderId), `order ${orderId}`)) || null;
+    } catch (error) {
+      this.logger.warn(`[task][order-followups] could not re-read orderId=${orderId}: ${error.message}`);
+      return null;
+    }
+  }
+
+  // Customer WhatsApp sends still "reserved" more than 2 hours after the attempt (the provider never answered). The
+  // message may well have gone out, so it is never sent again: the reservation is closed as sent, at the reservation
+  // time, so reminders and the auto-cancel continue from there. The team gets one alert (the state changes, so the
+  // next run does not see it again). Returns the updated order, or null when nothing was changed.
+  async closeStaleReservations(listedOrder, now = new Date()) {
+    const orderId = String(listedOrder.id);
+    return this.withOrderLock(orderId, async () => {
+      const order = await this.rereadForFollowup(orderId, listedOrder);
+      if (!order) {
+        return null;
+      }
+      const stale = AMBIGUOUS_CHECK_KEYS.filter((logicalKey) => isStaleReservation(getOutboundReservationMeta(order, logicalKey), now));
+      if (!stale.length) {
+        return order;
+      }
+      const workflow = getWorkflowMeta(order);
+      const updates = [];
+      for (const logicalKey of stale) {
+        const meta = getOutboundReservationMeta(order, logicalKey);
+        const at = meta.reservedAt;
+        updates.push(...buildLogicalSendMetaUpdate(order, logicalKey, {
+          state: 'sent',
+          reservedAt: at,
+          sentAt: meta.sentAt || at,
+          messageId: meta.messageId || 'unconfirmed_timeout'
+        }));
+        if (logicalKey === OUTBOUND_LOGICAL_KEYS.confirmationRequest && !workflow.state) {
+          updates.push(...buildWorkflowMetaUpdate(order, { state: 'pending', reminderCount: workflow.reminderCount || 0 }));
+        }
+        if (logicalKey === OUTBOUND_LOGICAL_KEYS.reminder1 && workflow.reminderCount < 1) {
+          updates.push(...buildWorkflowMetaUpdate(order, { reminderCount: 1, lastReminderAt: at }));
+        }
+        if (logicalKey === OUTBOUND_LOGICAL_KEYS.reminder2 && workflow.reminderCount < 2) {
+          updates.push(...buildWorkflowMetaUpdate(order, { reminderCount: 2, lastReminderAt: at }));
+        }
+      }
+      const updated = await this.wooClient.updateOrderMeta(orderId, mergeMetaUpdates(updates));
+      const kinds = stale.map((key) => key.replace('customer:', '')).join(', ');
+      this.logger.warn(`[task][order-followups] stale_send_closed orderId=${orderId} kinds=${kinds}`);
+      await this.safeAddOrderNote(orderId, `WhatsApp ${kinds}: no answer from the WhatsApp provider for more than 2 hours. Counted as sent (not sent again); check the conversation if needed.`);
+      if (this.notifyTeam) {
+        try {
+          await this.notifyTeam(`ATTENTION: message WhatsApp sans reponse du fournisseur (commande ${orderId}: ${kinds}). Compte comme envoye, pas renvoye. Verifier la conversation si besoin.`);
+        } catch (error) {
+          this.logger.warn(`[task][order-followups] team alert failed orderId=${orderId}: ${error.message}`);
+        }
+      }
+      return updated && typeof updated === 'object' && Array.isArray(updated.meta_data) ? updated : order;
+    });
+  }
+
+  // A confirmed order whose HighDelivery auto-send never ran (its first status write failed, or the process stopped
+  // first). Only when the HighDelivery state is empty and it was never retried: the retry mark is written before the
+  // call, so this happens at most once per order, and the auto-send itself re-checks the state before sending.
+  async maybeRetryHdAutoSend(order, now = new Date()) {
+    if (!this.hdAutoSend?.enabled) {
+      return false;
+    }
+    const orderId = String(order?.id ?? '');
+    const decisionMeta = getDecisionMeta(order);
+    const decidedMs = Date.parse(decisionMeta.decisionAt || '');
+    if (!orderId
+      || decisionMeta.decision !== 'confirmed'
+      || getHdAutoSendState(order)
+      || readOrderMeta(order, HD_RETRY_META)
+      || Number(decisionMeta.wooSyncAttempts || 0) < 2
+      || Number.isNaN(decidedMs)
+      || now.getTime() - decidedMs > HD_RETRY_MAX_AGE_MS
+      || !wooStatusMatchesTarget(order.status, this.wooStatuses.confirmed)) {
+      return false;
+    }
+    try {
+      await this.wooClient.updateOrderMeta(orderId, [{ key: HD_RETRY_META, value: now.toISOString() }]);
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] could not mark the retry orderId=${orderId}: ${error.message}`);
+      return false;
+    }
+    this.logger.log(`[hd-auto-send] retrying an auto-send that never ran orderId=${orderId}`);
+    this.scheduleHdAutoSend({ ...normalizeWooOrder(order, this.messages), rawOrder: order });
+    return true;
   }
 
   pruneRecentInboundMessageKeys() {
@@ -2579,8 +2815,28 @@ export class ConfirmationService {
 
   async markManualOverride({ order, status }) {
     return this.withOrderLock(order.orderId, async () => {
+      // Judged on the order as it is now: the service's own writes (decision, then status) may have landed meanwhile.
+      let current = order.rawOrder || {};
+      if (typeof this.wooClient.getOrder === 'function') {
+        try {
+          current = (await this.wooClient.getOrder(order.orderId)) || current;
+        } catch (error) {
+          this.logger.warn(`[confirmation] manual override check could not re-read orderId=${order.orderId}: ${error.message}`);
+        }
+      }
+      const currentDecision = getDecisionMeta(current);
+      const decision = currentDecision.decision || order.decision || '';
+      const currentStatus = String(current.status || status || '');
+      if (decision && isExpectedStatusForDecision(currentStatus, decision, this.wooStatuses)) {
+        return false;
+      }
+      if (currentDecision.manualOverride === 'yes' && currentDecision.manualOverrideStatus === String(status || '')) {
+        // Already recorded: nothing to rewrite, no second note.
+        return true;
+      }
       const normalizedOrder = {
         ...order,
+        rawOrder: current,
         manualOverride: 'yes',
         manualOverrideAt: new Date().toISOString(),
         manualOverrideStatus: status,
@@ -2795,6 +3051,74 @@ export class ConfirmationService {
       }
     });
   }
+}
+
+const HD_RETRY_META = 'rhymat_hd_api_retry_at';
+const HD_STATE_META = 'rhymat_hd_api_state';
+const HD_RETRY_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+const AMBIGUOUS_CHECK_KEYS = [
+  OUTBOUND_LOGICAL_KEYS.confirmationRequest,
+  OUTBOUND_LOGICAL_KEYS.reminder1,
+  OUTBOUND_LOGICAL_KEYS.reminder2,
+  OUTBOUND_LOGICAL_KEYS.confirmationSuccess,
+  OUTBOUND_LOGICAL_KEYS.cancellationSuccess,
+  OUTBOUND_LOGICAL_KEYS.autoCancellation
+];
+
+function readOrderMeta(order, key) {
+  const row = (Array.isArray(order?.meta_data) ? order.meta_data : []).find((item) => item?.key === key);
+  return row ? String(row.value ?? '') : '';
+}
+
+function getHdAutoSendState(order) {
+  return readOrderMeta(order, HD_STATE_META);
+}
+
+function isStaleReservation(outboundMeta, now) {
+  if (outboundMeta.state !== 'reserved') {
+    return false;
+  }
+  const reservedAtMs = Date.parse(outboundMeta.reservedAt || '');
+  return !Number.isNaN(reservedAtMs) && (now.getTime() - reservedAtMs) >= OUTBOUND_RESERVATION_STALE_MS;
+}
+
+// Is this Woo status what the service itself leads to after this decision? confirmed -> the confirmed status, then
+// completed / delivered once HighDelivery has it; cancelled -> cancelled.
+function isExpectedStatusForDecision(status, decision, wooStatuses = DEFAULT_WOO_STATUSES) {
+  const current = String(status || '').toLowerCase();
+  if (decision === 'confirmed') {
+    return wooStatusMatchesTarget(current, wooStatuses.confirmed) || ['completed', 'delivered', String(wooStatuses.delivered || '').toLowerCase()].includes(current);
+  }
+  if (decision === 'cancelled') {
+    return current === 'cancelled';
+  }
+  return false;
+}
+
+// What the hourly task decided on: if any of it changed between the listing and the action, the action is skipped.
+function followupSignature(order) {
+  const decision = getDecisionMeta(order);
+  return JSON.stringify([
+    String(order?.status || ''),
+    getWorkflowMeta(order),
+    decision.decision,
+    decision.wooSyncStatus,
+    decision.customerReplySent,
+    decision.manualOverride,
+    decision.lastConfirmationMessageKey,
+    Object.keys(OUTBOUND_META_KEYS).map((logicalKey) => getOutboundReservationMeta(order, logicalKey).state)
+  ]);
+}
+
+// A WooCommerce error worth retrying: no answer, a timeout, 429 or a 5xx. A 4xx is an answer and is not retried.
+function isTransientWooError(error) {
+  const message = String(error?.message || '');
+  const status = message.match(/failed with (\d{3})/u);
+  if (status) {
+    const code = Number(status[1]);
+    return code === 429 || code >= 500;
+  }
+  return ['TimeoutError', 'AbortError'].includes(error?.name) || /fetch failed|network|ECONN|ETIMEDOUT|EAI_AGAIN|socket|terminated|timed? ?out/iu.test(message);
 }
 
 function defaultSleep(ms) {
