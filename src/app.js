@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { secretMatches, verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
-import { buildHealthDetails } from './services/health-tracker.js';
+import { buildHealthDetails, buildReadiness } from './services/health-tracker.js';
 import { warehouseQuantity } from './services/hd-product-match.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
@@ -100,6 +100,12 @@ export function createApp({ config, confirmationService, store, stockAlertServic
 
       if (req.method === 'GET' && pathname === '/health') {
         return sendJson(res, 200, { ok: true });
+      }
+
+      // Public, for an outside monitor: booleans only (see buildReadiness). /health stays the plain liveness answer.
+      if (req.method === 'GET' && pathname === '/health/ready') {
+        const readiness = buildReadiness({ config, tracker: healthTracker, durableState, now: new Date() });
+        return sendJson(res, readiness.ok ? 200 : 503, readiness);
       }
 
       if (req.method === 'GET' && pathname.startsWith('/api/')) {

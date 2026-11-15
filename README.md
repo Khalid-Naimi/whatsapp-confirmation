@@ -14,7 +14,8 @@ Backend-only Node.js service that:
 - `POST /tasks/order-followups`
 - `GET /tasks/stock-alerts/status?ids=1,2` (same secret; says `queued`, `sent`, `failed` or `unknown` per alert id, so WordPress can close or retry its list)
 - `POST /tasks/stock-alerts` (back-in-stock WhatsApp alerts per size, sent by the WordPress theme)
-- `GET /health`
+- `GET /health` (always `{ "ok": true }` while the process runs; Render and the keep-awake ping use it)
+- `GET /health/ready` (public, no secret, booleans only: `{ ok, checks: { config, durableState, hourly, wasender, woocommerce } }`; `503` when the configuration has errors, the opt-outs are not loaded from WooCommerce, the hourly cron has not run for 90 minutes (checked after the first 90 minutes of uptime), or the last WhatsApp or WooCommerce call failed because that service is down (a clean refusal of one message, such as a number not on WhatsApp, does not count))
 - `GET /api/health/details` (same secret; read-only picture for the desktop Backend health page)
 - `GET /api/matching/hd-items` (same secret; the HighDelivery items as `{ id, name, quantity }`, 502 `hd_unavailable` when HighDelivery cannot be read)
 - `GET /api/stock-sync/status` (same secret; effective mode, last run, the last plan, unlinked products and items, broken links)
@@ -68,6 +69,10 @@ Backend-only Node.js service that:
 - `INTERNAL_NOTIFY_PHONES` (required): comma list of team phones (`+212...`) that get team notices and alerts. There is no built-in default.
 - `SHOP_CONTACT_PHONE` (required): the number customers are told to write to with a question; it is put, as written (for example `+212 6xx-xxxxxx`), at the end of the default confirmation, invalid-reply and reminder texts. A text set in its own variable is used as it is.
 - `CONFIG_STRICT`: default on. See "Configuration check" below.
+
+## Outside monitor (free)
+
+Point a free monitor (UptimeRobot, cron-job.org) at `https://<service>/health/ready` with a 5 to 15 minute interval and email alerts. It tells you when the service is up but not working (cron stopped, WhatsApp session disconnected, WooCommerce keys broken). It needs no secret and shows no customer data. The authenticated `GET /api/health/details` also carries `contract: { api: 1, health: 1, linkDoc: 1 }` so the desktop app can tell which version it talks to.
 
 ## Configuration check
 

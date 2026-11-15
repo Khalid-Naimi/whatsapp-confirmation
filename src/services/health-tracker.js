@@ -2,6 +2,10 @@ import { isQuietHours } from '../utils/quiet-hours.js';
 
 const MAX_RUNS = 48;
 const MAX_NEEDS = 20;
+// The hourly cron is late when its last run is older than this (checked only after the same time of uptime).
+export const HOURLY_LATE_MS = 90 * 60 * 1000;
+// Versions of what the desktop app reads from here: the /api answers, this health payload, the product link document.
+export const CONTRACT = Object.freeze({ api: 1, health: 1, linkDoc: 1 });
 
 // Remembers when each outside service last worked (passively, from the calls the service already makes) and keeps the
 // summaries of the hourly runs. Nothing here calls Woo, HighDelivery or WhatsApp by itself.
@@ -11,6 +15,9 @@ export class HealthTracker {
     this.now = now;
     this.startedAt = (startedAt || now()).toISOString();
     this.services = new Map();
+    // name -> true while the last call failed in a way that says the service is down (not a clean refusal of one
+    // request, such as a customer number WhatsApp does not know). Feeds GET /health/ready only.
+    this.down = new Map();
   }
 
   entry(name) {
@@ -22,10 +29,12 @@ export class HealthTracker {
 
   recordOk(name) {
     this.entry(name).lastOkAt = this.now().toISOString();
+    this.down.set(name, false);
   }
 
   recordFail(name, error) {
     const entry = this.entry(name);
+    this.down.set(name, isOutage(error));
     entry.lastFailAt = this.now().toISOString();
     // Only a short plain reason: never a token, URL or customer detail.
     entry.lastError = String(error?.message || error || 'error').replace(/https?:\/\/\S+/g, '').trim().slice(0, 120);
@@ -52,10 +61,51 @@ export class HealthTracker {
     });
   }
 
+  // true when the last call to that service failed because the service (or our access to it) is down.
+  lastCallFailed(name) {
+    return this.down.get(name) === true;
+  }
+
   runs(limit = 24) {
     const runs = this.store.read().health?.runs || [];
     return runs.slice(-limit);
   }
+}
+
+// A clean 4xx refusal of one request (bad customer number, unknown order) says the service answered: not an outage.
+// No answer, 5xx, 429, 401/403 (our access) and Wasender's 200 "success:false" (session disconnected) are.
+function isOutage(error) {
+  const status = Number(error?.status);
+  if (!Number.isFinite(status) || status === 0) {
+    const match = String(error?.message || '').match(/failed with (\d{3})/u);
+    if (!match) {
+      return true;
+    }
+    return isOutageStatus(Number(match[1]));
+  }
+  return isOutageStatus(status);
+}
+
+function isOutageStatus(status) {
+  return !(status >= 400 && status < 500) || [401, 403, 429].includes(status);
+}
+
+// GET /health/ready: booleans only, no customer data, no secret needed. ok is false (503) when the configuration has
+// errors, the durable state (opt-outs) is not loaded, the hourly cron is late (after the first 90 minutes of uptime),
+// or the last WhatsApp or WooCommerce call failed because that service is down.
+export function buildReadiness({ config = {}, tracker = null, durableState = null, now = new Date(), lateMs = HOURLY_LATE_MS }) {
+  const nowMs = now.getTime();
+  const startedMs = Date.parse(tracker?.startedAt || '') || nowMs;
+  const lastRunMs = Date.parse(tracker?.runs(1)?.[0]?.at || '') || 0;
+  const hourly = nowMs - startedMs < lateMs || (lastRunMs > 0 && nowMs - lastRunMs <= lateMs);
+  const checks = {
+    config: (config.errors || []).length === 0,
+    durableState: durableState ? Boolean(durableState.loaded) : true,
+    hourly: tracker ? hourly : true,
+    wasender: tracker ? !tracker.lastCallFailed('wasender') : true,
+    woocommerce: tracker ? !tracker.lastCallFailed('woocommerce') : true
+  };
+  return { ok: Object.values(checks).every(Boolean), checks };
 }
 
 // Wraps the listed async methods of a client so each success or failure is noted. The client itself is unchanged.
@@ -166,6 +216,7 @@ export function buildHealthDetails({ store, tracker, config, stockSyncService = 
   }
 
   return {
+    contract: { ...CONTRACT },
     generatedAt: now.toISOString(),
     server: {
       startedAt: tracker.startedAt,
