@@ -34,9 +34,10 @@ export function resolveOrderLines(lineItems, { unitLookup, csvMap, warehouse }) 
 //   - a product without any link document goes through the CSV; what the CSV cannot place is skipped, because
 //     the sync never writes a product without a link
 //   - a line the sync cannot place although its product has a link document (an unreadable document, or a size
-//     missing from a linked document that the CSV does not place either) is returned in `blocking`
+//     missing from a linked document that the CSV does not place either) is returned in `blocking`, with
+//     kind "bad_doc" (its items cannot be known) or "unplaced" (the product's own link document names its items)
 //   linkKind(productId) -> 'none' | 'linked' | 'ignore' | 'bad'
-// -> { wanted: Map hdId -> quantity, blocking: [text] }
+// -> { wanted: Map hdId -> quantity, blocking: [{ productId, kind, text }] }
 export function resolveReserveLines(lineItems, { unitLookup, linkKind, csvMap, warehouse }) {
   const byName = indexByName(warehouse);
   const wanted = new Map();
@@ -50,7 +51,7 @@ export function resolveReserveLines(lineItems, { unitLookup, linkKind, csvMap, w
         add(Number(item.hd_id), line.quantity * item.qty);
       }
     } else if (found.kind === 'bad_doc') {
-      blocking.push(`the link document of "${line.wooName}" cannot be read (${found.error})`);
+      blocking.push({ productId: line.productId, kind: 'bad_doc', text: `the link document of "${line.wooName}" cannot be read (${found.error})` });
     } else if (found.kind === 'none') {
       const csvWanted = new Map();
       const csvProblems = [];
@@ -59,7 +60,7 @@ export function resolveReserveLines(lineItems, { unitLookup, linkKind, csvMap, w
         add(Number(product.id), quantity);
       }
       if (csvProblems.length > 0 && linkKind(line.productId) === 'linked') {
-        blocking.push(`"${line.wooName}" is not in its product's link document and the CSV does not place it`);
+        blocking.push({ productId: line.productId, kind: 'unplaced', text: `"${line.wooName}" is not in its product's link document and the CSV does not place it` });
       }
     }
     // kind "ignore": not a HighDelivery product, nothing to reserve

@@ -9,7 +9,7 @@ export const quietLogger = { log() {}, warn() {}, error() {} };
 
 export const STOCK_CONFIG = {
   mode: 'live', maxChangedUnits: 10, maxTotalDelta: 40, maxRestocks: 5, maxSingleIncrease: 20, minHdItems: 5,
-  reserveStatuses: ['processing', 'on-hold'], writeDelayMs: 0
+  reserveStatuses: ['processing', 'on-hold'], reserveDays: 60, writeDelayMs: 0
 };
 
 export const NOW = new Date('2026-11-15T10:00:00Z');
@@ -68,6 +68,7 @@ export function makeShop({ products = [], variations = {}, orders = [], control 
       const target = find(id);
       if (fields.meta_data) { upsertMeta(target, fields.meta_data); }
       if (fields.stock_quantity !== undefined) { Object.assign(target, { stock_quantity: fields.stock_quantity, manage_stock: fields.manage_stock }); }
+      if (fields.backorders !== undefined) { target.backorders = fields.backorders; }
       return target;
     },
     async batchUpdateVariations(id, updates) {
@@ -77,7 +78,8 @@ export function makeShop({ products = [], variations = {}, orders = [], control 
       for (const update of updates) {
         if (failOn.variation?.includes(update.id)) { answer.push({ id: update.id, error: { code: 'bad', message: 'refused' } }); continue; }
         const target = variations[id].find((variation) => variation.id === update.id);
-        Object.assign(target, { stock_quantity: update.stock_quantity, manage_stock: update.manage_stock });
+        if (update.stock_quantity !== undefined) { Object.assign(target, { stock_quantity: update.stock_quantity, manage_stock: update.manage_stock }); }
+        if (update.backorders !== undefined) { target.backorders = update.backorders; }
         upsertMeta(target, update.meta_data || []);
         answer.push({ id: update.id });
       }

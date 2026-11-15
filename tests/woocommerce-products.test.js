@@ -69,7 +69,7 @@ test('open orders are listed with a small field list, never the whole order', as
   const { client, calls } = makeClient([{ body: [{ id: 1 }] }, { body: [] }]);
   const { orders, skippedStatuses } = await client.listOpenOrdersLite(['processing', 'on-hold'], { after: '2026-10-01T00:00:00Z' });
   assert.deepEqual([orders, skippedStatuses], [[{ id: 1 }], []]);
-  assert.equal(calls[0].url.searchParams.get('_fields'), 'id,status,line_items,meta_data');
+  assert.equal(calls[0].url.searchParams.get('_fields'), 'id,status,date_created_gmt,line_items,meta_data');
   assert.equal(calls[0].url.searchParams.get('after'), '2026-10-01T00:00:00Z');
   assert.equal(calls[1].url.searchParams.get('status'), 'on-hold');
 });
