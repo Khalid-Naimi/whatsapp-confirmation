@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { secretMatches, verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 import { buildHealthDetails, buildReadiness } from './services/health-tracker.js';
 import { warehouseQuantity } from './services/hd-product-match.js';
+import { redact } from './log.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -263,11 +264,19 @@ export function createApp({ config, confirmationService, store, stockAlertServic
           req.headers['x-event-id'] ||
           hashEvent(rawBody);
         logger.log(`[webhook][wasender] received eventId=${String(eventId)}`);
-        const result = await confirmationService.processWasenderInbound(body, String(eventId));
+        let result;
+        try {
+          result = await confirmationService.processWasenderInbound(body, String(eventId));
+        } catch (error) {
+          // Like the WooCommerce route: a verified delivery is answered 200 even when processing breaks, so Wasender
+          // does not retry it in a loop or switch the webhook off. The hourly follow-ups recover what they can.
+          logger.error(`[webhook][wasender] processing failed eventId=${String(eventId)}: ${redact(error?.message || error)}`);
+          return sendJson(res, 200, { ok: false, reason: 'processing_failed' });
+        }
         logger.log(
-          `[webhook][wasender] completed eventId=${String(eventId)} status=${result.status} ok=${String(result.body?.ok)} reason=${String(result.body?.reason || '')}`
+          `[webhook][wasender] completed eventId=${String(eventId)} status=${result?.status} ok=${String(result?.body?.ok)} reason=${String(result?.body?.reason || '')}`
         );
-        return sendJson(res, 200, result.body);
+        return sendJson(res, 200, result?.body ?? { ok: true });
       }
 
       if (pathname === '/tasks/order-followups') {

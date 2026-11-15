@@ -1,7 +1,8 @@
 // Start-up and shut-down helpers for server.js, kept apart so they can be tested without opening a port.
 
 export const KEEP_AWAKE_INTERVAL_MS = 10 * 60 * 1000;
-export const SHUTDOWN_GRACE_MS = 10 * 1000;
+// Render waits 30 s after SIGTERM before it kills the process; 25 s leaves room to flush the local store and exit.
+export const SHUTDOWN_GRACE_MS = 25 * 1000;
 
 // The public address to ping, or '' when there is none worth pinging (unset or a local address).
 export function keepAwakeUrl(env = process.env, baseUrl = '') {
@@ -44,9 +45,33 @@ export function startKeepAwake({ url, intervalMs = KEEP_AWAKE_INTERVAL_MS, timeo
   return () => clearInterval(timer);
 }
 
+// What a SIGTERM waits for, built defensively: a service that does not have a method (yet) is skipped.
+//  - confirmations: send the due delayed confirmations now (or leave them to the hourly backfill), then wait for the
+//    service's background tasks, then for the durable-state writes they may have queued;
+//  - the stock sync run in progress and the stock alert queue, side by side.
+export function shutdownWork({ confirmationService = null, stockSyncService = null, stockAlertService = null, durableState = null } = {}) {
+  const call = (target, name) => (typeof target?.[name] === 'function' ? target[name]() : undefined);
+  return [
+    async () => {
+      try {
+        await call(confirmationService, 'flushDueConfirmations');
+      } catch {
+        // what could not be sent now is picked up by the hourly backfill
+      }
+      await Promise.allSettled([
+        Promise.resolve().then(() => call(confirmationService, 'drain')),
+        Promise.resolve().then(() => call(confirmationService, 'drainBackgroundTasks'))
+      ]);
+      await durableState?.chain;
+    },
+    () => stockSyncService?.runPromise,
+    () => stockAlertService?.processing
+  ];
+}
+
 // Stops taking new requests, gives running background work (HighDelivery sends, stock alerts) up to graceMs to end,
-// then exits. Safe to call twice: the second call is ignored.
-export function createShutdown({ server, waitFor = [], stop = [], graceMs = SHUTDOWN_GRACE_MS, logger = console, exit = (code) => process.exit(code) }) {
+// then runs the `finally` steps (flush the local store) and exits. Safe to call twice: the second call is ignored.
+export function createShutdown({ server, waitFor = [], stop = [], finally: finalSteps = [], graceMs = SHUTDOWN_GRACE_MS, logger = console, exit = (code) => process.exit(code) }) {
   let started = false;
   return async function shutdown(signal = 'SIGTERM') {
     if (started) {
@@ -77,6 +102,13 @@ export function createShutdown({ server, waitFor = [], stop = [], graceMs = SHUT
     });
     const outcome = await Promise.race([work.then(() => 'done'), timedOut]);
     clearTimeout(timer);
+    for (const step of finalSteps) {
+      try {
+        await step();
+      } catch (error) {
+        logger.warn(`[shutdown] final step failed: ${error?.message || error}`);
+      }
+    }
     logger.log(outcome === 'done' ? '[shutdown] all work finished, exiting' : '[shutdown] grace time over, exiting with work still running');
     exit(0);
   };

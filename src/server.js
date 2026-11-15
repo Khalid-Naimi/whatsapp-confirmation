@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import { createApp } from './app.js';
-import { checkConfigAtBoot, createShutdown, keepAwakeUrl, startKeepAwake } from './lifecycle.js';
+import { checkConfigAtBoot, createShutdown, keepAwakeUrl, shutdownWork, startKeepAwake } from './lifecycle.js';
 import { isConfigStrict, loadConfig } from './config.js';
 import { JsonStore } from './json-store.js';
 import { ConfirmationService } from './services/confirmation-service.js';
@@ -184,11 +184,8 @@ let stopKeepAwake = () => {};
 const shutdown = createShutdown({
   server,
   stop: [() => stopKeepAwake()],
-  waitFor: [
-    () => confirmationService.drainBackgroundTasks(),
-    () => stockAlertService.processing,
-    () => durableState.chain
-  ],
+  waitFor: shutdownWork({ confirmationService, stockSyncService, stockAlertService, durableState }),
+  finally: [() => store.flush?.()],
   logger
 });
 process.once('SIGTERM', () => shutdown('SIGTERM'));
