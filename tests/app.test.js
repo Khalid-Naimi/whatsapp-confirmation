@@ -5276,3 +5276,57 @@ test('the stock sync status route needs the task secret and passes the service a
   const off = await dispatch(createMatchingApp(), { method: 'GET', url: '/api/stock-sync/status', headers: withSecret });
   assert.equal(off.statusCode, 503);
 });
+
+// --- stock sync task ---
+
+test('the stock sync task needs the secret, reads dryRun and approve, and reports a busy run as 202', async () => {
+  const calls = [];
+  const stockSyncService = {
+    async run(options) {
+      calls.push(options);
+      return calls.length === 3 ? { skipped: 'already_running' } : { mode: { env: 'live', paused: false, effective: 'live' }, summary: { aborted: '' }, plan: [] };
+    }
+  };
+  const app = createMatchingApp({ stockSyncService });
+  assert.equal((await dispatch(app, { method: 'POST', url: '/tasks/stock-sync?dryRun=1' })).statusCode, 401);
+  assert.equal(calls.length, 0);
+  const preview = await dispatch(app, { method: 'POST', url: '/tasks/stock-sync?dryRun=1', headers: withSecret });
+  assert.deepEqual([preview.statusCode, preview.body.ok, preview.body.plan], [200, true, []]);
+  await dispatch(app, { method: 'POST', url: '/tasks/stock-sync?approve=abc123', headers: withSecret });
+  const busy = await dispatch(app, { method: 'POST', url: '/tasks/stock-sync', headers: withSecret });
+  assert.deepEqual([busy.statusCode, busy.body], [202, { ok: true, skipped: 'already_running' }]);
+  assert.deepEqual(calls, [{ dryRun: true, approveHash: '' }, { dryRun: false, approveHash: 'abc123' }, { dryRun: false, approveHash: '' }]);
+  assert.equal((await dispatch(createMatchingApp(), { method: 'POST', url: '/tasks/stock-sync', headers: withSecret })).statusCode, 503);
+});
+
+test('the hourly task runs the stock sync after the HighDelivery status sync and before the stock alerts', async () => {
+  const order = [];
+  const app = createMatchingApp({
+    stockSyncService: { async run() { order.push('stock-sync'); return { summary: { changed: 2 } }; } },
+    followupExtras: {
+      hdStatusSyncService: { async run() { order.push('hd-status'); return { checked: 0 }; } },
+      stockAlertService: { async processQueue() { order.push('stock-alerts'); } }
+    }
+  });
+  const result = await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
+  assert.deepEqual(order, ['hd-status', 'stock-sync', 'stock-alerts']);
+  assert.deepEqual(result.body.stockSync, { changed: 2 });
+});
+
+test('a stock sync that throws cannot break the hourly follow-ups', async () => {
+  const order = [];
+  const app = createMatchingApp({
+    stockSyncService: { async run() { throw new Error('boom'); } },
+    followupExtras: { stockAlertService: { async processQueue() { order.push('stock-alerts'); } } }
+  });
+  const result = await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.stockSync, null);
+  assert.deepEqual(order, ['stock-alerts']);
+});
+
+test('the hourly task with the stock sync switched off returns no stock sync summary', async () => {
+  const app = createMatchingApp({ stockSyncService: { async run() { return { skipped: 'off' }; } } });
+  const result = await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
+  assert.equal(result.body.stockSync, null);
+});

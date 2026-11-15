@@ -84,8 +84,42 @@ const PROBLEM_TEXT = {
   error: 'Unexpected error while sending.'
 };
 
+const plural = (count, one, many) => `${count} ${count === 1 ? one : many}`;
+
+// "Needs you" rows for the stock sync and the product links. Same row shape as the order rows, without an order id.
+function stockSyncNeeds(snapshot) {
+  const at = snapshot.lastRun?.at || '';
+  const needs = [];
+  const { lastRun } = snapshot;
+  if (lastRun?.aborted) {
+    const followUp = snapshot.approvable ? 'Check and approve in Matching.' : 'Nothing was written.';
+    needs.push({ kind: 'stock_sync_aborted', reason: `Stock sync stopped: ${lastRun.abortDetail || lastRun.aborted}. ${followUp}`, at });
+  }
+  if (snapshot.mode.controlProblem && snapshot.mode.env !== 'off') {
+    needs.push({ kind: 'sync_control_problem', reason: `The sync control record cannot be read (${snapshot.mode.controlProblem}). The stock sync does not write.`, at });
+  }
+  const unlinked = snapshot.unlinked.products + snapshot.unlinked.hd;
+  if (unlinked > 0) {
+    needs.push({ kind: 'unlinked_products', reason: `${plural(unlinked, 'new product needs', 'new products need')} a match.`, at });
+  }
+  if (snapshot.badDocs > 0) {
+    needs.push({ kind: 'bad_link_doc', reason: `${plural(snapshot.badDocs, 'product link document cannot', 'product link documents cannot')} be read.`, at });
+  }
+  return needs;
+}
+
+function stockSyncBlock(snapshot) {
+  const { lastRun } = snapshot;
+  return {
+    mode: { env: snapshot.mode.env, paused: snapshot.mode.paused, effective: snapshot.mode.effective },
+    lastRun: lastRun ? { at: lastRun.at, changed: lastRun.changed, errors: lastRun.errors, aborted: lastRun.aborted } : null,
+    unlinked: { woo: snapshot.unlinked.woo, hd: snapshot.unlinked.hd },
+    brokenLinks: snapshot.brokenLinks
+  };
+}
+
 // The read-only picture the desktop app shows on its Backend health page.
-export function buildHealthDetails({ store, tracker, config, now = new Date() }) {
+export function buildHealthDetails({ store, tracker, config, stockSyncService = null, now = new Date() }) {
   const quiet = config.messages?.quietHours || {};
   const timeZone = quiet.timeZone || 'Africa/Casablanca';
   const today = dayKey(now, timeZone);
@@ -110,6 +144,9 @@ export function buildHealthDetails({ store, tracker, config, now = new Date() })
     });
   }
 
+  const stockSync = stockSyncService?.healthSnapshot() || null;
+  const allNeeds = [...(stockSync ? stockSyncNeeds(stockSync) : []), ...needs];
+
   const services = {};
   for (const name of ['woocommerce', 'highdelivery', 'wasender']) {
     services[name] = { ...tracker.entry(name) };
@@ -123,7 +160,8 @@ export function buildHealthDetails({ store, tracker, config, now = new Date() })
       quietHours: { enabled: quiet.enabled !== false, startHour: quiet.startHour, endHour: quiet.endHour, timeZone },
       quietNow: isQuietHours(now, quiet),
       statusSyncEnabled: Boolean(config.highDelivery?.statusSyncEnabled),
-      autoSendEnabled: Boolean(config.highDelivery?.autoSendEnabled)
+      autoSendEnabled: Boolean(config.highDelivery?.autoSendEnabled),
+      stockSyncMode: config.stockSync?.mode || 'off'
     },
     services,
     runs: tracker.runs(24),
@@ -136,6 +174,7 @@ export function buildHealthDetails({ store, tracker, config, now = new Date() })
       sentToHighDelivery: count((o) => isToday(o.hdAutoSentAt)),
       delivered: count((o) => o.wooStatus === 'delivered' && isToday(o.updatedAt))
     },
-    needs: needs.slice(0, MAX_NEEDS)
+    stockSync: stockSync ? stockSyncBlock(stockSync) : null,
+    needs: allNeeds.slice(0, MAX_NEEDS)
   };
 }

@@ -11,6 +11,9 @@ import { LinkIndex } from './services/link-index.js';
 import { loadProductMapFile } from './services/hd-product-match.js';
 import { MailService } from './services/mail-service.js';
 import { StockAlertService } from './services/stock-alert-service.js';
+import { StockSyncService } from './services/stock-sync-service.js';
+import { SyncControl } from './services/sync-control.js';
+import { createTeamNotifier } from './services/team-notifier.js';
 import { HealthTracker, trackCalls } from './services/health-tracker.js';
 import { WasenderClient } from './services/wasender-client.js';
 import { WooCommerceClient } from './services/woocommerce-client.js';
@@ -125,6 +128,18 @@ const stockAlertService = new StockAlertService({
   logger
 });
 
+const stockSyncService = new StockSyncService({
+  wooClient,
+  hdClient: hdAutoSend.hdClient,
+  linkIndex,
+  syncControl: new SyncControl({ wooClient }),
+  productMap: hdProductMap,
+  notify: createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, logger }),
+  config: config.stockSync,
+  logger
+});
+logger.log(`Stock sync mode: ${config.stockSync.mode}; order routing by product links: ${config.highDelivery.linksMode}.`);
+
 const app = createApp({
   config,
   confirmationService,
@@ -133,6 +148,7 @@ const app = createApp({
   hdStatusSyncService,
   healthTracker,
   hdClient: hdAutoSend.hdClient,
+  stockSyncService,
   logger
 });
 

@@ -1,0 +1,269 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { LINK_META } from '../src/services/product-links.js';
+import { FILLER, controlProduct, hdRows, linkDoc, linkUnit, makeService, makeShop, simpleProduct, wooProduct, wooVariation } from './helpers/fake-shop.js';
+
+const FORBIDDEN_KEYS = /"(billing|shipping|phone|email|address\w*)":/u;
+
+// Saumon hoodie (XS reads item 512, XL on hold), a cap capped at 6, and filler rows for the minimum item count.
+function standardShop(extra = {}) {
+  const saumon = wooProduct(8974, { type: 'variable', name: 'Hoodie Saumon', doc: linkDoc({ 8978: linkUnit({ label: '175cm <' }), 8975: linkUnit({ label: '190cm >', hold: true, items: [] }) }) });
+  const cap = simpleProduct(8980, 24, { stock: 6, name: 'Cap', unit: { max_online: 6 } });
+  return makeShop({
+    products: [saumon, cap],
+    variations: { 8974: [wooVariation(8978, '175cm <', { stock: 5 }), wooVariation(8975, '190cm >', { stock: 3 })] },
+    hd: [...FILLER, ...hdRows([512, 2], [24, 20])],
+    ...extra
+  });
+}
+
+test('a dry run reads everything, writes no stock and only saves its own history', async () => {
+  const shop = standardShop();
+  const service = makeService(shop, { config: { mode: 'dry_run' } });
+  const result = await service.run();
+  assert.equal(result.mode.effective, 'dry_run');
+  assert.equal(result.summary.mode, 'dry_run');
+  assert.equal(result.summary.changed, 2); // XS 5 -> 2 and XL 3 -> 0 would change; the cap is already 6
+  assert.equal(shop.stockWrites().length, 0);
+  assert.equal(shop.stateWrites().length, 1);
+  assert.deepEqual(shop.stateWrites()[0].fields.meta_data.map((row) => row.key), [LINK_META.state]);
+  assert.equal(shop.products.find((p) => p.id === 8980).stock_quantity, 6);
+});
+
+test('a dry run asked for by the caller stays a dry run even when the mode is live', async () => {
+  const shop = standardShop();
+  const result = await makeService(shop).run({ dryRun: true });
+  assert.equal(result.summary.mode, 'dry_run');
+  assert.equal(shop.stockWrites().length, 0);
+});
+
+test('live: one batch per variable product with the audit meta, one update for a simple product', async () => {
+  const shop = standardShop();
+  const simple = simpleProduct(8990, 24, { stock: 0, name: 'Second cap' });
+  shop.products.push(simple);
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.changed, 3);
+  const batch = shop.writes.filter((w) => w.kind === 'batch');
+  assert.equal(batch.length, 1);
+  assert.deepEqual(batch[0].updates.map((u) => [u.id, u.stock_quantity, u.stock_status, u.manage_stock]), [[8975, 0, 'outofstock', true], [8978, 2, 'instock', true]]);
+  const xs = batch[0].updates.find((u) => u.id === 8978);
+  const audit = JSON.parse(xs.meta_data[0].value);
+  assert.equal(xs.meta_data[0].key, LINK_META.last);
+  assert.deepEqual(audit, { at: '2026-11-15T10:00:00.000Z', cap: null, from: 5, hd: 2, hold: false, offset: 0, reserved: 0, run: result.summary.planHash.slice(0, 8), to: 2 });
+  const single = shop.writes.find((w) => w.kind === 'product' && w.id === 8990);
+  assert.deepEqual([single.fields.stock_quantity, single.fields.manage_stock], [20, true]);
+});
+
+test('a second identical live run writes nothing', async () => {
+  const shop = standardShop();
+  const service = makeService(shop);
+  await service.run();
+  const stockWritesAfterFirst = shop.stockWrites().length;
+  const second = await makeService(shop).run();
+  assert.equal(second.summary.changed, 0);
+  assert.equal(shop.stockWrites().length, stockWritesAfterFirst);
+});
+
+test('open orders keep their units reserved; an order already sent does not', async () => {
+  const order = (state, status = 'processing') => ({ id: 1, status, line_items: [{ name: 'x', quantity: 1, product_id: 8974, variation_id: 8978 }], meta_data: state ? [{ key: 'rhymat_hd_api_state', value: state }] : [] });
+  const shop = standardShop({ orders: [order(''), order('sending'), order('sent'), order('', 'completed')] });
+  const result = await makeService(shop).run({ dryRun: true });
+  const row = result.plan.find((r) => r.unit === '8978');
+  assert.deepEqual([row.hd, row.reserved, row.target], [2, 2, 0]);
+  assert.deepEqual(shop.calls.lastOrderQuery.statuses, ['processing', 'on-hold', 'confirmed']);
+  assert.match(shop.calls.lastOrderQuery.after, /^2026-10-16/u);
+});
+
+test('an order for a product that is only in the CSV still reserves its HighDelivery item', async () => {
+  const productMap = (await import('../src/services/hd-product-match.js')).loadProductMap('woo_product_name,highdelivery_product_name\nOld hoodie,HD item 512\n');
+  const shop = standardShop({ orders: [{ id: 2, status: 'on-hold', line_items: [{ name: 'Old hoodie', quantity: 1, product_id: 4242, variation_id: 0 }], meta_data: [] }] });
+  const result = await makeService(shop, { productMap }).run({ dryRun: true });
+  assert.equal(result.plan.find((r) => r.unit === '8978').reserved, 1);
+});
+
+test('too many changes stops the whole run; a wrong approval hash is refused, the right one applies once', async () => {
+  const products = Array.from({ length: 12 }, (_, i) => simpleProduct(100 + i, 24, { stock: 1 }));
+  const shop = makeShop({ products, hd: [...FILLER, ...hdRows([24, 3])] });
+  const first = await makeService(shop).run();
+  assert.equal(first.summary.aborted, 'too_many_changes');
+  assert.equal(shop.stockWrites().length, 0);
+
+  const wrong = await makeService(shop).run({ approveHash: 'f'.repeat(64) });
+  assert.equal(wrong.approval, 'hash_mismatch');
+  assert.equal(wrong.summary.aborted, 'too_many_changes');
+  assert.equal(shop.stockWrites().length, 0);
+
+  const approved = await makeService(shop).run({ approveHash: first.summary.planHash });
+  assert.equal(approved.approval, 'applied');
+  assert.equal(approved.summary.aborted, '');
+  assert.equal(shop.stockWrites().length, 12);
+
+  const again = await makeService(shop).run({ approveHash: first.summary.planHash });
+  assert.equal(again.summary.changed, 0); // nothing left to apply, the old approval buys nothing
+});
+
+test('an approval never applies in a dry run', async () => {
+  const products = Array.from({ length: 12 }, (_, i) => simpleProduct(100 + i, 24, { stock: 1 }));
+  const shop = makeShop({ products, hd: [...FILLER, ...hdRows([24, 3])] });
+  const first = await makeService(shop).run({ dryRun: true });
+  const result = await makeService(shop).run({ dryRun: true, approveHash: first.summary.planHash });
+  assert.equal(result.approval, 'not_live');
+  assert.equal(shop.stockWrites().length, 0);
+});
+
+test('HighDelivery empty or total zero aborts and can never be approved', async () => {
+  for (const hd of [[], hdRows([24, 0], [1, 0], [2, 0], [3, 0], [4, 0], [5, 0])]) {
+    const shop = makeShop({ products: [simpleProduct(100, 24, { stock: 4 })], hd });
+    const first = await makeService(shop).run();
+    assert.match(first.summary.aborted, /^hd_(empty|total_zero)$/u);
+    const approved = await makeService(shop).run({ approveHash: first.summary.planHash });
+    assert.equal(approved.approval, 'not_approvable');
+    assert.equal(shop.stockWrites().length, 0);
+    assert.equal(shop.products.find((p) => p.id === 100).stock_quantity, 4);
+  }
+});
+
+test('HighDelivery, the order list or the product list failing aborts without any write', async () => {
+  for (const [failOn, reason] of [[{ hd: true }, 'hd_unavailable'], [{ orders: true }, 'orders_failed'], [{ products: true }, 'woo_products_failed']]) {
+    const shop = standardShop({ failOn });
+    const result = await makeService(shop).run();
+    assert.equal(result.summary.aborted, reason);
+    assert.equal(shop.stockWrites().length, 0);
+  }
+});
+
+test('a missing, paused or unreadable control record means no writes, but the plan is still computed', async () => {
+  const cases = [
+    { control: null },
+    { control: controlProduct({ schema: 1, rev: 1, paused: true, ignored_hd_ids: [] }) },
+    { control: controlProduct('{not json') },
+    { failOn: { control: true } }
+  ];
+  for (const extra of cases) {
+    const shop = standardShop(extra);
+    const result = await makeService(shop).run();
+    assert.equal(result.mode.paused, true);
+    assert.equal(result.mode.effective, 'dry_run');
+    assert.equal(result.summary.mode, 'dry_run');
+    assert.ok(result.plan.length > 0);
+    assert.equal(shop.stockWrites().length, 0);
+  }
+});
+
+test('when the control record cannot be read at all the history is not overwritten', async () => {
+  const shop = standardShop({ failOn: { control: true } });
+  await makeService(shop).run();
+  assert.equal(shop.stateWrites().length, 0);
+});
+
+test('a write that fails stops the run, nothing after it is attempted, and the report says what was written', async () => {
+  const products = [simpleProduct(100, 24, { stock: 1 }), simpleProduct(101, 24, { stock: 1 }), simpleProduct(102, 24, { stock: 1 })];
+  const shop = makeShop({ products, hd: [...FILLER, ...hdRows([24, 3])], failOn: { product: [101] } });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, 'write_failed');
+  assert.equal(result.summary.errors, 1);
+  assert.equal(result.summary.changed, 1);
+  assert.match(result.summary.abortDetail, /stopped after 1 of 3 units: product 101/u);
+  assert.deepEqual(shop.stockWrites().map((w) => w.id), [100, 101]);
+});
+
+test('a variation the shop refuses inside a batch also stops the run and is named', async () => {
+  const shop = standardShop({ failOn: { variation: [8975] } });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, 'write_failed');
+  assert.match(result.summary.abortDetail, /variation 8975 of product 8974/u);
+  assert.equal(result.summary.changed, 1);
+});
+
+test('one product whose variations cannot be read is skipped; more than three stop the run', async () => {
+  const variable = (id) => wooProduct(id, { type: 'variable', doc: linkDoc({ [id + 1]: linkUnit() }) });
+  const make = (failing) => {
+    const products = [200, 300, 400, 500, 600].map(variable);
+    return makeShop({ products, variations: Object.fromEntries(products.map((p) => [p.id, [wooVariation(p.id + 1, 'M', { stock: 0 })]])), hd: [...FILLER, ...hdRows([512, 1])], failOn: { variations: failing } });
+  };
+  const one = make([200]);
+  const result = await makeService(one).run();
+  assert.deepEqual([result.summary.errors, result.summary.aborted, result.summary.changed], [1, '', 4]);
+  const many = make([200, 300, 400, 500]);
+  const aborted = await makeService(many).run();
+  assert.equal(aborted.summary.aborted, 'variations_failed');
+  assert.equal(many.stockWrites().length, 0);
+});
+
+test('the hourly sync with the mode off makes no call at all; a dry run can still be asked for', async () => {
+  const shop = standardShop();
+  const service = makeService(shop, { config: { mode: 'off' } });
+  assert.deepEqual((await service.run()).skipped, 'off');
+  assert.equal(shop.writes.length, 0);
+  assert.equal(shop.calls.orders, 0);
+  const preview = await service.run({ dryRun: true });
+  assert.equal(preview.summary.mode, 'dry_run');
+  assert.equal(shop.stockWrites().length, 0);
+});
+
+test('two runs at the same time: the second says already_running', async () => {
+  const shop = standardShop();
+  const service = makeService(shop);
+  const [first, second] = await Promise.all([service.run(), service.run()]);
+  assert.equal(second.skipped, 'already_running');
+  assert.ok(first.summary);
+  assert.equal(service.running, false);
+});
+
+test('the run history survives a restart; only the newest run keeps its change list; 24 runs are kept', async () => {
+  const shop = standardShop();
+  for (let i = 0; i < 26; i += 1) {
+    await makeService(shop, { now: new Date(NOW_MS + i * 3600000) }).run({ dryRun: true });
+  }
+  const state = shop.controlState();
+  assert.equal(state.runs.length, 24);
+  assert.ok(state.runs.at(-1).changes.length > 0);
+  assert.ok(state.runs.slice(0, -1).every((run) => !('changes' in run)));
+  const restarted = await makeService(shop).status();
+  assert.equal(restarted.lastRun.at, state.runs.at(-1).at);
+  assert.equal(restarted.plan.length, 0); // the plan itself is only kept in memory
+});
+const NOW_MS = Date.parse('2026-11-15T10:00:00Z');
+
+test('a live abort tells the team once, and again only after six hours; a dry run stays quiet', async () => {
+  const sent = [];
+  const notify = async (message) => { sent.push(message); return 2; };
+  const shop = makeShop({ products: [simpleProduct(100, 24, { stock: 4 })], hd: [] });
+  const at = (hours) => new Date(NOW_MS + hours * 3600000);
+  await makeService(shop, { notify, now: at(0) }).run();
+  await makeService(shop, { notify, now: at(1) }).run();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /^Rhymat: synchro du stock arretee/u);
+  await makeService(shop, { notify, now: at(7) }).run();
+  assert.equal(sent.length, 2);
+
+  const quiet = [];
+  await makeService(shop, { config: { mode: 'dry_run' }, notify: async (m) => { quiet.push(m); return 2; }, now: at(30) }).run();
+  assert.equal(quiet.length, 0);
+});
+
+test('status shows the mode and, after a run, the plan; it has no customer data', async () => {
+  const order = { id: 7, status: 'processing', billing: { phone: '+212600000000', email: 'a@b.c' }, shipping: { address_1: 'Rue 1' }, line_items: [{ name: 'x', quantity: 1, product_id: 8974, variation_id: 8978 }], meta_data: [] };
+  const shop = standardShop({ orders: [order] });
+  const service = makeService(shop);
+  await service.run({ dryRun: true });
+  const status = await service.status();
+  assert.deepEqual(status.mode, { env: 'live', paused: false, effective: 'live', controlProblem: '' });
+  assert.equal(status.running, false);
+  assert.ok(status.plan.length > 0);
+  assert.doesNotMatch(JSON.stringify(status), FORBIDDEN_KEYS);
+  assert.doesNotMatch(JSON.stringify(status), /Rue 1|a@b\.c|\+2126/u);
+  assert.doesNotMatch(JSON.stringify((await service.run({ dryRun: true })).plan), FORBIDDEN_KEYS);
+});
+
+test('the unlinked products and HighDelivery items of the last run are reported', async () => {
+  const shop = standardShop();
+  shop.products.push(wooProduct(555, { name: 'Brand new hoodie' }));
+  const service = makeService(shop);
+  await service.run({ dryRun: true });
+  const status = await service.status();
+  assert.deepEqual(status.unlinked.woo, [{ productId: 555, unit: 'p', name: 'Brand new hoodie' }]);
+  assert.equal(status.unlinked.hd.length, 5); // the five filler rows
+  const snapshot = service.healthSnapshot();
+  assert.deepEqual(snapshot.unlinked, { woo: 1, hd: 5, products: 1 });
+});

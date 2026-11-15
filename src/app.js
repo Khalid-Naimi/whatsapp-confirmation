@@ -45,7 +45,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
           if (!healthTracker) {
             return sendCorsJson(res, 503, { ok: false, error: 'Health details are not enabled' });
           }
-          return sendCorsJson(res, 200, { ok: true, ...buildHealthDetails({ store, tracker: healthTracker, config }) });
+          return sendCorsJson(res, 200, { ok: true, ...buildHealthDetails({ store, tracker: healthTracker, config, stockSyncService }) });
         }
 
         if (pathname === '/api/matching/hd-items') {
@@ -197,6 +197,15 @@ export function createApp({ config, confirmationService, store, stockAlertServic
             logger.warn(`[task][order-followups] hd status sync failed: ${error.message}`);
           }
         }
+        // Then the stock sync (runs only when STOCK_SYNC_MODE is set; it can never break the follow-ups).
+        let stockSync = null;
+        if (stockSyncService) {
+          try {
+            stockSync = await stockSyncService.run();
+          } catch (error) {
+            logger.warn(`[task][order-followups] stock sync failed: ${error.message}`);
+          }
+        }
         // Stock alerts held back by the quiet hours go out now.
         if (stockAlertService) {
           try {
@@ -205,14 +214,31 @@ export function createApp({ config, confirmationService, store, stockAlertServic
             logger.warn(`[task][order-followups] stock alert queue failed: ${error.message}`);
           }
         }
-        healthTracker?.recordRun({ ok: true, summary: result, hdStatus });
-        return sendJson(res, 200, { ok: true, summary: result, hdStatus });
+        healthTracker?.recordRun({ ok: true, summary: result, hdStatus, stockSync: stockSync?.summary || null });
+        return sendJson(res, 200, { ok: true, summary: result, hdStatus, stockSync: stockSync?.summary || null });
         } catch (error) {
           healthTracker?.recordRun({ ok: false, error: String(error?.message || error).slice(0, 120) });
           throw error;
         } finally {
           followupsRunning = false;
         }
+      }
+
+      if (pathname === '/tasks/stock-sync') {
+        const providedSecret = req.headers['x-task-secret'];
+        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
+          logger.warn('[task][stock-sync] invalid task secret');
+          return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        }
+        if (!stockSyncService) {
+          return sendJson(res, 503, { ok: false, error: 'Stock sync is not enabled' });
+        }
+        const dryRun = ['1', 'true'].includes(parsedUrl.searchParams.get('dryRun'));
+        const result = await stockSyncService.run({ dryRun, approveHash: parsedUrl.searchParams.get('approve') || '' });
+        if (result.skipped === 'already_running') {
+          return sendJson(res, 202, { ok: true, skipped: 'already_running' });
+        }
+        return sendJson(res, 200, { ok: true, ...result });
       }
 
       if (pathname === '/tasks/stock-alerts') {

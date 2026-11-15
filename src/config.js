@@ -98,6 +98,22 @@ export function loadConfig() {
       // but also by the product links, differences are logged, on = by the product links (the CSV stays the fallback).
       linksMode: parseChoiceEnv(process.env.HD_LINKS_FOR_ORDERS, ['off', 'shadow', 'on'], 'off')
     },
+    // The hourly stock sync (see services/stock-sync-service.js). off = nothing runs, dry_run = it computes and reports
+    // but never writes, live = it also writes the online stock. Live additionally needs the pause switch in WooCommerce off.
+    stockSync: {
+      mode: parseChoiceEnv(process.env.STOCK_SYNC_MODE, ['off', 'dry_run', 'live'], 'off'),
+      maxChangedUnits: parseCountEnv(process.env.STOCK_SYNC_MAX_CHANGED_UNITS, 10),
+      maxTotalDelta: parseCountEnv(process.env.STOCK_SYNC_MAX_TOTAL_DELTA, 40),
+      maxRestocks: parseCountEnv(process.env.STOCK_SYNC_MAX_RESTOCKS, 5),
+      maxSingleIncrease: parseCountEnv(process.env.STOCK_SYNC_MAX_SINGLE_INCREASE, 20),
+      minHdItems: parseCountEnv(process.env.STOCK_SYNC_MIN_HD_ITEMS, 5),
+      // Open orders that already took WooCommerce stock but are not at HighDelivery yet: their units stay reserved.
+      reserveStatuses: parseList(process.env.STOCK_SYNC_RESERVE_STATUSES, ['processing', 'on-hold', 'confirmed']),
+      reserveDays: parseCountEnv(process.env.STOCK_SYNC_RESERVE_DAYS, 30),
+      writeDelayMs: parseCountEnv(process.env.STOCK_SYNC_WRITE_DELAY_MS, 300)
+    },
+    // A WhatsApp digest to the team phones when a new product has no HighDelivery link yet.
+    matchingAlertsEnabled: parseBooleanEnv(process.env.MATCHING_ALERTS_ENABLED, false),
     messages: {
       internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),
       confirmationDelayMs: Number(process.env.CONFIRMATION_DELAY_SECONDS ?? 30) * 1000,
@@ -153,6 +169,16 @@ function parsePhoneList(value) {
 function parseChoiceEnv(value, choices, defaultValue) {
   const normalized = String(value ?? '').trim().toLowerCase();
   return choices.includes(normalized) ? normalized : defaultValue;
+}
+
+function parseCountEnv(value, defaultValue) {
+  const number = Number(value);
+  return value !== undefined && value !== '' && Number.isInteger(number) && number >= 0 ? number : defaultValue;
+}
+
+function parseList(value, defaultValue) {
+  const items = String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);
+  return items.length ? items : defaultValue;
 }
 
 function parseBooleanEnv(value, defaultValue) {

@@ -64,3 +64,57 @@ test('the details route needs the task secret and exposes no customer data', asy
   assert.equal(response.body.needs[0].orderId, '2');
   assert.doesNotMatch(JSON.stringify(response.body), /Someone|\+2126/);
 });
+
+// --- stock sync block ---
+
+const snapshot = (over = {}) => ({
+  mode: { env: 'live', paused: false, effective: 'live', controlProblem: '' },
+  lastRun: { at: '2026-11-15T13:00:00Z', changed: 3, errors: 0, aborted: '', abortDetail: '' },
+  approvable: false,
+  unlinked: { woo: 0, hd: 0, products: 0 },
+  brokenLinks: 0,
+  badDocs: 0,
+  ...over
+});
+const detailsWith = (stock, extraConfig = {}) => {
+  const store = newStore();
+  const tracker = new HealthTracker({ store, now: () => NOW });
+  return buildHealthDetails({ store, tracker, config: { ...config, stockSync: { mode: 'live' }, ...extraConfig }, stockSyncService: { healthSnapshot: () => stock }, now: NOW });
+};
+
+test('the details carry the stock sync block and the server mode', () => {
+  const details = detailsWith(snapshot());
+  assert.deepEqual(details.stockSync, {
+    mode: { env: 'live', paused: false, effective: 'live' },
+    lastRun: { at: '2026-11-15T13:00:00Z', changed: 3, errors: 0, aborted: '' },
+    unlinked: { woo: 0, hd: 0 },
+    brokenLinks: 0
+  });
+  assert.equal(details.server.stockSyncMode, 'live');
+  assert.deepEqual(details.needs, []);
+});
+
+test('without a stock sync service the block is null and the mode is off', () => {
+  const store = newStore();
+  const details = buildHealthDetails({ store, tracker: new HealthTracker({ store, now: () => NOW }), config, now: NOW });
+  assert.equal(details.stockSync, null);
+  assert.equal(details.server.stockSyncMode, 'off');
+});
+
+test('an aborted run, new products, bad documents and a broken control record become "needs you" rows', () => {
+  const aborted = detailsWith(snapshot({ lastRun: { at: 'a', changed: 0, errors: 0, aborted: 'too_many_changes', abortDetail: '14 units would change (limit 10)' }, approvable: true }));
+  assert.deepEqual(aborted.needs.map((n) => n.kind), ['stock_sync_aborted']);
+  assert.equal(aborted.needs[0].reason, 'Stock sync stopped: 14 units would change (limit 10). Check and approve in Matching.');
+
+  const refused = detailsWith(snapshot({ lastRun: { at: 'a', changed: 0, errors: 0, aborted: 'hd_empty', abortDetail: 'HighDelivery returned no items' } }));
+  assert.equal(refused.needs[0].reason, 'Stock sync stopped: HighDelivery returned no items. Nothing was written.');
+
+  const rest = detailsWith(snapshot({ unlinked: { woo: 4, hd: 1, products: 1 }, badDocs: 2, mode: { env: 'live', paused: true, effective: 'dry_run', controlProblem: 'control_missing' } }));
+  assert.deepEqual(rest.needs.map((n) => n.kind), ['sync_control_problem', 'unlinked_products', 'bad_link_doc']);
+  assert.equal(rest.needs[1].reason, '2 new products need a match.');
+  assert.equal(rest.needs[2].reason, '2 product link documents cannot be read.');
+});
+
+test('the details with a stock sync block contain no customer keys', () => {
+  assert.doesNotMatch(JSON.stringify(detailsWith(snapshot({ unlinked: { woo: 1, hd: 1, products: 1 } }))), /"(billing|shipping|phone|email|address\w*)":/u);
+});
