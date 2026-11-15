@@ -313,6 +313,72 @@
         "writer": "desktop"
       },
       "expected": 0
+    },
+    {
+      "name": "an item quantity of 2 halves the pool",
+      "hd": 10,
+      "reserved": 0,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 2
+          }
+        ],
+        "offset": 0,
+        "max_online": null,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 5
+    },
+    {
+      "name": "an item quantity of 2 rounds down",
+      "hd": 9,
+      "reserved": 0,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 2
+          }
+        ],
+        "offset": 0,
+        "max_online": null,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 4
+    },
+    {
+      "name": "item quantity 3 with reservations, offset and a cap",
+      "hd": 20,
+      "reserved": 2,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 3
+          }
+        ],
+        "offset": 1,
+        "max_online": 4,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 4
     }
   ]
 }

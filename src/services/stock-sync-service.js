@@ -19,14 +19,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // ---------------------------------------------------------------------------------------------------------------
 
 // What the shop may show online for one unit. The desktop app uses the same formula and the same fixture.
-//   hold: forced to 0. Otherwise the HighDelivery quantity minus what open orders still need, minus the offset
-//   kept back, never below 0, and never above the cap (max_online).
+//   hold: forced to 0. Otherwise the HighDelivery quantity minus what open orders still need (counted in
+//   HighDelivery units, item qty included), minus the offset kept back, never below 0, divided by the item's qty
+//   (one shop piece takes qty HighDelivery pieces) and rounded down, and never above the cap (max_online).
 export function computeTarget(hdQty, reserved, unit) {
   if (unit.hold) {
     return 0;
   }
-  const available = Math.max(0, hdQty - reserved - unit.offset);
-  return unit.max_online === null ? available : Math.min(available, unit.max_online);
+  const pieces = Math.floor(Math.max(0, hdQty - reserved - unit.offset) / unit.items[0].qty);
+  return unit.max_online === null ? pieces : Math.min(pieces, unit.max_online);
 }
 
 // Units of each HighDelivery item that open orders will still take: Map hdId -> quantity.
@@ -64,7 +65,9 @@ function explain({ hd, reserved, unit, target }) {
   if (unit.hold) {
     return 'on hold: online stock is 0';
   }
-  const text = `hd ${hd} - reserved ${reserved} - offset ${unit.offset} = ${Math.max(0, hd - reserved - unit.offset)}`;
+  const pool = Math.max(0, hd - reserved - unit.offset);
+  const qty = unit.items[0].qty;
+  const text = `hd ${hd} - reserved ${reserved} - offset ${unit.offset} = ${pool}${qty > 1 ? ` / ${qty} per piece = ${Math.floor(pool / qty)}` : ''}`;
   return unit.max_online !== null && target === unit.max_online ? `${text}, capped at ${unit.max_online}` : text;
 }
 

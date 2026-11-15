@@ -288,3 +288,15 @@ test('when most HighDelivery quantities are garbage the whole run stops', async 
   assert.equal(result.summary.aborted, 'hd_ids_missing');
   assert.equal(shop.stockWrites().length, 0);
 });
+
+test('a unit made of two HighDelivery pieces shows half the pool, and an open order reserves both pieces', async () => {
+  const pair = simpleProduct(100, 24, { stock: 9, unit: { items: [{ hd_id: 24, hd_name: 'HD item 24', qty: 2 }] } });
+  const order = { id: 1, status: 'processing', line_items: [{ name: 'Pair', quantity: 1, product_id: 100, variation_id: 0 }], meta_data: [] };
+  const hd = [...FILLER, ...hdRows([24, 10])];
+  const free = await makeService(makeShop({ products: [pair], hd })).run({ dryRun: true });
+  assert.deepEqual([free.plan[0].target, free.plan[0].why], [5, 'hd 10 - reserved 0 - offset 0 = 10 / 2 per piece = 5']);
+  const shop = makeShop({ products: [pair], hd, orders: [order] });
+  const reserved = await makeService(shop).run();
+  assert.deepEqual([reserved.plan[0].reserved, reserved.plan[0].target], [2, 4]);
+  assert.equal(shop.stockWrites()[0].fields.stock_quantity, 4);
+});
