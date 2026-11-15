@@ -14,8 +14,10 @@ const DEFAULT_DROP_TEMPLATE =
  * after another in the background. The caller gets its answer straight away, because Wasender is rate limited.
  */
 export class StockAlertService {
-  constructor({ store, wasenderClient, template, dropTemplate, logger = console, autoProcess = true, isQuiet = () => false }) {
+  constructor({ store, wasenderClient, template, dropTemplate, logger = console, autoProcess = true, isQuiet = () => false, durableState = null }) {
     this.store = store;
+    // The outcome of each alert (sent / failed) is also kept in WooCommerce, so a restart does not forget it.
+    this.durableState = durableState;
     this.wasenderClient = wasenderClient;
     this.template = template || DEFAULT_TEMPLATE;
     this.dropTemplate = dropTemplate || DEFAULT_DROP_TEMPLATE;
@@ -63,7 +65,7 @@ export class StockAlertService {
       }
       seen.add(dedupeKey);
 
-      if (this.store.isPhoneOptedOut(phone.normalized)) {
+      if (this.store.isPhoneOptedOut(phone.normalized) || this.durableState?.isOptedOut?.(phone.normalized)) {
         skipped.push({ id, reason: 'opted_out' });
         continue;
       }
@@ -73,6 +75,10 @@ export class StockAlertService {
         const existing = db.stockAlerts.find((alert) => alert.id === id);
         if (existing) {
           return existing.status === 'failed' ? requeue(existing) : 'known';
+        }
+        // Not in the local cache (wiped by a restart) but already sent according to the durable record: never twice.
+        if (this.durableState?.stockAlertStatus?.(id) === 'sent') {
+          return 'known';
         }
         db.stockAlerts.push({
           id,
@@ -114,7 +120,7 @@ export class StockAlertService {
     for (const raw of Array.isArray(ids) ? ids : []) {
       const id = String(raw).trim();
       if (id) {
-        result[id] = known.get(id) || 'unknown';
+        result[id] = known.get(id) || this.durableState?.stockAlertStatus?.(id) || 'unknown';
       }
     }
     return result;
@@ -152,14 +158,27 @@ export class StockAlertService {
         const result = await this.wasenderClient.sendMessage({ to: next.phone, message });
         this.store.appendMessage({ source: 'outbound', phone: next.phone, kind: isDrop ? 'drop_alert' : 'stock_alert', payload: result, text: message });
         this.setStatus(next.id, { status: 'sent', sentAt: new Date().toISOString() });
+        await this.saveDurably(next.id, 'sent');
         this.logger.log(`[stock-alert] sent id=${next.id} kind=${next.kind || 'stock'}`);
       } catch (error) {
         const attempts = (next.attempts || 0) + 1;
         // Failed alerts are not retried in a loop (a broken Wasender session would only spin). WordPress hands the same
         // alert over again on its next retry, and a failed alert is then queued once more.
         this.setStatus(next.id, { status: 'failed', attempts, lastError: String(error?.message || error).slice(0, 300) });
+        await this.saveDurably(next.id, 'failed');
         this.logger.warn(`[stock-alert] send failed id=${next.id} attempts=${attempts} error=${error?.message}`);
       }
+    }
+  }
+
+  async saveDurably(id, status) {
+    if (!this.durableState) {
+      return;
+    }
+    try {
+      await this.durableState.recordStockAlert(id, status);
+    } catch (error) {
+      this.logger.warn(`[stock-alert] could not save the outcome of id=${id} durably: ${error.message}`);
     }
   }
 

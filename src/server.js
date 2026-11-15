@@ -1,9 +1,11 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import { createApp } from './app.js';
+import { createShutdown, keepAwakeUrl, startKeepAwake } from './lifecycle.js';
 import { loadConfig } from './config.js';
 import { JsonStore } from './json-store.js';
 import { ConfirmationService } from './services/confirmation-service.js';
+import { DurableState } from './services/durable-state.js';
 import { HdAutoSendService } from './services/hd-auto-send-service.js';
 import { HdStatusSyncService } from './services/hd-status-sync-service.js';
 import { HighDeliveryClient } from './services/highdelivery-client.js';
@@ -22,17 +24,11 @@ import { WordPressClient } from './services/wordpress-client.js';
 import { buildOptOutKeywords } from './utils/opt-out.js';
 
 const config = loadConfig();
-const store = new JsonStore(config.dataFile);
 const logger = console;
+const store = new JsonStore(config.dataFile, { logger });
 
 const optOutKeywords = buildOptOutKeywords(config.optOut.keywords);
 logger.log(`Opt-out keywords loaded: ${optOutKeywords.size} configured exact-match keywords.`);
-
-if (!config.wordpress.baseUrl) {
-  logger.warn(
-    'WARNING: WhatsApp opt-out persistence is not durable. Configure WP_BASE_URL and WP_API_KEY for WordPress REST storage before running production broadcasts.'
-  );
-}
 
 const wordpressClient = new WordPressClient({
   baseUrl: config.wordpress.baseUrl,
@@ -52,6 +48,9 @@ const wooClient = new WooCommerceClient({
   consumerSecret: config.woo.consumerSecret,
   logger
 });
+
+// Opt-outs and stock alert outcomes are kept in WooCommerce (the local disk is wiped on every restart).
+const durableState = new DurableState({ wooClient, wordpressClient, store, logger });
 
 const healthTracker = new HealthTracker({ store });
 trackCalls(wooClient, 'woocommerce', ['request'], healthTracker);
@@ -93,9 +92,11 @@ if (config.highDelivery.autoSendEnabled) {
 
 for (const [name, value] of [['WOOCOMMERCE_WEBHOOK_SECRET', config.woo.webhookSecret], ['WASENDER_WEBHOOK_SECRET', config.wasender.webhookSecret], ['TASK_SECRET', config.tasks.secret]]) {
   if (!value) {
-    logger.warn(`WARNING: ${name} is not set; the endpoint it protects is not protected.`);
+    logger.warn(`WARNING: ${name} is not set; the endpoint it protects refuses every request (503) until it is set.`);
   }
 }
+
+const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, logger });
 
 const confirmationService = new ConfirmationService({
   store,
@@ -107,6 +108,8 @@ const confirmationService = new ConfirmationService({
   hdAutoSend,
   messages: config.messages,
   wooStatuses: config.wooStatuses,
+  durableState,
+  notifyTeam,
   logger
 });
 
@@ -126,10 +129,9 @@ const stockAlertService = new StockAlertService({
   template: config.messages.stockAlertTemplate,
   dropTemplate: config.messages.dropAlertTemplate,
   isQuiet: () => confirmationService.isQuietNow(),
+  durableState,
   logger
 });
-
-const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, logger });
 
 const stockSyncService = new StockSyncService({
   wooClient,
@@ -153,11 +155,38 @@ const app = createApp({
   healthTracker,
   hdClient: hdAutoSend.hdClient,
   stockSyncService,
+  durableState,
   logger
 });
 
 const server = http.createServer(app);
+let stopKeepAwake = () => {};
+
+const shutdown = createShutdown({
+  server,
+  stop: [() => stopKeepAwake()],
+  waitFor: [
+    () => confirmationService.drainBackgroundTasks(),
+    () => stockAlertService.processing,
+    () => durableState.chain
+  ],
+  logger
+});
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
+
+// The opt-outs are loaded before any webhook is accepted. If WooCommerce does not answer in time the service starts
+// anyway (with a warning); the load keeps going in the background and every later write retries it.
+const BOOT_LOAD_TIMEOUT_MS = 20000;
+await Promise.race([
+  durableState.load(),
+  new Promise((resolve) => setTimeout(resolve, BOOT_LOAD_TIMEOUT_MS).unref())
+]);
+if (!durableState.loaded) {
+  logger.warn('WARNING: opt-outs and stock alert outcomes could not be loaded from WooCommerce yet; starting with the local cache.');
+}
 
 server.listen(config.port, () => {
-  console.log(`WooCommerce WhatsApp confirmation service listening on port ${config.port}`);
+  logger.log(`WooCommerce WhatsApp confirmation service listening on port ${config.port}`);
+  stopKeepAwake = startKeepAwake({ url: keepAwakeUrl(process.env, config.baseUrl), logger });
 });

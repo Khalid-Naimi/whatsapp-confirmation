@@ -1,11 +1,66 @@
 import { createHash } from 'node:crypto';
-import { verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
+import { secretMatches, verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 import { buildHealthDetails } from './services/health-tracker.js';
 import { warehouseQuantity } from './services/hd-product-match.js';
 
-export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, hdClient = null, stockSyncService = null, logger = console }) {
+export const MAX_BODY_BYTES = 1024 * 1024;
+
+export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, hdClient = null, stockSyncService = null, durableState = null, logger = console, maxBodyBytes = MAX_BODY_BYTES }) {
   // The hourly task must never run twice at once (two runs could message the same customer twice).
   let followupsRunning = false;
+
+  // Fails closed: no secret configured = 503 (nothing is accepted), a wrong secret = 401. Returns true when allowed.
+  function checkTaskSecret(req, res, label, send = sendJson) {
+    if (!config.tasks?.secret) {
+      logger.warn(`[${label}] refused: TASK_SECRET is not set`);
+      send(res, 503, { ok: false, error: 'Task secret is not configured' });
+      return false;
+    }
+    if (!secretMatches(req.headers['x-task-secret'], config.tasks.secret)) {
+      logger.warn(`[${label}] invalid task secret`);
+      send(res, 401, { ok: false, error: 'Invalid task secret' });
+      return false;
+    }
+    return true;
+  }
+
+  // The three hourly steps run one after the other, but a failure in one never skips the others.
+  async function runHourlySteps() {
+    let result = null;
+    let followupsError = null;
+    try {
+      await durableState?.ensureLoaded?.();
+    } catch (error) {
+      logger.warn(`[task][order-followups] durable state not loaded: ${error.message}`);
+    }
+    try {
+      result = await confirmationService.runOrderFollowups();
+      logger.log(
+        `[task][order-followups] completed backfilled=${result.backfilled || 0} remindersSent=${result.remindersSent || 0} autoCancelled=${result.autoCancelled || 0} ambiguous=${result.ambiguous || 0} skipped=${result.skipped || 0} errors=${result.errors || 0}`
+      );
+    } catch (error) {
+      followupsError = error;
+      logger.error(`[task][order-followups] follow-ups failed: ${error.message}`);
+    }
+    // The same hourly call also copies HighDelivery parcel statuses to the orders (never breaks the follow-ups).
+    let hdStatus = null;
+    if (hdStatusSyncService) {
+      try {
+        hdStatus = await hdStatusSyncService.run();
+      } catch (error) {
+        logger.warn(`[task][order-followups] hd status sync failed: ${error.message}`);
+      }
+    }
+    // Stock alerts held back by the quiet hours go out now.
+    if (stockAlertService) {
+      try {
+        await stockAlertService.processQueue();
+      } catch (error) {
+        logger.warn(`[task][order-followups] stock alert queue failed: ${error.message}`);
+      }
+    }
+    return { result, hdStatus, followupsError };
+  }
 
   // The HighDelivery items with their ids, so the desktop app links products to ids and not to names.
   async function sendHdItems(res) {
@@ -48,9 +103,8 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       }
 
       if (req.method === 'GET' && pathname.startsWith('/api/')) {
-        const providedSecret = req.headers['x-task-secret'];
-        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
-          return sendCorsJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        if (!checkTaskSecret(req, res, 'api', sendCorsJson)) {
+          return undefined;
         }
 
         if (pathname === '/api/health/details') {
@@ -98,16 +152,16 @@ export function createApp({ config, confirmationService, store, stockAlertServic
 
         if (pathname === '/api/contacts/opted-out') {
           const contacts = store.listOptedOutContacts();
-          return sendCorsJson(res, 200, { ok: true, contacts, note: 'local_cache_only' });
+          const durable = durableState?.status?.() || null;
+          return sendCorsJson(res, 200, { ok: true, contacts, note: durable?.loaded ? 'woocommerce_durable' : 'local_cache_only' });
         }
 
         return sendCorsJson(res, 404, { ok: false, error: 'Not found' });
       }
 
       if (req.method === 'GET' && pathname === '/tasks/stock-alerts/status') {
-        const providedSecret = req.headers['x-task-secret'];
-        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
-          return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        if (!checkTaskSecret(req, res, 'task][stock-alerts')) {
+          return undefined;
         }
         if (!stockAlertService) {
           return sendJson(res, 503, { ok: false, error: 'Stock alerts are not enabled' });
@@ -124,7 +178,19 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         return sendJson(res, 404, { ok: false, error: 'Not found' });
       }
 
-      const rawBody = await readBody(req);
+      const declaredLength = Number(req.headers?.['content-length']);
+      if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
+        return refuseTooLarge(req, res, logger);
+      }
+      let rawBody;
+      try {
+        rawBody = await readBody(req, maxBodyBytes);
+      } catch (error) {
+        if (error?.code === 'BODY_TOO_LARGE') {
+          return refuseTooLarge(req, res, logger);
+        }
+        throw error;
+      }
 
       if (pathname === '/webhooks/woocommerce') {
         if (isWooPing(req, rawBody)) {
@@ -138,6 +204,10 @@ export function createApp({ config, confirmationService, store, stockAlertServic
           return sendJson(res, 400, { ok: false, error: 'Invalid JSON body' });
         }
 
+        if (!config.woo?.webhookSecret) {
+          logger.warn('[webhook][woocommerce] refused: WOOCOMMERCE_WEBHOOK_SECRET is not set');
+          return sendJson(res, 503, { ok: false, error: 'Webhook secret is not configured' });
+        }
         const signature = req.headers['x-wc-webhook-signature'];
         const valid = verifyWooSignature(rawBody, signature, config.woo.webhookSecret);
         if (!valid) {
@@ -147,7 +217,15 @@ export function createApp({ config, confirmationService, store, stockAlertServic
 
         const deliveryId = req.headers['x-wc-webhook-delivery-id'] || hashEvent(rawBody);
         logger.log(`[webhook][woocommerce] received orderId=${String(body.id || '')} deliveryId=${String(deliveryId)}`);
-        const result = await confirmationService.processWooOrder(body, String(deliveryId));
+        let result;
+        try {
+          result = await confirmationService.processWooOrder(body, String(deliveryId));
+        } catch (error) {
+          // A valid delivery is answered 200 even when processing breaks: WooCommerce disables a webhook after repeated
+          // failures, and the hourly follow-ups pick the order up again from WooCommerce itself.
+          logger.error(`[webhook][woocommerce] processing failed orderId=${String(body.id || '')}: ${error.message}`);
+          return sendJson(res, 200, { ok: false, reason: 'processing_failed' });
+        }
         logger.log(
           `[webhook][woocommerce] completed orderId=${String(body.id || '')} status=${result.status} ok=${String(result.body?.ok)} reason=${String(result.body?.reason || '')}`
         );
@@ -161,6 +239,10 @@ export function createApp({ config, confirmationService, store, stockAlertServic
           return sendJson(res, 400, { ok: false, error: 'Invalid JSON body' });
         }
 
+        if (!config.wasender?.webhookSecret) {
+          logger.warn('[webhook][wasender] refused: WASENDER_WEBHOOK_SECRET is not set');
+          return sendJson(res, 503, { ok: false, error: 'Webhook secret is not configured' });
+        }
         const signature = req.headers[config.wasender.signatureHeader];
         const valid = verifyWasenderSignature(rawBody, signature, config.wasender.webhookSecret);
         if (!valid) {
@@ -183,10 +265,8 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       }
 
       if (pathname === '/tasks/order-followups') {
-        const providedSecret = req.headers['x-task-secret'];
-        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
-          logger.warn('[task][order-followups] invalid task secret');
-          return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        if (!checkTaskSecret(req, res, 'task][order-followups')) {
+          return undefined;
         }
 
         if (followupsRunning) {
@@ -195,52 +275,31 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         }
         followupsRunning = true;
         try {
-        logger.log('[task][order-followups] started');
-        const result = await confirmationService.runOrderFollowups();
-        logger.log(
-          `[task][order-followups] completed backfilled=${result.backfilled || 0} remindersSent=${result.remindersSent || 0} autoCancelled=${result.autoCancelled || 0} ambiguous=${result.ambiguous || 0} skipped=${result.skipped || 0} errors=${result.errors || 0}`
-        );
-        // The same hourly call also copies HighDelivery parcel statuses to the orders (never breaks the follow-ups).
-        let hdStatus = null;
-        if (hdStatusSyncService) {
-          try {
-            hdStatus = await hdStatusSyncService.run();
-          } catch (error) {
-            logger.warn(`[task][order-followups] hd status sync failed: ${error.message}`);
+          logger.log('[task][order-followups] started');
+          const { result, hdStatus, followupsError } = await runHourlySteps();
+          if (followupsError) {
+            healthTracker?.recordRun({ ok: false, error: String(followupsError?.message || followupsError).slice(0, 120), hdStatus });
+            return sendJson(res, 500, { ok: false, error: 'Follow-ups failed', hdStatus });
           }
-        }
-        // Stock alerts held back by the quiet hours go out now.
-        if (stockAlertService) {
-          try {
-            await stockAlertService.processQueue();
-          } catch (error) {
-            logger.warn(`[task][order-followups] stock alert queue failed: ${error.message}`);
+          // The follow-ups are recorded now, so they show in the health page even if the process dies mid-sync.
+          const runAt = healthTracker?.recordRun({ ok: true, summary: result, hdStatus, stockSync: null });
+          const body = { ok: true, summary: result, hdStatus };
+          if (!stockSyncService) {
+            return sendJson(res, 200, body);
           }
-        }
-        // The follow-ups are recorded now, so they show in the health page even if the process dies mid-sync.
-        const runAt = healthTracker?.recordRun({ ok: true, summary: result, hdStatus, stockSync: null });
-        const body = { ok: true, summary: result, hdStatus };
-        if (!stockSyncService) {
-          return sendJson(res, 200, body);
-        }
-        // The stock sync can take a minute: the cron call gets its answer first and the sync runs after it
-        // (it has its own lock, and it can never break the follow-ups). Its summary is added to the row when it ends.
-        sendJson(res, 200, body);
-        runStockSyncAfterResponse(runAt);
-        return undefined;
-        } catch (error) {
-          healthTracker?.recordRun({ ok: false, error: String(error?.message || error).slice(0, 120) });
-          throw error;
+          // The stock sync can take a minute: the cron call gets its answer first and the sync runs after it
+          // (it has its own lock, and it can never break the follow-ups). Its summary is added to the row when it ends.
+          sendJson(res, 200, body);
+          runStockSyncAfterResponse(runAt);
+          return undefined;
         } finally {
           followupsRunning = false;
         }
       }
 
       if (pathname === '/tasks/stock-sync') {
-        const providedSecret = req.headers['x-task-secret'];
-        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
-          logger.warn('[task][stock-sync] invalid task secret');
-          return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        if (!checkTaskSecret(req, res, 'task][stock-sync')) {
+          return undefined;
         }
         if (!stockSyncService) {
           return sendJson(res, 503, { ok: false, error: 'Stock sync is not enabled' });
@@ -254,10 +313,8 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       }
 
       if (pathname === '/tasks/stock-alerts') {
-        const providedSecret = req.headers['x-task-secret'];
-        if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
-          logger.warn('[task][stock-alerts] invalid task secret');
-          return sendJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        if (!checkTaskSecret(req, res, 'task][stock-alerts')) {
+          return undefined;
         }
         if (!stockAlertService) {
           return sendJson(res, 503, { ok: false, error: 'Stock alerts are not enabled' });
@@ -284,15 +341,51 @@ export function createApp({ config, confirmationService, store, stockAlertServic
   };
 }
 
-function readBody(req) {
+// Reads the body up to maxBytes; a bigger body rejects with code BODY_TOO_LARGE and stops buffering.
+function readBody(req, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
-    let body = '';
+    const chunks = [];
+    let size = 0;
+    let done = false;
     req.on('data', (chunk) => {
-      body += chunk;
+      if (done) {
+        return;
+      }
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      size += buffer.length;
+      if (size > maxBytes) {
+        done = true;
+        const error = new Error('Request body too large');
+        error.code = 'BODY_TOO_LARGE';
+        reject(error);
+        return;
+      }
+      chunks.push(buffer);
     });
-    req.on('end', () => resolve(body));
-    req.on('error', reject);
+    req.on('end', () => {
+      if (!done) {
+        done = true;
+        resolve(Buffer.concat(chunks).toString('utf8'));
+      }
+    });
+    req.on('error', (error) => {
+      if (!done) {
+        done = true;
+        reject(error);
+      }
+    });
   });
+}
+
+// 413, then the connection is dropped so the rest of the upload is never read.
+function refuseTooLarge(req, res, logger) {
+  logger.warn('[http] refused a request body larger than the limit');
+  res.writeHead(413, { 'Content-Type': 'application/json', Connection: 'close' });
+  res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
+  if (typeof req.destroy === 'function') {
+    setImmediate(() => req.destroy());
+  }
+  return undefined;
 }
 
 function sendJson(res, statusCode, body) {

@@ -134,8 +134,13 @@ const OUTBOUND_META_KEYS = {
 };
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, logger = console }) {
     this.store = store;
+    // Opt-outs are also saved in WooCommerce (services/durable-state.js): the local store is wiped on every restart.
+    this.durableState = durableState;
+    // One WhatsApp alert to the team phones (services/team-notifier.js); optional.
+    this.notifyTeam = notifyTeam;
+    this.sleep = sleep;
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
     this.mailService = mailService;
@@ -156,6 +161,16 @@ export class ConfirmationService {
     this.pendingInitialConfirmations = new Map();
     this.inFlightWasenderEvents = new Map();
     this.recentInboundMessageKeys = new Map();
+  }
+
+  // The local event log is a debug history: a disk problem there must never fail a webhook or a send.
+  safeRecordEvent(source, eventKey, payload, status) {
+    try {
+      return this.store.recordEvent(source, eventKey, payload, status);
+    } catch (error) {
+      this.logger.warn(`[store] could not record ${source} event status=${status}: ${error.message}`);
+      return null;
+    }
   }
 
   async withOrderLock(orderId, work) {
@@ -239,7 +254,7 @@ export class ConfirmationService {
 
   async processWooOrder(payload, eventKey) {
     if (this.inFlightWooEvents.has(eventKey)) {
-      this.store.recordEvent('woocommerce', eventKey, payload, 'duplicate_order');
+      this.safeRecordEvent('woocommerce', eventKey, payload, 'duplicate_order');
       return { status: 200, body: { ok: true, duplicate: true, reason: 'event_in_flight' } };
     }
     this.inFlightWooEvents.set(eventKey, Date.now());
@@ -315,10 +330,10 @@ export class ConfirmationService {
         : result.body?.reason === 'feedback_self_test'
           ? 'feedback_self_test_skipped_confirmation'
           : (result.body?.reason || (result.body?.ok ? 'processed' : 'processing_failed'));
-      this.store.recordEvent('woocommerce', eventKey, payload, eventStatus);
+      this.safeRecordEvent('woocommerce', eventKey, payload, eventStatus);
       return result;
     } catch (error) {
-      this.store.recordEvent('woocommerce', eventKey, payload, 'processing_failed');
+      this.safeRecordEvent('woocommerce', eventKey, payload, 'processing_failed');
       throw error;
     } finally {
       this.inFlightWooEvents.delete(eventKey);
@@ -327,7 +342,7 @@ export class ConfirmationService {
 
   async processWasenderInbound(payload, eventKey) {
     if (this.inFlightWasenderEvents.has(eventKey)) {
-      this.store.recordEvent('wasender', eventKey, payload, 'duplicate_request');
+      this.safeRecordEvent('wasender', eventKey, payload, 'duplicate_request');
       return { status: 200, body: { ok: true, duplicate: true } };
     }
     this.inFlightWasenderEvents.set(eventKey, Date.now());
@@ -335,7 +350,7 @@ export class ConfirmationService {
     try {
       const inboundMessages = extractWasenderInboundMessages(payload, eventKey, this.logger);
       if (!inboundMessages.length) {
-        this.store.recordEvent('wasender', eventKey, payload, 'ignored_non_message');
+        this.safeRecordEvent('wasender', eventKey, payload, 'ignored_non_message');
         return { status: 200, body: { ok: true, ignored: true, messageCount: 0 } };
       }
 
@@ -356,7 +371,7 @@ export class ConfirmationService {
         if (this.recentInboundMessageKeys.has(message.messageKey)) {
           summary.duplicates += 1;
           messageStatuses.push('duplicate_message');
-          this.store.recordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, 'duplicate_message');
+          this.safeRecordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, 'duplicate_message');
           continue;
         }
 
@@ -378,7 +393,7 @@ export class ConfirmationService {
 
         const eventStatus = result.eventStatus || 'processed';
         this.recentInboundMessageKeys.set(message.messageKey, Date.now());
-        this.store.recordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, eventStatus);
+        this.safeRecordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, eventStatus);
         messageStatuses.push(eventStatus);
 
         if (result.duplicate) {
@@ -409,7 +424,7 @@ export class ConfirmationService {
       }
 
       const requestStatus = summarizeWasenderRequestStatus(messageStatuses);
-      this.store.recordEvent('wasender', eventKey, payload, requestStatus);
+      this.safeRecordEvent('wasender', eventKey, payload, requestStatus);
       return {
         status: 200,
         body: {
@@ -418,7 +433,7 @@ export class ConfirmationService {
         }
       };
     } catch (error) {
-      this.store.recordEvent('wasender', eventKey, payload, 'processing_failed');
+      this.safeRecordEvent('wasender', eventKey, payload, 'processing_failed');
       throw error;
     } finally {
       this.inFlightWasenderEvents.delete(eventKey);
@@ -524,6 +539,15 @@ export class ConfirmationService {
       lastMessageAt: message.timestamp || now
     });
 
+    let savedDurably = false;
+    if (this.durableState) {
+      try {
+        savedDurably = await this.durableState.recordOptOut(phone, now);
+      } catch (error) {
+        this.logger.warn(`[opt-out] durable save failed phone=${maskPhone(phone)}: ${error.message}`);
+      }
+    }
+
     await this.persistOptOutToLatestWooOrder({
       phone,
       replyText: lastMessageText,
@@ -531,11 +555,12 @@ export class ConfirmationService {
       messageKey: message.messageKey
     });
 
-    if (!this.wordpressClient?.isConfigured) {
+    if (!savedDurably && !this.wordpressClient?.isConfigured) {
       this.logger.warn(
-        `[opt-out] Opt-out saved only locally; durable WordPress storage is not configured. phone=${maskPhone(phone)} messageKey=${message.messageKey}`
+        `[opt-out] Opt-out saved only locally for now (WooCommerce not reachable; retried on the next write). phone=${maskPhone(phone)} messageKey=${message.messageKey}`
       );
-    } else {
+    }
+    if (this.wordpressClient?.isConfigured) {
       this.wordpressClient
         .optOutContact(phone, {
           optOutSource: 'inbound_whatsapp',
@@ -1734,7 +1759,7 @@ export class ConfirmationService {
     if (!template || !normalizedOrder.phone) {
       return { sent: false, reason: 'no_template_or_phone' };
     }
-    if (this.store?.isPhoneOptedOut?.(normalizedOrder.phone)) {
+    if (this.store?.isPhoneOptedOut?.(normalizedOrder.phone) || this.durableState?.isOptedOut?.(normalizedOrder.phone)) {
       return { sent: false, reason: 'opted_out' };
     }
     const logicalKey = shipped ? OUTBOUND_LOGICAL_KEYS.hdShipped : OUTBOUND_LOGICAL_KEYS.hdArriving;
@@ -2222,7 +2247,9 @@ export class ConfirmationService {
         lastError: error.message
       });
       this.logger.error(error);
-      return { status: 502, body: { ok: false, reason: 'send_failed' } };
+      // 200, not 5xx: the failure is recorded here and the hourly backfill tries again. A 5xx would make WooCommerce
+      // count a failed delivery (and disable the webhook after a few), although the order itself was received fine.
+      return { status: 200, body: { ok: false, reason: 'send_failed' } };
     }
   }
 
@@ -2768,6 +2795,10 @@ export class ConfirmationService {
       }
     });
   }
+}
+
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function buildApiOrder({ liveOrder, localOrder, messages }) {

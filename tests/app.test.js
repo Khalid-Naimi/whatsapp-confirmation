@@ -847,7 +847,7 @@ test('generic Wasender failure still uses send_failed without auto-cancelling', 
     payload
   });
 
-  assert.equal(result.statusCode, 502);
+  assert.equal(result.statusCode, 200);
   assert.equal(result.body.reason, 'send_failed');
   assert.equal(store.getOrder('1024').confirmationState, 'send_failed');
   assert.equal(wooStatusCalls.length, 0);
