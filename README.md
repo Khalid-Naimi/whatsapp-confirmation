@@ -84,6 +84,12 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
 
 - Writes need `STOCK_SYNC_MODE=live` **and** a readable `rhymat_sync_control` record on the hidden product with SKU `rhymat-sync-control` that is not paused. Anything else computes the plan but writes no stock (the run history in `rhymat_sync_state` is still saved there).
 - The whole run is stopped (nothing written) when HighDelivery fails, is empty, totals zero or lists too few items, when the product or order list cannot be read, or when a size limit is exceeded. Only the size limits can be approved, once, with the plan hash from a dry run.
+- A unit made of one item with `qty` 2 shows `floor((HD - reserved - offset) / 2)`; open orders reserve both pieces. Bundles (2+ items), units with `writer: "desktop"` or `sync: false`, variations whose stock is managed on the parent product, and units whose HighDelivery item is missing or has an unreadable quantity are skipped, never written.
+- Plan row `action`: `write`, `same`, `skip_writer_desktop`, `skip_no_sync`, `skip_bundle`, `skip_hd_missing`, `skip_hd_bad`, `skip_parent_stock`, `skip_bad_doc`.
+- Abort reasons that can never be approved: `hd_unavailable`, `hd_empty`, `hd_total_zero`, `hd_too_few_items`, `hd_ids_missing` (more than 20 percent of the linked items missing or unreadable), `bad_target`, `woo_products_failed`, `orders_failed`, `variations_failed`, `reserve_status_rejected`, `mode_changed`, `orders_changed`, `write_failed`. Approvable size limits: `too_many_changes`, `too_much_delta`, `too_many_restocks`, `single_increase_too_big`.
+- `reserve_status_rejected`: the shop refused one of `STOCK_SYNC_RESERVE_STATUSES` (the summary lists it in `skippedStatuses`), so open orders would be missing from the reservations. Until the order statuses plugin knows `confirmed`, set `STOCK_SYNC_RESERVE_STATUSES=processing,on-hold`.
+- Just before the first write the run re-reads the pause switch and the open orders: a pause (`mode_changed`) or a new order taking a planned item (`orders_changed`) cancels the run.
+- The sync runs after the hourly follow-ups answer has been sent, so the cron call never waits for it. With `STOCK_SYNC_MODE=off`, `?dryRun=1` computes and answers only (no history saved, no digest).
 - Back-in-stock WhatsApp alerts to customers are triggered by 0 to positive changes, hence `STOCK_SYNC_MAX_RESTOCKS`.
 - Team alerts (`INTERNAL_NOTIFY_PHONES`) for aborts go out only in `live` mode, at most once per reason per 6 hours.
 
