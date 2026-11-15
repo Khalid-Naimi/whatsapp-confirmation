@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { redact } from '../log.js';
 import { OUTBOUND_LOGICAL_KEYS } from '../domain/order-meta.js';
 import {
   ACTIVE_CONFIRMATION_STATUSES,
@@ -1276,7 +1277,7 @@ export class ConfirmationService {
       now,
       cancellationReason: 'invalid_or_non_whatsapp_number',
       logLabel: 'unreachable whatsapp',
-      noteBuilder: buildUnreachableWhatsAppCancellationNote,
+      noteBuilder: (emailStatus) => buildUnreachableWhatsAppCancellationNote(emailStatus, error.message),
       errorMessage: error.message
     });
   }
@@ -1769,16 +1770,19 @@ function isWhatsAppContactabilityFailure(error) {
   ].some((pattern) => haystack.includes(pattern));
 }
 
-function buildUnreachableWhatsAppCancellationNote(emailStatus) {
+// `detail` is the WhatsApp provider's answer (already redacted by the Wasender client), when there is one.
+function buildUnreachableWhatsAppCancellationNote(emailStatus, detail = '') {
+  const reason = detail ? ` (${redact(String(detail)).slice(0, 160)})` : '';
+  const head = `Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp${reason}.`;
   if (emailStatus === 'sent') {
-    return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification sent.';
+    return `${head} Customer email notification sent.`;
   }
 
   if (emailStatus === 'skipped') {
-    return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification skipped because no billing email was available.';
+    return `${head} Customer email notification skipped because no billing email was available.`;
   }
 
-  return 'Order cancelled automatically because the provided phone number is invalid or not reachable on WhatsApp. Customer email notification failed.';
+  return `${head} Customer email notification failed.`;
 }
 
 function safeErrorData(error) {

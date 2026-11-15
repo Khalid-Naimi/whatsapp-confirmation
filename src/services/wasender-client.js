@@ -115,7 +115,7 @@ export class WasenderClient {
           await this.sleep(retryMs);
           continue;
         }
-        throw new WasenderSendError({ status: error.status, data, message: `Wasender send-message failed with ${error.status}` });
+        throw new WasenderSendError({ status: error.status, data, message: `Wasender send-message failed with ${error.status}${reasonSuffix(data)}` });
       }
 
       const data = reply.data;
@@ -125,7 +125,7 @@ export class WasenderClient {
         throw new WasenderSendError({
           status: reply.status,
           data,
-          message: 'Wasender send-message was not delivered (success: false)'
+          message: `Wasender send-message was not delivered (success: false)${reasonSuffix(data)}`
         });
       }
 
@@ -160,6 +160,17 @@ function resolveRetryDelayMs(data, fallbackMs) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ': <reason>' for an error text: Wasender's own short message (message / error), one line, at most 80 characters,
+// phones masked. Kept on the error so the unreachable-number note and lastError say why. '' when there is none.
+export function reasonSuffix(data) {
+  const raw = typeof data === 'string' ? data : (data?.message ?? data?.error ?? data?.data?.message);
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return '';
+  }
+  const reason = redact(raw.replace(/\s+/gu, ' ').trim()).slice(0, 80);
+  return `: ${reason}`;
 }
 
 // For the log: the message id and Wasender's own short message, redacted; never the echoed text or recipient.

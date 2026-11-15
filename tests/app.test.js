@@ -620,6 +620,8 @@ test('invalid or non-WhatsApp number auto-cancels the order and sends email', as
   assert.equal(mailCalls[0].subject, 'Your order #1021 has been cancelled');
   assert.match(mailCalls[0].text, /incorrect or not connected to WhatsApp/);
   assert.match(wooNoteCalls[0].note, /Customer email notification sent/);
+  // The provider's reason stays in the note.
+  assert.match(wooNoteCalls[0].note, /Recipient not registered on WhatsApp/);
   assert.ok(logCalls.some((item) => item.includes('classified invalid_or_non_whatsapp_number orderId=1021')));
   assert.ok(logCalls.some((item) => item.includes('cancel completed orderId=1021 emailStatus=sent')));
 });

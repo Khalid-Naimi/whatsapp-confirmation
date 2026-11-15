@@ -113,11 +113,12 @@ test('Woo: a network error on an order note is not retried (it could add the not
   assert.equal(calls.length, 1);
 });
 
-test('Wasender: no answer is ambiguous, a refusal says the status without the body or the phone', async () => {
+test('Wasender: no answer is ambiguous, a refusal says the status and a short reason, never the phone', async () => {
   const make = (answers) => new WasenderClient({ baseUrl: 'https://wa.example/api', apiToken: 'tok-secret', minIntervalMs: 0, sleepImpl: noSleep, logger: quiet, fetchImpl: scripted(answers).fetchImpl });
   await assert.rejects(make([timeoutError()]).sendMessage({ to: '+212612345678', message: 'x' }), (error) => error instanceof WasenderSendError && error.ambiguous === true && error.status === 0);
   const refused = await make([{ status: 422, body: { message: 'Recipient +212612345678 not registered on WhatsApp' } }]).sendMessage({ to: '+212612345678', message: 'x' }).catch((e) => e);
-  assert.equal(refused.message, 'Wasender send-message failed with 422');
+  // Test change (listed): the status and a short reason from the reply, the phone masked.
+  assert.equal(refused.message, 'Wasender send-message failed with 422: Recipient +212***78 not registered on WhatsApp');
   assert.equal(refused.ambiguous, false);
   assert.match(refused.data.message, /not registered on WhatsApp/u);
   const server = await make([{ status: 500, body: { message: 'gateway' } }]).sendMessage({ to: '+212612345678', message: 'x' }).catch((e) => e);
