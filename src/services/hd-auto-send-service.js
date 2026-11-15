@@ -3,23 +3,16 @@ import { isConfirmedWooStatus } from '../utils/hd-status.js';
 import { formatOrderTotal, interpolateTemplate, maskPhone, summarizeOrderItems } from '../utils/format.js';
 import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
 import { buildUnitLookup, describeResolution, resolveOrderItems, sameResolution } from './order-resolver.js';
+import { HD_META, SHIPPING_LINE_META } from '../domain/order-meta.js';
+import { HD_BLOCKING_STATES, HD_SEND, HD_STATE, assertTransition, resolveWooStatuses } from '../domain/order-states.js';
 
-// Woo order meta written by the auto-send. The state doubles as the "never send twice" guard.
-export const HD_META = {
-  state: 'rhymat_hd_api_state', // sending | sent | failed | unknown
-  tracking: 'rhymat_hd_api_tracking',
-  sentAt: 'rhymat_hd_api_sent_at',
-  error: 'rhymat_hd_api_error',
-  // When the state became "sending": a send that never finished (process killed) is found by its age.
-  sendingAt: 'rhymat_hd_api_sending_at',
-  // Set once when the hourly task retries an auto-send that never ran (so it is never retried twice).
-  retryAt: 'rhymat_hd_api_retry_at'
-};
+// Woo order meta written by the auto-send (domain/order-meta.js). The state doubles as the "never send twice" guard.
+export { HD_META };
 
 // A "sending" older than this is a send that died half way (deploy, crash): the parcel may or may not exist.
 export const STUCK_SENDING_MS = 10 * 60 * 1000;
 
-const BLOCKING_STATES = new Set(['sending', 'sent', 'unknown']);
+const BLOCKING_STATES = new Set(HD_BLOCKING_STATES);
 
 function metaValue(order, key) {
   const row = (order?.meta_data || []).find((item) => item?.key === key);
@@ -70,7 +63,7 @@ export function buildParcelFromWooOrder(order) {
   // The website tags every delivery choice (rhymat_delivery = standard | fast | casa). Only "fast" is express at HighDelivery:
   // Casablanca "le jour même" is HighDelivery's standard Casablanca delivery. Older orders carry no tag, so "express" in the title still counts.
   const shippingLines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
-  const tagOf = (line) => (line?.meta_data || []).find((meta) => meta?.key === 'rhymat_delivery')?.value;
+  const tagOf = (line) => (line?.meta_data || []).find((meta) => meta?.key === SHIPPING_LINE_META.delivery)?.value;
   const isExpress = shippingLines.some((line) => {
     const tag = tagOf(line);
     return tag ? tag === 'fast' : /express/iu.test(`${line?.method_title || ''}`);
@@ -106,7 +99,7 @@ function isStuck(sendingAt, now) {
 }
 
 export class HdAutoSendService {
-  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', manualTemplate = '', errorTemplate = '', enabled = false, productMap = null, linkIndex = null, linksMode = 'off', minTrustScore = 30, logger = console }) {
+  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', manualTemplate = '', errorTemplate = '', enabled = false, productMap = null, linkIndex = null, linksMode = 'off', minTrustScore = 30, wooStatuses = null, logger = console }) {
     this.hdClient = hdClient;
     this.wooClient = wooClient;
     this.wasenderClient = wasenderClient;
@@ -120,6 +113,8 @@ export class HdAutoSendService {
     this.linkIndex = linkIndex; // product link documents read from WooCommerce (see link-index.js)
     this.linksMode = linksMode; // off | shadow | on (HD_LINKS_FOR_ORDERS)
     this.minTrustScore = Number.isFinite(Number(minTrustScore)) ? Number(minTrustScore) : 30;
+    // The Woo status written once the parcel exists (sentToHd role, "completed" by default).
+    this.wooStatuses = resolveWooStatuses(wooStatuses);
     this.logger = logger;
     this.inFlight = new Set();
   }
@@ -245,7 +240,7 @@ export class HdAutoSendService {
     // Reserve first: if we cannot record that we are sending, we must not send (a retry could create a second parcel).
     try {
       await this.wooClient.updateOrderMeta(orderId, [
-        { key: HD_META.state, value: 'sending' },
+        { key: HD_META.state, value: assertTransition(HD_SEND, previousState, HD_STATE.sending) },
         { key: HD_META.error, value: '' },
         { key: HD_META.sendingAt, value: new Date().toISOString() }
       ]);
@@ -260,7 +255,7 @@ export class HdAutoSendService {
     } catch (error) {
       const detail = error instanceof HighDeliveryError ? error.detail() : error.message;
       const ambiguous = Boolean(error?.ambiguous);
-      const state = ambiguous ? 'unknown' : 'failed';
+      const state = assertTransition(HD_SEND, HD_STATE.sending, ambiguous ? HD_STATE.unknown : HD_STATE.failed);
       this.logger.warn(`[hd-auto-send] ${state} orderId=${orderId} ${detail}`);
       await this.safe(() => this.wooClient.updateOrderMeta(orderId, [
         { key: HD_META.state, value: state },
@@ -278,7 +273,7 @@ export class HdAutoSendService {
     const tracking = result.trackingNumber || '';
     const sentAt = new Date().toISOString();
     await this.safe(() => this.wooClient.updateOrderMeta(orderId, [
-      { key: HD_META.state, value: 'sent' },
+      { key: HD_META.state, value: assertTransition(HD_SEND, HD_STATE.sending, HD_STATE.sent) },
       { key: HD_META.tracking, value: tracking },
       { key: HD_META.sentAt, value: sentAt },
       { key: HD_META.error, value: '' }
@@ -288,11 +283,11 @@ export class HdAutoSendService {
 
     let completed = true;
     try {
-      await this.wooClient.updateOrderStatus(orderId, 'completed');
+      await this.wooClient.updateOrderStatus(orderId, this.wooStatuses.sentToHd);
     } catch (error) {
       completed = false;
       this.logger.warn(`[hd-auto-send] parcel sent but Woo status update failed orderId=${orderId} ${error.message}`);
-      await this.note(orderId, `Sent to HighDelivery, but WooCommerce could not be set to completed (${error.message}). Complete it manually; do not send it again.`);
+      await this.note(orderId, `Sent to HighDelivery, but WooCommerce could not be set to ${this.wooStatuses.sentToHd} (${error.message}). Complete it manually; do not send it again.`);
     }
 
     const notified = await this.notify(orderId, full, tracking);
@@ -304,7 +299,7 @@ export class HdAutoSendService {
   // run sees "unknown", not "sending", so it never alerts twice. Returns true when the order was changed. Never throws.
   async reviewStuckSend(order, now = new Date()) {
     const orderId = String(order?.id ?? '');
-    if (!this.enabled || !orderId || metaValue(order, HD_META.state) !== 'sending' || this.inFlight.has(orderId)) {
+    if (!this.enabled || !orderId || metaValue(order, HD_META.state) !== HD_STATE.sending || this.inFlight.has(orderId)) {
       return false;
     }
     if (!isStuck(metaValue(order, HD_META.sendingAt), now)) {
@@ -317,13 +312,13 @@ export class HdAutoSendService {
       this.logger.warn(`[hd-auto-send] could not re-read a stuck send orderId=${orderId}: ${error.message}`);
       return false;
     }
-    if (this.inFlight.has(orderId) || metaValue(fresh, HD_META.state) !== 'sending' || !isStuck(metaValue(fresh, HD_META.sendingAt), now)) {
+    if (this.inFlight.has(orderId) || metaValue(fresh, HD_META.state) !== HD_STATE.sending || !isStuck(metaValue(fresh, HD_META.sendingAt), now)) {
       return false;
     }
     const detail = 'the send stopped half way (server restart?) and never got an answer';
     try {
       await this.wooClient.updateOrderMeta(orderId, [
-        { key: HD_META.state, value: 'unknown' },
+        { key: HD_META.state, value: assertTransition(HD_SEND, HD_STATE.sending, HD_STATE.unknown) },
         { key: HD_META.error, value: detail }
       ]);
     } catch (error) {

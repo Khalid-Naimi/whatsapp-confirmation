@@ -1,13 +1,11 @@
-import { HD_META } from './hd-auto-send-service.js';
+import { HD_META, HD_STATUS_META } from '../domain/order-meta.js';
+import { HD_SYNC_WOO_STATUSES, NO_STAGE_MESSAGE_WOO_STATUSES } from '../domain/order-states.js';
 import { DEFAULT_WOO_STATUSES, HD_FINAL_STATUSES, customerStageFor, foldHdStatus, wooStatusChange } from '../utils/hd-status.js';
 
-// Order fields written by this sync.
-export const HD_STATUS_META = {
-  status: 'rhymat_hd_status',
-  statusAt: 'rhymat_hd_status_at'
-};
+// Order fields written by this sync (domain/order-meta.js).
+export { HD_STATUS_META };
 
-const SYNC_WOO_STATUSES = ['on-hold', 'confirmed', 'processing', 'completed'];
+const SYNC_WOO_STATUSES = HD_SYNC_WOO_STATUSES;
 // Only parcels sent to HighDelivery in the last 30 days are synced or messaged. Turning the sync on therefore never
 // rewrites old orders (restock-on-cancel, reports) or messages customers about old parcels, and the order list stays short.
 const SYNC_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -120,7 +118,7 @@ export class HdStatusSyncService {
     }
 
     const stage = customerStageFor(status);
-    if (!stage || ['cancelled', 'refunded', 'failed', 'delivered'].includes(String(current.status || ''))) {
+    if (!stage || NO_STAGE_MESSAGE_WOO_STATUSES.includes(String(current.status || ''))) {
       return;
     }
     // Look at the order again right before a customer message: an overlapping run may have sent it a moment ago.
@@ -131,7 +129,7 @@ export class HdStatusSyncService {
       this.logger.warn(`[hd-status] could not re-read orderId=${orderId}: ${error.message}`);
       return;
     }
-    if (['cancelled', 'refunded', 'failed', 'delivered'].includes(String(fresh.status || ''))) {
+    if (NO_STAGE_MESSAGE_WOO_STATUSES.includes(String(fresh.status || ''))) {
       return;
     }
     const outcome = await this.confirmationService.sendHdStageMessage(fresh, stage, tracking, now);

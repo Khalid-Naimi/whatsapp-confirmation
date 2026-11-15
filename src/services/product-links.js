@@ -2,13 +2,10 @@
 // Pure functions: parse, validate, canonical JSON. The desktop app has the same rules in Python and runs the same
 // fixture (tests/fixtures/link-doc.json).
 
-export const LINK_META = Object.freeze({
-  link: 'rhymat_hd_link',
-  last: 'rhymat_stock_sync_last',
-  control: 'rhymat_sync_control',
-  state: 'rhymat_sync_state'
-});
-export const CONTROL_SKU = 'rhymat-sync-control';
+import { CONTROL_SKU, LINK_META } from '../domain/order-meta.js';
+
+// The product meta keys and the control product's SKU live in domain/order-meta.js.
+export { CONTROL_SKU, LINK_META };
 
 const SCHEMA = 1;
 const MAX_DOC_BYTES = 8 * 1024;

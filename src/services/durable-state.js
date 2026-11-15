@@ -1,5 +1,6 @@
 import { normalizePhone } from '../utils/format.js';
 import { CONTROL_SKU, readMeta } from './product-links.js';
+import { DURABLE_META } from '../domain/order-meta.js';
 
 // The small records that must survive a restart, kept in WooCommerce because the server's own disk is wiped on every
 // deploy: customer opt-outs ("STOP") and the outcome of each back-in-stock alert. They live as two JSON meta values on
@@ -8,10 +9,7 @@ import { CONTROL_SKU, readMeta } from './product-links.js';
 //
 // Everything here is best effort and never throws: if WooCommerce cannot be read at boot the service still starts
 // (with a clear warning), and the next write loads, merges and saves again.
-export const DURABLE_META = Object.freeze({
-  optOuts: 'rhymat_server_optouts',
-  stockAlerts: 'rhymat_server_stock_alerts'
-});
+export { DURABLE_META };
 
 export const DURABLE_LIMITS = Object.freeze({ optOuts: 5000, stockAlerts: 2000, stockAlertDays: 60 });
 

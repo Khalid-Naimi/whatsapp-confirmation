@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "test": "node --test",
     "backfill:processing": "node src/scripts/backfill-processing-orders.js",
-    "compare:links": "node src/scripts/compare-link-resolution.js"
+    "compare:links": "node src/scripts/compare-link-resolution.js",
+    "export:contracts": "node src/scripts/export-contracts.js"
   },
   "engines": {
     "node": ">=20"

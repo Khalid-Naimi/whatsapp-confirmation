@@ -1,6 +1,14 @@
 // HighDelivery parcel statuses (read from the platform's own web app; only picked_up and cancelled were seen on
 // real parcels when this was written) and what each one means for the WooCommerce order and the customer.
 
+import {
+  CONFIRMED_WOO_STATUSES,
+  DEFAULT_WOO_STATUSES,
+  OPEN_WOO_STATUSES,
+  WOO_CLOSED_FOR_HD_SYNC,
+  WOO_STATUS
+} from '../domain/order-states.js';
+
 export const HD_STATUSES = Object.freeze([
   'created',
   'pickup_pending',
@@ -21,11 +29,11 @@ export const HD_STATUSES = Object.freeze([
   'returned_to_stock'
 ]);
 
-// WooCommerce statuses the service writes. The defaults are the shop's old codes (on-hold = confirmed, completed =
-// delivered). After the "Rhymat Order Statuses" plugin is installed, set WOO_STATUS_CONFIRMED=confirmed and
-// WOO_STATUS_DELIVERED=delivered. Reading always accepts both, so switching never strands an order.
-export const DEFAULT_WOO_STATUSES = Object.freeze({ confirmed: 'on-hold', delivered: 'completed' });
-export const CONFIRMED_WOO_STATUSES = Object.freeze(['confirmed', 'on-hold']);
+// WooCommerce statuses the service writes, by role (domain/order-states.js). The defaults are the shop's old codes
+// (on-hold = confirmed, completed = sent to HighDelivery and delivered). After the "Rhymat Order Statuses" plugin is
+// installed, set WOO_STATUS_CONFIRMED=confirmed and WOO_STATUS_DELIVERED=delivered. Reading always accepts both, so
+// switching never strands an order.
+export { DEFAULT_WOO_STATUSES, CONFIRMED_WOO_STATUSES };
 
 export function isConfirmedWooStatus(status) {
   return CONFIRMED_WOO_STATUSES.includes(String(status || '').toLowerCase());
@@ -48,7 +56,7 @@ export function hdToWooStatus(hdStatus, statuses = DEFAULT_WOO_STATUSES) {
     case 'returned':
     case 'returned_to_client':
     case 'returned_to_stock':
-      return 'cancelled';
+      return WOO_STATUS.cancelled;
     default:
       return '';
   }
@@ -57,7 +65,7 @@ export function hdToWooStatus(hdStatus, statuses = DEFAULT_WOO_STATUSES) {
 // After these the parcel will not change again, so the order is no longer checked.
 export const HD_FINAL_STATUSES = new Set(['delivered', 'cancelled', 'refused', 'returned', 'returned_to_client', 'returned_to_stock']);
 
-const WOO_CLOSED = new Set(['cancelled', 'refunded', 'trash', 'failed', 'delivered']);
+const WOO_CLOSED = new Set(WOO_CLOSED_FOR_HD_SYNC);
 
 export function foldHdStatus(value) {
   return String(value ?? '').trim().toLowerCase().replace(/[\s-]+/gu, '_');
@@ -65,13 +73,15 @@ export function foldHdStatus(value) {
 
 // Only move an order forward: never out of cancelled/refunded/delivered. The delivered status can be set from any open
 // status (including completed); a cancelled-type status cancels even a completed order (the parcel came back).
+// When the delivered status is the same code as the sent-to-HighDelivery one (the old codes: both "completed"), it is
+// only set from an open status: an order already at that status cannot be told apart from a delivered one.
 export function wooStatusChange(hdStatus, currentWooStatus, statuses = DEFAULT_WOO_STATUSES) {
   const target = hdToWooStatus(hdStatus, statuses);
   const current = String(currentWooStatus || '').toLowerCase();
   if (!target || target === current || WOO_CLOSED.has(current)) {
     return null;
   }
-  if (target === 'completed' && !['on-hold', 'confirmed', 'processing', 'pending'].includes(current)) {
+  if (target === (statuses.sentToHd || DEFAULT_WOO_STATUSES.sentToHd) && !OPEN_WOO_STATUSES.includes(current)) {
     return null;
   }
   return target;

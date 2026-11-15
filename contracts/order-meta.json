@@ -1,0 +1,861 @@
+{
+  "schema": 1,
+  "generatedBy": "src/scripts/export-contracts.js (do not edit by hand)",
+  "owners": {
+    "server": "the Node WhatsApp confirmation service (this repository)",
+    "desktop": "the desktop app (connector-wo-hd)",
+    "wordpress": "the WordPress site (theme and plugins)"
+  },
+  "meta": [
+    {
+      "key": "rhymat_whatsapp_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_sent_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_count",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_last_reminder_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_cancelled_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_1_sent_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_1_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_2_sent_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_2_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp workflow"
+    },
+    {
+      "key": "rhymat_whatsapp_decision",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_decision_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_woo_sync_status",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_woo_sync_attempts",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_last_sync_error",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_customer_reply_sent",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_cancellation_reason",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_internal_notified_confirmed",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_internal_notified_cancelled",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_manual_override",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_manual_override_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_manual_override_status",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_invalid_reply_count",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_manual_followup_required",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_whatsapp_last_confirmation_message_key",
+      "entity": "order",
+      "owner": "server",
+      "group": "whatsapp decision"
+    },
+    {
+      "key": "rhymat_feedback_state",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "feedback reply",
+      "alsoWrittenBy": [
+        "server"
+      ]
+    },
+    {
+      "key": "rhymat_feedback_reply_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_reply_last_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_reply_count",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_sender_phone",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_last_kind",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_last_text",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_last_caption",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_last_media_url",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_last_mime_type",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_payload_json",
+      "entity": "order",
+      "owner": "server",
+      "group": "feedback reply"
+    },
+    {
+      "key": "rhymat_feedback_token",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "feedback request"
+    },
+    {
+      "key": "rhymat_feedback_test_phone",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "feedback request"
+    },
+    {
+      "key": "rhymat_feedback_test_active",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "feedback request"
+    },
+    {
+      "key": "rhymat_feedback_is_test",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "feedback request"
+    },
+    {
+      "key": "rhymat_feedback_test_run_id",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "feedback request"
+    },
+    {
+      "key": "rhymat_feedback_requested_at",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "feedback request"
+    },
+    {
+      "key": "rhymat_feedback_sent_at",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "feedback request"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_request_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_request"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_request_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_request"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_request_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_request"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_request_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_request"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_1_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_1"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_1_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_1"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_1_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_1"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_1_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_1"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_2_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_2"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_2_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_2"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_2_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_2"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_2_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_2"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_success_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_success_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_success_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_success_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_confirmation_success_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_cancellation_success_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:cancellation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_cancellation_success_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:cancellation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_cancellation_success_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:cancellation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_cancellation_success_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:cancellation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_cancellation_success_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:cancellation_success"
+    },
+    {
+      "key": "rhymat_whatsapp_auto_cancellation_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:auto_cancellation"
+    },
+    {
+      "key": "rhymat_whatsapp_auto_cancellation_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:auto_cancellation"
+    },
+    {
+      "key": "rhymat_whatsapp_auto_cancellation_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:auto_cancellation"
+    },
+    {
+      "key": "rhymat_whatsapp_auto_cancellation_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:auto_cancellation"
+    },
+    {
+      "key": "rhymat_whatsapp_auto_cancellation_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:auto_cancellation"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_shipped_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_shipped"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_shipped_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_shipped"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_shipped_sent_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_shipped"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_shipped_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_shipped"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_shipped_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_shipped"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_shipped_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_shipped"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_arriving_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_arriving"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_arriving_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_arriving"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_arriving_sent_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_arriving"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_arriving_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_arriving"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_arriving_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_arriving"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_arriving_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_arriving"
+    },
+    {
+      "key": "rhymat_hd_api_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery auto-send"
+    },
+    {
+      "key": "rhymat_hd_api_tracking",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery auto-send"
+    },
+    {
+      "key": "rhymat_hd_api_sent_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery auto-send"
+    },
+    {
+      "key": "rhymat_hd_api_error",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery auto-send"
+    },
+    {
+      "key": "rhymat_hd_api_sending_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery auto-send"
+    },
+    {
+      "key": "rhymat_hd_api_retry_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery auto-send"
+    },
+    {
+      "key": "rhymat_hd_api_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery auto-send"
+    },
+    {
+      "key": "rhymat_hd_status",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery status"
+    },
+    {
+      "key": "rhymat_hd_status_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "highdelivery status"
+    },
+    {
+      "key": "rhymat_delivery",
+      "entity": "shipping_line",
+      "owner": "wordpress",
+      "group": "checkout delivery"
+    },
+    {
+      "key": "rhymat_hd_link",
+      "entity": "product",
+      "owner": "desktop",
+      "group": "product links"
+    },
+    {
+      "key": "rhymat_stock_sync_last",
+      "entity": "product",
+      "owner": "server",
+      "group": "product links",
+      "alsoWrittenBy": [
+        "desktop"
+      ]
+    },
+    {
+      "key": "rhymat_sync_control",
+      "entity": "product",
+      "owner": "desktop",
+      "group": "sync control"
+    },
+    {
+      "key": "rhymat_sync_state",
+      "entity": "product",
+      "owner": "server",
+      "group": "sync control"
+    },
+    {
+      "key": "rhymat_server_optouts",
+      "entity": "product",
+      "owner": "server",
+      "group": "durable server records"
+    },
+    {
+      "key": "rhymat_server_stock_alerts",
+      "entity": "product",
+      "owner": "server",
+      "group": "durable server records"
+    },
+    {
+      "key": "rhymat_server_durable_claim",
+      "entity": "product",
+      "owner": "server",
+      "group": "durable server records"
+    }
+  ],
+  "outboundSends": {
+    "customer:confirmation_request": {
+      "state": "rhymat_whatsapp_confirmation_request_state",
+      "reservedAt": "rhymat_whatsapp_confirmation_request_reserved_at",
+      "sentAt": "rhymat_whatsapp_confirmation_sent_at",
+      "messageId": "rhymat_whatsapp_confirmation_message_id",
+      "failedFor": "rhymat_whatsapp_confirmation_request_failed_for",
+      "claim": "rhymat_whatsapp_confirmation_request_claim"
+    },
+    "customer:reminder_1": {
+      "state": "rhymat_whatsapp_reminder_1_state",
+      "reservedAt": "rhymat_whatsapp_reminder_1_reserved_at",
+      "sentAt": "rhymat_whatsapp_reminder_1_sent_at",
+      "messageId": "rhymat_whatsapp_reminder_1_message_id",
+      "failedFor": "rhymat_whatsapp_reminder_1_failed_for",
+      "claim": "rhymat_whatsapp_reminder_1_claim"
+    },
+    "customer:reminder_2": {
+      "state": "rhymat_whatsapp_reminder_2_state",
+      "reservedAt": "rhymat_whatsapp_reminder_2_reserved_at",
+      "sentAt": "rhymat_whatsapp_reminder_2_sent_at",
+      "messageId": "rhymat_whatsapp_reminder_2_message_id",
+      "failedFor": "rhymat_whatsapp_reminder_2_failed_for",
+      "claim": "rhymat_whatsapp_reminder_2_claim"
+    },
+    "customer:confirmation_success": {
+      "state": "rhymat_whatsapp_confirmation_success_state",
+      "reservedAt": "rhymat_whatsapp_confirmation_success_reserved_at",
+      "sentAt": "",
+      "messageId": "rhymat_whatsapp_confirmation_success_message_id",
+      "failedFor": "rhymat_whatsapp_confirmation_success_failed_for",
+      "claim": "rhymat_whatsapp_confirmation_success_claim"
+    },
+    "customer:cancellation_success": {
+      "state": "rhymat_whatsapp_cancellation_success_state",
+      "reservedAt": "rhymat_whatsapp_cancellation_success_reserved_at",
+      "sentAt": "",
+      "messageId": "rhymat_whatsapp_cancellation_success_message_id",
+      "failedFor": "rhymat_whatsapp_cancellation_success_failed_for",
+      "claim": "rhymat_whatsapp_cancellation_success_claim"
+    },
+    "customer:auto_cancellation": {
+      "state": "rhymat_whatsapp_auto_cancellation_state",
+      "reservedAt": "rhymat_whatsapp_auto_cancellation_reserved_at",
+      "sentAt": "",
+      "messageId": "rhymat_whatsapp_auto_cancellation_message_id",
+      "failedFor": "rhymat_whatsapp_auto_cancellation_failed_for",
+      "claim": "rhymat_whatsapp_auto_cancellation_claim"
+    },
+    "customer:hd_shipped": {
+      "state": "rhymat_whatsapp_hd_shipped_state",
+      "reservedAt": "rhymat_whatsapp_hd_shipped_reserved_at",
+      "sentAt": "rhymat_whatsapp_hd_shipped_sent_at",
+      "messageId": "rhymat_whatsapp_hd_shipped_message_id",
+      "failedFor": "rhymat_whatsapp_hd_shipped_failed_for",
+      "claim": "rhymat_whatsapp_hd_shipped_claim"
+    },
+    "customer:hd_arriving": {
+      "state": "rhymat_whatsapp_hd_arriving_state",
+      "reservedAt": "rhymat_whatsapp_hd_arriving_reserved_at",
+      "sentAt": "rhymat_whatsapp_hd_arriving_sent_at",
+      "messageId": "rhymat_whatsapp_hd_arriving_message_id",
+      "failedFor": "rhymat_whatsapp_hd_arriving_failed_for",
+      "claim": "rhymat_whatsapp_hd_arriving_claim"
+    }
+  },
+  "stateMachines": {
+    "whatsapp_workflow": {
+      "metaKey": "rhymat_whatsapp_state",
+      "states": [
+        "",
+        "pending",
+        "confirmed",
+        "cancelled",
+        "manual"
+      ],
+      "transitions": {
+        "": [
+          "pending",
+          "confirmed",
+          "cancelled",
+          "manual"
+        ],
+        "pending": [
+          "pending",
+          "confirmed",
+          "cancelled",
+          "manual"
+        ],
+        "confirmed": [
+          "confirmed",
+          "manual"
+        ],
+        "cancelled": [
+          "cancelled",
+          "manual"
+        ],
+        "manual": [
+          "manual",
+          "confirmed",
+          "cancelled"
+        ]
+      },
+      "notes": "pending = confirmation sent and waiting for 1/2; manual = a person changed the Woo status, the workflow stops"
+    },
+    "outbound_send": {
+      "metaKey": "rhymat_whatsapp_<send>_state",
+      "states": [
+        "",
+        "deferred",
+        "reserved",
+        "sent",
+        "failed"
+      ],
+      "transitions": {
+        "": [
+          "reserved",
+          "deferred",
+          "failed"
+        ],
+        "deferred": [
+          "reserved",
+          "deferred"
+        ],
+        "reserved": [
+          "sent",
+          "",
+          "failed"
+        ],
+        "sent": [],
+        "failed": []
+      },
+      "notes": "reserved = written before the provider call; sent = provider answered; \"\" = a clean refusal cleared the reservation; deferred = held by the quiet hours; failed = number not on WhatsApp (stage messages)"
+    },
+    "hd_send": {
+      "metaKey": "rhymat_hd_api_state",
+      "states": [
+        "",
+        "failed",
+        "sending",
+        "sent",
+        "unknown"
+      ],
+      "transitions": {
+        "": [
+          "sending"
+        ],
+        "failed": [
+          "sending"
+        ],
+        "sending": [
+          "sent",
+          "failed",
+          "unknown",
+          ""
+        ],
+        "sent": [],
+        "unknown": []
+      },
+      "notes": "sending = reserved before the warehouse/trust calls and the parcel creation; \"\" = released when nothing was sent (held, no match); unknown = no answer, the parcel may exist"
+    }
+  },
+  "hdBlockingStates": [
+    "sending",
+    "sent",
+    "unknown"
+  ],
+  "decisions": [
+    "confirmed",
+    "cancelled"
+  ],
+  "wooSyncStatuses": [
+    "pending_retry",
+    "synced",
+    "manual"
+  ],
+  "flags": {
+    "yes": "yes",
+    "no": "no"
+  },
+  "wooStatuses": {
+    "codes": {
+      "pending": "pending",
+      "processing": "processing",
+      "onHold": "on-hold",
+      "confirmed": "confirmed",
+      "completed": "completed",
+      "delivered": "delivered",
+      "cancelled": "cancelled",
+      "refunded": "refunded",
+      "failed": "failed",
+      "trash": "trash"
+    },
+    "roles": {
+      "confirmed": {
+        "default": "on-hold",
+        "meaning": "written when the customer confirms (reply 1 or the poll)"
+      },
+      "delivered": {
+        "default": "completed",
+        "meaning": "written when HighDelivery reports the parcel delivered"
+      },
+      "sentToHd": {
+        "default": "completed",
+        "meaning": "written when the HighDelivery auto-send created the parcel"
+      }
+    },
+    "sets": {
+      "confirmedReadAs": [
+        "confirmed",
+        "on-hold"
+      ],
+      "awaitingCustomer": [
+        "pending",
+        "processing"
+      ],
+      "open": [
+        "on-hold",
+        "confirmed",
+        "processing",
+        "pending"
+      ],
+      "followupsRead": [
+        "pending",
+        "processing",
+        "on-hold",
+        "confirmed",
+        "cancelled",
+        "completed",
+        "delivered",
+        "failed",
+        "refunded"
+      ],
+      "feedbackMatch": [
+        "pending",
+        "processing",
+        "on-hold",
+        "confirmed",
+        "completed",
+        "delivered",
+        "cancelled"
+      ],
+      "hdStatusSyncRead": [
+        "on-hold",
+        "confirmed",
+        "processing",
+        "completed"
+      ]
+    }
+  }
+}
