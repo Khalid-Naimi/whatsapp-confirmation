@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { HighDeliveryClient } from '../src/services/highdelivery-client.js';
 import { HdAutoSendService, HD_META } from '../src/services/hd-auto-send-service.js';
 import { describeItems, fold, loadProductMap, parseCsv, resolveWarehouseItems } from '../src/services/hd-product-match.js';
+import { LinkIndex } from '../src/services/link-index.js';
+import { linkDoc, linkUnit, wooProduct } from './helpers/link-fixtures.js';
 
 const quietLogger = { log() {}, warn() {}, error() {} };
 const reply = (status, payload) => ({ status, async json() { return payload; } });
@@ -110,7 +112,7 @@ function wooOrder(overrides = {}) {
   };
 }
 
-function makeService({ order = wooOrder(), trust = { score: 50, totalOrders: 0, deliveredOrders: 0, failedOrders: 0, blacklisted: false }, trustThrows = false, minTrustScore = 30, stock = warehouse } = {}) {
+function makeService({ order = wooOrder(), trust = { score: 50, totalOrders: 0, deliveredOrders: 0, failedOrders: 0, blacklisted: false }, trustThrows = false, minTrustScore = 30, stock = warehouse, linkIndex = null, linksMode = 'off', logger = quietLogger } = {}) {
   const events = [];
   const meta = [...(order.meta_data || [])];
   const wooClient = {
@@ -128,7 +130,7 @@ function makeService({ order = wooOrder(), trust = { score: 50, totalOrders: 0, 
   };
   const service = new HdAutoSendService({
     hdClient, wooClient, wasenderClient: { async sendMessage() { return {}; } }, store: {}, enabled: true, notifyPhones: [],
-    template: 'x', productMap: loadProductMap(CSV), minTrustScore, logger: quietLogger
+    template: 'x', productMap: loadProductMap(CSV), linkIndex, linksMode, minTrustScore, logger
   });
   return { service, events, created };
 }
@@ -193,4 +195,85 @@ test('only the website\'s fast option is express: Casablanca same-day stays stan
   assert.equal(await run(tag('standard', 'Livraison 2 à 3 jours')), false);
   assert.equal(await run({ method_title: 'Livraison express', method_id: 'flexible_shipping_single' }), true); // order from before the tag existed
   assert.equal(await run({ method_title: 'Cash on delivery', method_id: 'flexible_shipping_single' }), false);
+});
+
+// --- product links (HD_LINKS_FOR_ORDERS) ---
+
+const linkWarehouse = [...warehouse, { id: 512, name: 'Zip up Hoodie Saumon XL', quantity_available: 4 }];
+const linkedOrder = (overrides = {}) => wooOrder({ line_items: [{ name: 'Cargo - S', quantity: 1, product_id: 8974, variation_id: 8978 }], ...overrides });
+
+function makeLinkIndex(unit, { failRead = false } = {}) {
+  const reads = [];
+  const product = wooProduct(8974, { type: 'variable', doc: linkDoc({ 8978: unit }) });
+  const wooClient = { async getProduct(id) { reads.push(id); if (failRead) { throw new Error('woo down'); } return product; } };
+  return { linkIndex: new LinkIndex({ wooClient }), reads };
+}
+const linkedToSaumon = () => linkUnit({ items: [{ hd_id: 512, hd_name: 'Zip up Hoodie Saumon XL', qty: 1 }] });
+
+test('links off: the product links are never read and the CSV decides', async () => {
+  const { linkIndex, reads } = makeLinkIndex(linkedToSaumon());
+  const { service, created } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'off' });
+  assert.equal((await service.autoSend({ orderId: '777' })).status, 'sent');
+  assert.deepEqual(created[0].items, [{ productId: 30, name: 'Military Cargo S', quantity: 1 }]);
+  assert.equal(reads.length, 0);
+});
+
+test('links shadow: the CSV still decides, a difference is logged with ids only', async () => {
+  const logs = [];
+  const { linkIndex } = makeLinkIndex(linkedToSaumon());
+  const { service, created } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'shadow', logger: { log: (m) => logs.push(m), warn: (m) => logs.push(m), error() {} } });
+  assert.equal((await service.autoSend({ orderId: '777' })).status, 'sent');
+  assert.deepEqual(created[0].items, [{ productId: 30, name: 'Military Cargo S', quantity: 1 }]);
+  const line = logs.find((m) => m.startsWith('[hd-links]'));
+  assert.equal(line, '[hd-links] shadow orderId=777 same=false csv=30x1 link=512x1');
+  assert.doesNotMatch(logs.join('\n'), /Jane|Doe|0612|Rue 1|Tétouan/u);
+});
+
+test('links shadow: when both agree the log says so', async () => {
+  const logs = [];
+  const { linkIndex } = makeLinkIndex(linkUnit({ items: [{ hd_id: 30, hd_name: 'Military Cargo S', qty: 1 }] }));
+  const { service } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'shadow', logger: { log: (m) => logs.push(m), warn() {}, error() {} } });
+  await service.autoSend({ orderId: '777' });
+  assert.ok(logs.includes('[hd-links] shadow orderId=777 same=true csv=30x1 link=30x1'));
+});
+
+test('links shadow never changes the outcome, even when the link lookup fails or would hold the order', async () => {
+  for (const setup of [makeLinkIndex(linkedToSaumon(), { failRead: true }), makeLinkIndex(linkUnit({ hold: true, items: [] }))]) {
+    const { service, created } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex: setup.linkIndex, linksMode: 'shadow' });
+    const result = await service.autoSend({ orderId: '777' });
+    assert.equal(result.status, 'sent');
+    assert.deepEqual(created[0].items, [{ productId: 30, name: 'Military Cargo S', quantity: 1 }]);
+  }
+});
+
+test('links on: the linked HighDelivery item is sent, whatever the CSV says', async () => {
+  const { linkIndex } = makeLinkIndex(linkedToSaumon());
+  const { service, created } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'on' });
+  assert.equal((await service.autoSend({ orderId: '777' })).status, 'sent');
+  assert.deepEqual(created[0].items, [{ productId: 512, name: 'Zip up Hoodie Saumon XL', quantity: 1 }]);
+});
+
+test('links on: a product without a link still goes through the CSV', async () => {
+  const order = wooOrder({ line_items: [{ name: 'Cargo - S', quantity: 1, product_id: 55, variation_id: 0 }] });
+  const linkIndex = new LinkIndex({ wooClient: { async getProduct() { return wooProduct(55, {}); } } });
+  const { service, created } = makeService({ order, stock: linkWarehouse, linkIndex, linksMode: 'on' });
+  assert.equal((await service.autoSend({ orderId: '777' })).status, 'sent');
+  assert.equal(created[0].items[0].productId, 30);
+});
+
+test('links on: a hold unit keeps the order on-hold for a human', async () => {
+  const { linkIndex } = makeLinkIndex(linkUnit({ hold: true, items: [] }));
+  const { service, created, events } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'on' });
+  const result = await service.autoSend({ orderId: '777' });
+  assert.deepEqual([result.status, result.reason], ['skipped', 'no_warehouse_match']);
+  assert.equal(created.length, 0);
+  assert.ok(events.some((e) => e.startsWith('note:') && e.includes('is on hold')));
+});
+
+test('links on: if the links cannot be read the order is held, not sent by guess', async () => {
+  const { linkIndex } = makeLinkIndex(linkedToSaumon(), { failRead: true });
+  const { service, created } = makeService({ order: linkedOrder(), stock: linkWarehouse, linkIndex, linksMode: 'on' });
+  const result = await service.autoSend({ orderId: '777' });
+  assert.deepEqual([result.status, result.reason], ['skipped', 'stock_read_failed']);
+  assert.equal(created.length, 0);
 });

@@ -2,6 +2,7 @@ import { HighDeliveryError } from './highdelivery-client.js';
 import { isConfirmedWooStatus } from '../utils/hd-status.js';
 import { formatOrderTotal, interpolateTemplate, maskPhone, summarizeOrderItems } from '../utils/format.js';
 import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
+import { buildUnitLookup, describeResolution, resolveOrderItems, sameResolution } from './order-resolver.js';
 
 // Woo order meta written by the auto-send. The state doubles as the "never send twice" guard.
 export const HD_META = {
@@ -93,7 +94,7 @@ export function buildParcelFromWooOrder(order) {
 }
 
 export class HdAutoSendService {
-  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', manualTemplate = '', errorTemplate = '', enabled = false, productMap = null, minTrustScore = 30, logger = console }) {
+  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', manualTemplate = '', errorTemplate = '', enabled = false, productMap = null, linkIndex = null, linksMode = 'off', minTrustScore = 30, logger = console }) {
     this.hdClient = hdClient;
     this.wooClient = wooClient;
     this.wasenderClient = wasenderClient;
@@ -104,6 +105,8 @@ export class HdAutoSendService {
     this.errorTemplate = errorTemplate; // the send failed or the answer is unknown
     this.enabled = Boolean(enabled);
     this.productMap = productMap; // Woo product name -> HighDelivery warehouse products (see hd-product-match.js)
+    this.linkIndex = linkIndex; // product link documents read from WooCommerce (see link-index.js)
+    this.linksMode = linksMode; // off | shadow | on (HD_LINKS_FOR_ORDERS)
     this.minTrustScore = Number.isFinite(Number(minTrustScore)) ? Number(minTrustScore) : 30;
     this.logger = logger;
     this.inFlight = new Set();
@@ -197,7 +200,7 @@ export class HdAutoSendService {
     if (this.productMap) {
       let matched;
       try {
-        matched = resolveWarehouseItems(full.line_items, this.productMap, await this.hdClient.listWarehouseProducts());
+        matched = await this.matchItems(orderId, full);
       } catch (error) {
         const detail = error instanceof HighDeliveryError ? error.detail() : error.message;
         this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=stock_read_failed ${detail}`);
@@ -281,6 +284,31 @@ export class HdAutoSendService {
 
     const notified = await this.notify(orderId, full, tracking);
     return { status: 'sent', trackingNumber: tracking, completed, notified };
+  }
+
+  // off: by name through the CSV, exactly as before. shadow: still by name, but the link result is compared and
+  // only the ids are logged. on: by the product links (a product without a link still goes through the CSV).
+  async matchItems(orderId, full) {
+    const warehouse = await this.hdClient.listWarehouseProducts();
+    const byName = resolveWarehouseItems(full.line_items, this.productMap, warehouse);
+    if (!this.linkIndex || this.linksMode === 'off') {
+      return byName;
+    }
+    if (this.linksMode === 'on') {
+      return this.matchByLinks(full, warehouse);
+    }
+    try {
+      const byLink = await this.matchByLinks(full, warehouse);
+      this.logger.log(`[hd-links] shadow orderId=${orderId} same=${sameResolution(byName, byLink)} csv=${describeResolution(byName)} link=${describeResolution(byLink)}`);
+    } catch (error) {
+      this.logger.warn(`[hd-links] shadow orderId=${orderId} link lookup failed: ${error.message}`);
+    }
+    return byName;
+  }
+
+  async matchByLinks(full, warehouse) {
+    const unitLookup = await buildUnitLookup(full.line_items, this.linkIndex);
+    return resolveOrderItems(full.line_items, { unitLookup, csvMap: this.productMap, warehouse });
   }
 
   // Tells the team's phones when an order needs a human or the send went wrong, so nobody has to open WooCommerce

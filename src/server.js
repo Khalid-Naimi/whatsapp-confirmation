@@ -7,6 +7,7 @@ import { ConfirmationService } from './services/confirmation-service.js';
 import { HdAutoSendService } from './services/hd-auto-send-service.js';
 import { HdStatusSyncService } from './services/hd-status-sync-service.js';
 import { HighDeliveryClient } from './services/highdelivery-client.js';
+import { LinkIndex } from './services/link-index.js';
 import { loadProductMapFile } from './services/hd-product-match.js';
 import { MailService } from './services/mail-service.js';
 import { StockAlertService } from './services/stock-alert-service.js';
@@ -57,6 +58,8 @@ const mailService = new MailService(config.mail);
 const hdCityAliases = JSON.parse(fs.readFileSync(new URL('./data/hd-city-aliases.json', import.meta.url), 'utf8')).aliases || {};
 const hdProductMap = loadProductMapFile(new URL('./data/hd-product-map.csv', import.meta.url));
 
+const linkIndex = new LinkIndex({ wooClient });
+
 const hdAutoSend = new HdAutoSendService({
   hdClient: new HighDeliveryClient({
     baseUrl: config.highDelivery.baseUrl,
@@ -74,6 +77,8 @@ const hdAutoSend = new HdAutoSendService({
   errorTemplate: config.messages.internalHdErrorTemplate,
   enabled: config.highDelivery.autoSendEnabled,
   productMap: hdProductMap,
+  linkIndex,
+  linksMode: config.highDelivery.linksMode,
   minTrustScore: config.highDelivery.minTrustScore,
   logger
 });

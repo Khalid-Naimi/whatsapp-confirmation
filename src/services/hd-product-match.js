@@ -87,40 +87,53 @@ export function warehouseQuantity(product) {
   return Number(product?.quantity_available ?? product?.quantityAvailable ?? 0);
 }
 
-// Builds the warehouse items for a parcel from the Woo order lines.
-// Returns { ok, items: [{ productId, name, quantity }], problems: [...] }.
-// Any line that cannot be matched, or whose stock is too low, is named so the order can stay on-hold for a human.
-export function resolveWarehouseItems(lineItems, productMap, warehouseProducts) {
+// The order lines that name a product and ask for at least one piece.
+export function orderLines(lineItems) {
+  const lines = [];
+  for (const line of Array.isArray(lineItems) ? lineItems : []) {
+    const wooName = String(line?.name || '').trim();
+    const quantity = Number(line?.quantity || 0);
+    if (wooName && quantity > 0) {
+      lines.push({ wooName, quantity, productId: line.product_id, variationId: line.variation_id });
+    }
+  }
+  return lines;
+}
+
+export function indexByName(warehouseProducts) {
   const byName = new Map();
   for (const product of warehouseProducts || []) {
     byName.set(fold(product?.name), product);
   }
+  return byName;
+}
 
-  const wanted = new Map(); // HighDelivery product id -> { product, quantity }
-  const problems = [];
-  for (const line of Array.isArray(lineItems) ? lineItems : []) {
-    const wooName = String(line?.name || '').trim();
-    const quantity = Number(line?.quantity || 0);
-    if (!wooName || !(quantity > 0)) {
-      continue;
-    }
-    const components = productMap.get(fold(wooName));
-    if (!components || components.length === 0) {
-      problems.push(`no HighDelivery product is mapped to "${wooName}"`);
-      continue;
-    }
-    for (const hdName of components) {
-      const product = byName.get(fold(hdName));
-      if (!product) {
-        problems.push(`"${hdName}" (for "${wooName}") is not in the HighDelivery warehouse`);
-        continue;
-      }
-      const entry = wanted.get(product.id) || { product, quantity: 0 };
-      entry.quantity += quantity;
-      wanted.set(product.id, entry);
-    }
+// Adds one line's quantity to the warehouse products the order will take (HighDelivery product id -> { product, quantity }).
+export function addWanted(wanted, product, quantity) {
+  const entry = wanted.get(product.id) || { product, quantity: 0 };
+  entry.quantity += quantity;
+  wanted.set(product.id, entry);
+}
+
+// The name-based way: the line's Woo name -> the CSV's HighDelivery names -> warehouse products.
+export function addCsvLine({ wooName, quantity }, { productMap, byName, wanted, problems }) {
+  const components = productMap.get(fold(wooName));
+  if (!components || components.length === 0) {
+    problems.push(`no HighDelivery product is mapped to "${wooName}"`);
+    return;
   }
+  for (const hdName of components) {
+    const product = byName.get(fold(hdName));
+    if (!product) {
+      problems.push(`"${hdName}" (for "${wooName}") is not in the HighDelivery warehouse`);
+      continue;
+    }
+    addWanted(wanted, product, quantity);
+  }
+}
 
+// Checks the stock of everything wanted and turns it into the parcel items.
+export function finishItems(wanted, problems) {
   const items = [];
   for (const { product, quantity } of wanted.values()) {
     const available = warehouseQuantity(product);
@@ -133,6 +146,19 @@ export function resolveWarehouseItems(lineItems, productMap, warehouseProducts) 
     problems.push('the order has no items');
   }
   return { ok: problems.length === 0, items, problems };
+}
+
+// Builds the warehouse items for a parcel from the Woo order lines.
+// Returns { ok, items: [{ productId, name, quantity }], problems: [...] }.
+// Any line that cannot be matched, or whose stock is too low, is named so the order can stay on-hold for a human.
+export function resolveWarehouseItems(lineItems, productMap, warehouseProducts) {
+  const byName = indexByName(warehouseProducts);
+  const wanted = new Map();
+  const problems = [];
+  for (const line of orderLines(lineItems)) {
+    addCsvLine(line, { productMap, byName, wanted, problems });
+  }
+  return finishItems(wanted, problems);
 }
 
 // "Military Cargo S (x1)" or "Military cap (x2), Military Cargo S (x1)", the way the HighDelivery web app labels a parcel.

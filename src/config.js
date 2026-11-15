@@ -93,7 +93,10 @@ export function loadConfig() {
       minTrustScore: Number(process.env.HD_MIN_TRUST_SCORE ?? 30),
       // Off unless HD_STATUS_SYNC_ENABLED is set: parcel statuses are copied to the Woo orders and customers get
       // the "shipped" / "arriving" messages.
-      statusSyncEnabled: parseBooleanEnv(process.env.HD_STATUS_SYNC_ENABLED, false)
+      statusSyncEnabled: parseBooleanEnv(process.env.HD_STATUS_SYNC_ENABLED, false),
+      // How order lines are matched to warehouse items: off = by name through the CSV (today), shadow = still by name
+      // but also by the product links, differences are logged, on = by the product links (the CSV stays the fallback).
+      linksMode: parseChoiceEnv(process.env.HD_LINKS_FOR_ORDERS, ['off', 'shadow', 'on'], 'off')
     },
     messages: {
       internalNotifyPhones: parsePhoneList(process.env.INTERNAL_NOTIFY_PHONES || '+212708357533,+491729031097'),
@@ -144,6 +147,12 @@ function parsePhoneList(value) {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+// An unknown value falls back to the safe default instead of switching something on by accident.
+function parseChoiceEnv(value, choices, defaultValue) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return choices.includes(normalized) ? normalized : defaultValue;
 }
 
 function parseBooleanEnv(value, defaultValue) {

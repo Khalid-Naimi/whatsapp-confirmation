@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "backfill:processing": "node src/scripts/backfill-processing-orders.js"
+    "backfill:processing": "node src/scripts/backfill-processing-orders.js",
+    "compare:links": "node src/scripts/compare-link-resolution.js"
   },
   "engines": {
     "node": ">=20"
