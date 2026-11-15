@@ -178,3 +178,10 @@ test('guards: many unreadable HighDelivery quantities stop the run like missing 
   const result = checkGuards(rows, { warehouse: [...FILLER, ...hdRows([512, 5])], limits });
   assert.deepEqual([result.reason, result.approvable], ['hd_ids_missing', false]);
 });
+
+test('a variation whose stock is managed on the parent product is skipped, never switched to its own stock', () => {
+  const product = wooProduct(9, { type: 'variable', doc: linkDoc({ 91: linkUnit(), 92: linkUnit() }) });
+  const rows = plan([product], { variations: { 9: [wooVariation(91, 'M', { manage: 'parent', stock: 0 }), wooVariation(92, 'L', { manage: true, stock: 0 })] } });
+  assert.deepEqual(rows.map((row) => [row.unit, row.action, row.target]), [['91', 'skip_parent_stock', null], ['92', 'write', 2]]);
+  assert.equal(planHash(rows), planHash(rows.filter((row) => row.unit === '92')));
+});

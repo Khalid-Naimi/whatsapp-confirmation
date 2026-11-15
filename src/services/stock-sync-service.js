@@ -49,7 +49,7 @@ export function computeReservations(orders, resolveLines) {
 
 function stockOf(entity) {
   const managed = entity.manage_stock === true;
-  return { managed, current: managed && Number.isInteger(entity.stock_quantity) ? entity.stock_quantity : null };
+  return { managed, parentManaged: entity.manage_stock === 'parent', current: managed && Number.isInteger(entity.stock_quantity) ? entity.stock_quantity : null };
 }
 
 // The stock now in the shop for a unit, or null when the unit does not exist (or its variations were not read).
@@ -99,6 +99,9 @@ function planUnit(product, key, unit, { variationsByProduct, hdById, reservation
   const stock = currentStock(product, key, variationsByProduct.get(product.id));
   if (!stock) {
     return null; // a missing variation is reported as a broken link, not planned
+  }
+  if (stock.parentManaged) {
+    return skip('skip_parent_stock', 'the stock of this variation is managed on the parent product');
   }
   const base = { ...row, current: stock.current };
   const finish = (target, hd, reserved) => {

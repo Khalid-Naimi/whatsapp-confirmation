@@ -395,3 +395,14 @@ test('a dry run does not look again: it writes nothing anyway', async () => {
   await makeService(shop).run({ dryRun: true });
   assert.equal(shop.calls.orders, 1);
 });
+
+test('parent-managed variations are never written, and do not count as restocks', async () => {
+  const doc = linkDoc(Object.fromEntries([1, 2, 3, 4, 5, 6].map((n) => [100 + n, linkUnit()])));
+  const hoodie = wooProduct(100, { type: 'variable', doc });
+  const variations = [1, 2, 3, 4, 5, 6].map((n) => wooVariation(100 + n, `v${n}`, { manage: 'parent', stock: 0 }));
+  const shop = makeShop({ products: [hoodie], variations: { 100: variations }, hd: [...FILLER, ...hdRows([512, 4])] });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, ''); // six restocks would have stopped the run
+  assert.equal(result.summary.skipped, 6);
+  assert.equal(shop.stockWrites().length, 0);
+});
