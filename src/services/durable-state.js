@@ -9,12 +9,22 @@ import { DURABLE_META } from '../domain/order-meta.js';
 //
 // Everything here is best effort and never throws: if WooCommerce cannot be read at boot the service still starts
 // (with a clear warning), and the next write loads, merges and saves again.
+//
+// Two instances at once (a deploy overlap) both read, merge and write the whole value, so one could write over the
+// other's new opt-out. Every save is therefore read back: after an opt-out save the read waits verifySettleMs (1 s)
+// so a competing save has landed; if anything just written is missing, the value is merged again and saved once
+// more, then read back again. If it is still missing it stays marked for the next write (warning in the log).
 export { DURABLE_META };
 
 export const DURABLE_LIMITS = Object.freeze({ optOuts: 5000, stockAlerts: 2000, stockAlertDays: 60 });
 
 const SCHEMA = 1;
 const FIELDS = 'id,sku,meta_data';
+const DEFAULT_VERIFY_SETTLE_MS = 1000;
+
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 const PHONE = /^\+\d{8,15}$/u;
 // WordPress unslashes meta values, so nothing that needs escaping may go into the stored JSON.
 const ALERT_ID = /^[A-Za-z0-9_.:-]{1,64}$/u;
@@ -66,13 +76,16 @@ function parseObject(text) {
 }
 
 export class DurableState {
-  constructor({ wooClient, wordpressClient = null, store = null, sku = CONTROL_SKU, limits = DURABLE_LIMITS, now = () => Date.now(), logger = console } = {}) {
+  constructor({ wooClient, wordpressClient = null, store = null, sku = CONTROL_SKU, limits = DURABLE_LIMITS, now = () => Date.now(), verifySettleMs = DEFAULT_VERIFY_SETTLE_MS, sleep = defaultSleep, logger = console } = {}) {
     this.wooClient = wooClient;
     this.wordpressClient = wordpressClient;
     this.store = store;
     this.sku = sku;
     this.limits = { ...DURABLE_LIMITS, ...(limits || {}) };
     this.now = now;
+    // How long the read-back after an opt-out save waits for a competing save to land; 0 = read back at once.
+    this.verifySettleMs = Math.max(0, Number(verifySettleMs) || 0);
+    this.sleep = sleep;
     this.logger = logger;
     this.optOuts = new Map(); // phone -> day (YYYY-MM-DD)
     this.stockAlerts = new Map(); // alert id -> { status, at (epoch seconds) }
@@ -283,18 +296,15 @@ export class DurableState {
       return false;
     }
     const snapshot = { ...this.versions };
-    const meta = [];
-    if (keys.includes('optOuts')) {
-      meta.push({ key: DURABLE_META.optOuts, value: this.serializeOptOuts() });
-    }
-    if (keys.includes('stockAlerts')) {
-      meta.push({ key: DURABLE_META.stockAlerts, value: this.serializeStockAlerts() });
-    }
+    const meta = this.buildMeta(keys);
     try {
       await this.wooClient.updateProduct(this.productId, { meta_data: meta });
     } catch (error) {
       this.lastError = 'woo_write_failed';
       this.logger.warn(`[durable] WARNING: could not save ${keys.join(', ')} to WooCommerce (${error.message}); will retry on the next write`);
+      return false;
+    }
+    if (!(await this.confirmSaved(keys, meta))) {
       return false;
     }
     for (const key of keys) {
@@ -305,6 +315,55 @@ export class DurableState {
     this.lastError = '';
     this.lastSavedAt = new Date(this.now()).toISOString();
     return true;
+  }
+
+  buildMeta(keys) {
+    const meta = [];
+    if (keys.includes('optOuts')) {
+      meta.push({ key: DURABLE_META.optOuts, value: this.serializeOptOuts() });
+    }
+    if (keys.includes('stockAlerts')) {
+      meta.push({ key: DURABLE_META.stockAlerts, value: this.serializeStockAlerts() });
+    }
+    return meta;
+  }
+
+  // Reads the value back after a save. Something just written that is missing means another writer saved over it in
+  // the meantime: merge what is there now and save once more (retry = false on that second check).
+  async confirmSaved(keys, meta, retry = true) {
+    if (keys.includes('optOuts') && this.verifySettleMs > 0) {
+      await this.sleep(this.verifySettleMs);
+    }
+    const product = await this.readProduct();
+    if (!product) {
+      // The save itself was accepted; only the check could not run.
+      this.logger.warn(`[durable] could not read ${keys.join(', ')} back after saving; counted as saved`);
+      return true;
+    }
+    const missing = missingAfterWrite(product, meta);
+    if (!missing.length) {
+      return true;
+    }
+    if (!retry) {
+      this.lastError = 'overwritten';
+      this.logger.warn(`[durable] WARNING: ${missing.join(', ')} were saved over by another writer again; kept for the next write`);
+      return false;
+    }
+    this.logger.warn(`[durable] ${missing.join(', ')} were saved over by another writer (another instance?); merging and saving again`);
+    this.mergeRemote(product);
+    const again = keys.filter((key) => !this.unreadable.has(key));
+    if (!again.length) {
+      return false;
+    }
+    const retryMeta = this.buildMeta(again);
+    try {
+      await this.wooClient.updateProduct(this.productId, { meta_data: retryMeta });
+    } catch (error) {
+      this.lastError = 'woo_write_failed';
+      this.logger.warn(`[durable] WARNING: could not save ${again.join(', ')} again (${error.message}); will retry on the next write`);
+      return false;
+    }
+    return this.confirmSaved(again, retryMeta, false);
   }
 
   serializeOptOuts() {
@@ -326,4 +385,24 @@ export class DurableState {
     this.stockAlerts = new Map(rows);
     return JSON.stringify({ schema: SCHEMA, alerts: Object.fromEntries(rows.map(([id, alert]) => [id, [alert.status, alert.at]])) });
   }
+}
+
+// The entries of each written value that the stored value no longer has: [meta key, ...] of those with any missing.
+function missingAfterWrite(product, meta) {
+  const missing = [];
+  for (const row of meta) {
+    const stored = readMeta(product, row.key);
+    if (row.key === DURABLE_META.optOuts) {
+      const remote = parseOptOuts(stored);
+      if ([...parseOptOuts(row.value).keys()].some((phone) => !remote.has(phone))) {
+        missing.push(row.key);
+      }
+    } else if (row.key === DURABLE_META.stockAlerts) {
+      const remote = parseStockAlerts(stored);
+      if ([...parseStockAlerts(row.value).keys()].some((id) => !remote.has(id))) {
+        missing.push(row.key);
+      }
+    }
+  }
+  return missing;
 }

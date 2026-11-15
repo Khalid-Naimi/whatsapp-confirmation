@@ -173,9 +173,7 @@ export const LINK_META = Object.freeze({
 
 export const DURABLE_META = Object.freeze({
   optOuts: 'rhymat_server_optouts',
-  stockAlerts: 'rhymat_server_stock_alerts',
-  // The cross-instance write claim on the control product (services/durable-state.js).
-  claim: 'rhymat_server_durable_claim'
+  stockAlerts: 'rhymat_server_stock_alerts'
 });
 
 // The hidden draft product that carries the sync switch and the durable server records.

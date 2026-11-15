@@ -51,10 +51,11 @@ function fakeShop({ product = { id: 77, sku: 'rhymat-sync-control', meta_data: [
 }
 
 const metaOf = (shop, key) => shop.product.meta_data.find((row) => row.key === key)?.value;
+// verifySettleMs: 0 in these tests: the read-back after a save does not wait 1 s (the overlap test below sets it).
 
 test('an opt-out survives a restart: saved to WooCommerce, loaded into a fresh local store before work', async () => {
   const shop = fakeShop();
-  const first = new DurableState({ wooClient: shop, store: freshStore(), logger: quiet });
+  const first = new DurableState({ wooClient: shop, verifySettleMs: 0, store: freshStore(), logger: quiet });
   await first.load();
   assert.equal(await first.recordOptOut('+212600000101', '2026-11-15T10:00:00.000Z'), true);
   assert.deepEqual(JSON.parse(metaOf(shop, DURABLE_META.optOuts)), { schema: 1, phones: { '+212600000101': '2026-11-15' } });
@@ -63,7 +64,7 @@ test('an opt-out survives a restart: saved to WooCommerce, loaded into a fresh l
 
   // "Restart": new process, empty disk.
   const store = freshStore();
-  const second = new DurableState({ wooClient: shop, store, logger: quiet });
+  const second = new DurableState({ wooClient: shop, verifySettleMs: 0, store, logger: quiet });
   await second.load();
   assert.equal(second.isOptedOut('+212600000101'), true);
   assert.equal(store.isPhoneOptedOut('+212600000101'), true);
@@ -74,7 +75,7 @@ test('WooCommerce unreachable at boot: the service still starts, and the next wr
   shop.product.meta_data.push({ key: DURABLE_META.optOuts, value: '{"schema":1,"phones":{"+212600000001":"2026-10-01"}}' });
   shop.failRead = true;
   const warnings = [];
-  const state = new DurableState({ wooClient: shop, store: freshStore(), logger: { ...quiet, warn: (message) => warnings.push(message) } });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, store: freshStore(), logger: { ...quiet, warn: (message) => warnings.push(message) } });
   const result = await state.load();
   assert.equal(result.ok, false);
   assert.ok(warnings.some((message) => message.includes('WARNING: could not read')));
@@ -93,7 +94,7 @@ test('WooCommerce unreachable at boot: the service still starts, and the next wr
 test('a missing control product is reported clearly and never blocks', async () => {
   const shop = fakeShop({ product: null });
   const warnings = [];
-  const state = new DurableState({ wooClient: shop, logger: { ...quiet, warn: (message) => warnings.push(message) } });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: { ...quiet, warn: (message) => warnings.push(message) } });
   assert.equal((await state.load()).ok, false);
   assert.equal(state.status().error, 'control_missing');
   assert.ok(warnings.some((message) => message.includes('rhymat-sync-control')));
@@ -110,7 +111,7 @@ test('WordPress opt-outs are merged in when WordPress is configured', async () =
     }
   };
   const store = freshStore();
-  const state = new DurableState({ wooClient: shop, wordpressClient, store, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, wordpressClient, store, logger: quiet });
   await state.load();
   assert.equal(state.isOptedOut('+212600000201'), true);
   assert.equal(store.isPhoneOptedOut('+212600000201'), true);
@@ -120,7 +121,7 @@ test('WordPress opt-outs are merged in when WordPress is configured', async () =
 test('stock alert outcomes are bounded: old ones pruned, count capped, unsafe ids never stored', async () => {
   const shop = fakeShop();
   let nowMs = Date.parse('2026-11-15T00:00:00Z');
-  const state = new DurableState({ wooClient: shop, logger: quiet, limits: { stockAlerts: 3, stockAlertDays: 30 }, now: () => nowMs });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet, limits: { stockAlerts: 3, stockAlertDays: 30 }, now: () => nowMs });
   await state.load();
   await state.recordStockAlert('old', 'sent');
   nowMs += 31 * 24 * 60 * 60 * 1000;
@@ -139,14 +140,14 @@ test('after a restart WordPress gets "sent" for an alert sent before it, and the
   const wasenderClient = { async sendMessage(payload) { sends.push(payload); return { id: 'm' }; } };
   const alert = { id: 'sa-1', phone: '+212600000301', productName: 'Hoodie', size: 'M', productUrl: 'https://shop.example/p/1' };
 
-  const firstState = new DurableState({ wooClient: shop, logger: quiet });
+  const firstState = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
   await firstState.load();
   const first = new StockAlertService({ store: freshStore(), wasenderClient, durableState: firstState, autoProcess: false, logger: quiet });
   first.accept([alert]);
   await first.processQueue();
   assert.equal(sends.length, 1);
 
-  const secondState = new DurableState({ wooClient: shop, logger: quiet });
+  const secondState = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
   await secondState.load();
   const second = new StockAlertService({ store: freshStore(), wasenderClient, durableState: secondState, autoProcess: false, logger: quiet });
   assert.deepEqual(second.statuses(['sa-1', 'sa-2']), { 'sa-1': 'sent', 'sa-2': 'unknown' });
@@ -159,7 +160,7 @@ test('after a restart WordPress gets "sent" for an alert sent before it, and the
 test('a durable opt-out blocks stock alerts even when the local cache was wiped', async () => {
   const shop = fakeShop();
   shop.product.meta_data.push({ key: DURABLE_META.optOuts, value: '{"schema":1,"phones":{"+212600000401":"2026-10-01"}}' });
-  const state = new DurableState({ wooClient: shop, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
   await state.load();
   const service = new StockAlertService({ store: freshStore(), wasenderClient: { async sendMessage() { throw new Error('must not send'); } }, durableState: state, autoProcess: false, logger: quiet });
   const result = service.accept([{ id: 'x1', phone: '+212600000401', productName: 'Tee', size: 'S', productUrl: 'https://shop.example/p/2' }]);
@@ -168,7 +169,7 @@ test('a durable opt-out blocks stock alerts even when the local cache was wiped'
 
 test('an inbound STOP is saved durably through the confirmation service', async () => {
   const shop = fakeShop();
-  const state = new DurableState({ wooClient: shop, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
   await state.load();
   const service = new ConfirmationService({
     store: freshStore(),
@@ -185,7 +186,7 @@ test('an inbound STOP is saved durably through the confirmation service', async 
 
 test('a change that arrives while a save is running is saved too (no lost write)', async () => {
   const shop = fakeShop();
-  const state = new DurableState({ wooClient: shop, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
   await state.load();
   const original = shop.updateProduct;
   let release;
@@ -215,7 +216,7 @@ test('a stored value that cannot be read is never overwritten; the change stays 
   const shop = fakeShop();
   shop.product.meta_data.push({ key: DURABLE_META.optOuts, value: '{"schema":9,"phones":{}}' });
   const warnings = [];
-  const state = new DurableState({ wooClient: shop, logger: { ...quiet, warn: (message) => warnings.push(message) } });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: { ...quiet, warn: (message) => warnings.push(message) } });
   await state.load();
   assert.equal(await state.recordOptOut('+212600000701'), false);
   assert.equal(metaOf(shop, DURABLE_META.optOuts), '{"schema":9,"phones":{}}');
@@ -223,4 +224,53 @@ test('a stored value that cannot be read is never overwritten; the change stays 
   assert.ok(warnings.some((message) => message.includes('cannot be read')));
   // The other record is still saved normally.
   assert.equal(await state.recordStockAlert('ok-1', 'sent'), true);
+});
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('two instances saving opt-outs at the same time: the one saved over notices it and saves again, nothing is lost', async () => {
+  const shop = fakeShop();
+  const a = new DurableState({ wooClient: shop, verifySettleMs: 30, logger: quiet });
+  let releaseB;
+  const gateB = new Promise((resolve) => { releaseB = resolve; });
+  // Instance B talks to the same shop, but its save is slow: it lands after A's save.
+  const bClient = {
+    listProductsPage: (query) => shop.listProductsPage(query),
+    async updateProduct(id, body) {
+      await gateB;
+      return shop.updateProduct(id, body);
+    }
+  };
+  const warnings = [];
+  const b = new DurableState({ wooClient: bClient, verifySettleMs: 30, logger: { ...quiet, warn: (message) => warnings.push(message) } });
+  await a.load();
+  await b.load();
+  const savingB = b.recordOptOut('+212600000802'); // read the empty list; its save waits
+  await pause(5);
+  a.logger = { ...quiet, warn: (message) => warnings.push(message) };
+  const savingA = a.recordOptOut('+212600000801'); // saved, now waiting to read it back
+  await pause(5);
+  releaseB(); // B saves its list (without A's opt-out) over A's
+  assert.deepEqual(await Promise.all([savingA, savingB]), [true, true]);
+  const phones = JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones;
+  assert.deepEqual(Object.keys(phones).sort(), ['+212600000801', '+212600000802']);
+  assert.ok(warnings.some((message) => message.includes('saved over by another writer')));
+});
+
+test('an opt-out that is saved over twice stays marked for the next write', async () => {
+  const shop = fakeShop();
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
+  await state.load();
+  // Something keeps writing an empty list right after every save.
+  const original = shop.updateProduct;
+  shop.updateProduct = async (id, body) => {
+    const result = await original(id, body);
+    await original(id, { meta_data: [{ key: DURABLE_META.optOuts, value: '{"schema":1,"phones":{}}' }] });
+    return result;
+  };
+  assert.equal(await state.recordOptOut('+212600000901'), false);
+  assert.deepEqual(state.status().pendingWrites, ['optOuts']);
+  shop.updateProduct = original;
+  assert.equal(await state.recordOptOut('+212600000902'), true);
+  assert.deepEqual(Object.keys(JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones).sort(), ['+212600000901', '+212600000902']);
 });
