@@ -8,6 +8,7 @@ import { HdAutoSendService } from './services/hd-auto-send-service.js';
 import { HdStatusSyncService } from './services/hd-status-sync-service.js';
 import { HighDeliveryClient } from './services/highdelivery-client.js';
 import { LinkIndex } from './services/link-index.js';
+import { MatchingWatch } from './services/matching-watch.js';
 import { loadProductMapFile } from './services/hd-product-match.js';
 import { MailService } from './services/mail-service.js';
 import { StockAlertService } from './services/stock-alert-service.js';
@@ -128,13 +129,16 @@ const stockAlertService = new StockAlertService({
   logger
 });
 
+const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, logger });
+
 const stockSyncService = new StockSyncService({
   wooClient,
   hdClient: hdAutoSend.hdClient,
   linkIndex,
   syncControl: new SyncControl({ wooClient }),
   productMap: hdProductMap,
-  notify: createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, logger }),
+  matchingWatch: new MatchingWatch({ notify: notifyTeam, enabled: config.matchingAlertsEnabled, logger }),
+  notify: notifyTeam,
   config: config.stockSync,
   logger
 });

@@ -15,6 +15,10 @@ Backend-only Node.js service that:
 - `GET /tasks/stock-alerts/status?ids=1,2` (same secret; says `queued`, `sent`, `failed` or `unknown` per alert id, so WordPress can close or retry its list)
 - `POST /tasks/stock-alerts` (back-in-stock WhatsApp alerts per size, sent by the WordPress theme)
 - `GET /health`
+- `GET /api/health/details` (same secret; read-only picture for the desktop Backend health page)
+- `GET /api/matching/hd-items` (same secret; the HighDelivery items as `{ id, name, quantity }`, 502 `hd_unavailable` when HighDelivery cannot be read)
+- `GET /api/stock-sync/status` (same secret; effective mode, last run, the last plan, unlinked products and items, broken links)
+- `POST /tasks/stock-sync` (same secret; `?dryRun=1` computes only, `?approve=<planHash>` applies a plan that was stopped only by a size limit)
 
 ## Quick start
 
@@ -69,6 +73,33 @@ When `HD_AUTO_SEND_ENABLED=true`, an order the customer confirms (reply `1` or t
 - **Sent:** the parcel is created, the WooCommerce order is set to `completed` (so the desktop app no longer loads it), the tracking number is saved in `rhymat_hd_api_*` meta and an order note, and `INTERNAL_NOTIFY_PHONES` receive `INTERNAL_HD_SENT_TEMPLATE`.
 - **Anything else** (missing address or phone, city not served, HighDelivery refuses or is down, no credentials): nothing is sent twice, the order stays `on-hold` with an order note saying why, and the desktop app picks it up exactly as before.
 - **Never twice:** `rhymat_hd_api_state` (`sending` / `sent` / `failed` / `unknown`) is written before the call; `sending`, `sent` and `unknown` (no answer, the parcel may exist) block any further automatic send.
+
+## Product links and the hourly stock sync
+
+The desktop Matching page writes one JSON document per WooCommerce product into the product meta `rhymat_hd_link` (links to HighDelivery items by id, plus `offset`, `max_online`, `hold`, `sync` and `writer` per size). The server only reads it. Rules and fixture: `src/services/product-links.js`, `tests/fixtures/link-doc.json`.
+
+**Order routing** (`HD_LINKS_FOR_ORDERS`): `off` (default) matches order lines to HighDelivery items by name through the CSV, exactly as before. `shadow` still routes by name but also computes the link result and logs `[hd-links] shadow orderId=<id> same=<bool> csv=<ids> link=<ids>` (ids only). `on` routes by the links; a product without a link still goes through the CSV; a hold unit, a missing item or an unreadable document holds the order. Compare on real orders without sending anything: `npm run compare:links [count]`.
+
+**Stock sync** (runs inside `POST /tasks/order-followups`, after the HighDelivery status sync): for every unit with `writer: "server"` and `sync: true` it writes `max(0, HD quantity - reserved - offset)`, capped by `max_online`, 0 on `hold`. Reserved = units in open orders (`STOCK_SYNC_RESERVE_STATUSES`) not yet at HighDelivery (state `sent`); `sending` and `unknown` count as reserved. Writes are absolute values and only for units that differ.
+
+- Writes need `STOCK_SYNC_MODE=live` **and** a readable `rhymat_sync_control` record on the hidden product with SKU `rhymat-sync-control` that is not paused. Anything else computes the plan but writes no stock (the run history in `rhymat_sync_state` is still saved there).
+- The whole run is stopped (nothing written) when HighDelivery fails, is empty, totals zero or lists too few items, when the product or order list cannot be read, or when a size limit is exceeded. Only the size limits can be approved, once, with the plan hash from a dry run.
+- Back-in-stock WhatsApp alerts to customers are triggered by 0 to positive changes, hence `STOCK_SYNC_MAX_RESTOCKS`.
+- Team alerts (`INTERNAL_NOTIFY_PHONES`) for aborts go out only in `live` mode, at most once per reason per 6 hours.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `STOCK_SYNC_MODE` | `off` | `off` (nothing runs), `dry_run` (compute and report), `live` |
+| `STOCK_SYNC_MAX_CHANGED_UNITS` | `10` | stop if more units would change |
+| `STOCK_SYNC_MAX_TOTAL_DELTA` | `40` | stop if the stock would move by more in total |
+| `STOCK_SYNC_MAX_RESTOCKS` | `5` | stop if more units would go from 0 to more than 0 |
+| `STOCK_SYNC_MAX_SINGLE_INCREASE` | `20` | stop if one unit would rise by more |
+| `STOCK_SYNC_MIN_HD_ITEMS` | `5` | stop if HighDelivery lists fewer items |
+| `STOCK_SYNC_RESERVE_STATUSES` | `processing,on-hold,confirmed` | open-order statuses that reserve stock |
+| `STOCK_SYNC_RESERVE_DAYS` | `30` | how far back open orders are looked at |
+| `STOCK_SYNC_WRITE_DELAY_MS` | `300` | pause between product writes |
+| `HD_LINKS_FOR_ORDERS` | `off` | `off`, `shadow` or `on` (see above) |
+| `MATCHING_ALERTS_ENABLED` | `false` | one WhatsApp digest to the team when a new product or HighDelivery item has no link (product names only; again after 7 days if still unlinked) |
 
 ## Notes
 

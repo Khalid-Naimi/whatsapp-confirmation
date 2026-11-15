@@ -262,7 +262,7 @@ test('the unlinked products and HighDelivery items of the last run are reported'
   const service = makeService(shop);
   await service.run({ dryRun: true });
   const status = await service.status();
-  assert.deepEqual(status.unlinked.woo, [{ productId: 555, unit: 'p', name: 'Brand new hoodie' }]);
+  assert.deepEqual(status.unlinked.woo, [{ productId: 555, unit: 'p', name: 'Brand new hoodie', productName: 'Brand new hoodie' }]);
   assert.equal(status.unlinked.hd.length, 5); // the five filler rows
   const snapshot = service.healthSnapshot();
   assert.deepEqual(snapshot.unlinked, { woo: 1, hd: 5, products: 1 });
