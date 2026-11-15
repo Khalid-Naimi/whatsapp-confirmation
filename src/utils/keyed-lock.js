@@ -19,10 +19,26 @@ export function outsideLocks(start) {
   return chain.exit(start);
 }
 
+// A waiter that gave up: the key was held longer than the lock's timeout. Callers treat it like any other failure.
+export class LockTimeoutError extends Error {
+  constructor(lockKey, waitedMs) {
+    super(`waited ${Math.round(waitedMs / 1000)} s for ${lockKey}; gave up`);
+    this.name = 'LockTimeoutError';
+    this.lockKey = lockKey;
+  }
+}
+
+export const LOCK_WARN_AFTER_MS = 60 * 1000;
+export const LOCK_TIMEOUT_MS = 180 * 1000;
+
 export class KeyedLock {
-  constructor({ prefix = '', logger = console } = {}) {
+  constructor({ prefix = '', logger = console, warnAfterMs = LOCK_WARN_AFTER_MS, timeoutMs = LOCK_TIMEOUT_MS } = {}) {
     this.prefix = prefix;
     this.logger = logger;
+    // A wait longer than warnAfterMs is logged; after timeoutMs the waiter gives up (LockTimeoutError) instead of
+    // waiting forever behind a holder that never finishes.
+    this.warnAfterMs = warnAfterMs;
+    this.timeoutMs = timeoutMs;
     // lockKey -> owner token of the current holder (named depths for the old callers that look at it).
     this.depths = new Map();
     // lockKey -> the end of the waiting line (named mutexes for the old callers that look at it).
@@ -45,7 +61,7 @@ export class KeyedLock {
     });
     const tail = previous.then(() => mine);
     this.mutexes.set(lockKey, tail);
-    await previous;
+    await this.waitFor(previous, lockKey, releaseLock);
 
     const token = Symbol(lockKey);
     this.depths.set(lockKey, token);
@@ -59,6 +75,33 @@ export class KeyedLock {
       }
       releaseLock();
       this.log(`[lock] released lockKey=${lockKey}`);
+    }
+  }
+
+  // Waits for the previous holder. Logs once after warnAfterMs; after timeoutMs gives up: its own place in the line
+  // is released at once (so the callers behind it are not stuck) and LockTimeoutError is thrown.
+  async waitFor(previous, lockKey, releaseOwnTurn) {
+    const startedMs = Date.now();
+    let warnTimer;
+    let giveUpTimer;
+    const gaveUp = new Promise((resolve) => {
+      warnTimer = setTimeout(() => {
+        const logger = typeof this.logger === 'function' ? this.logger() : this.logger;
+        logger?.warn?.(`[lock] waiting more than ${Math.round(this.warnAfterMs / 1000)} s for lockKey=${lockKey}`);
+      }, this.warnAfterMs);
+      giveUpTimer = setTimeout(() => resolve(true), this.timeoutMs);
+      warnTimer.unref?.();
+      giveUpTimer.unref?.();
+    });
+    try {
+      const timedOut = await Promise.race([previous.then(() => false), gaveUp]);
+      if (timedOut) {
+        releaseOwnTurn();
+        throw new LockTimeoutError(lockKey, Date.now() - startedMs);
+      }
+    } finally {
+      clearTimeout(warnTimer);
+      clearTimeout(giveUpTimer);
     }
   }
 

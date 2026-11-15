@@ -102,3 +102,32 @@ test('outsideLocks(): a task started inside the lock queues behind the holder in
   // A plain call from inside still re-enters (same chain); the detached one waits for the holder.
   assert.deepEqual(events, ['inherited', 'holder:end', 'detached']);
 });
+
+test('run(): a long wait is logged after 60 s and gives up after 180 s with LockTimeoutError; the line keeps moving', async (t) => {
+  const { LockTimeoutError } = await import('../src/utils/keyed-lock.js');
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const warnings = [];
+  const lock = new KeyedLock({ prefix: 'order:', logger: { log() {}, warn: (m) => warnings.push(m) } });
+  let release;
+  const holder = lock.run('1', () => new Promise((resolve) => { release = resolve; }));
+  const flush = async () => { for (let i = 0; i < 10; i += 1) { await Promise.resolve(); } };
+  await flush();
+  let outcome = null;
+  const waiter = lock.run('1', async () => 'ran').then((v) => { outcome = v; }, (e) => { outcome = e; });
+  await flush();
+  t.mock.timers.tick(60 * 1000);
+  await flush();
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /waiting more than 60 s for lockKey=order:1/u);
+  assert.equal(outcome, null);
+  t.mock.timers.tick(120 * 1000);
+  await waiter;
+  assert.ok(outcome instanceof LockTimeoutError);
+  // A caller behind the one that gave up still gets the lock once the holder finishes.
+  const third = lock.run('1', async () => 'third');
+  release('done');
+  await holder;
+  assert.equal(await third, 'third');
+  assert.equal(lock.depths.size, 0);
+  assert.equal(lock.mutexes.size, 0);
+});
