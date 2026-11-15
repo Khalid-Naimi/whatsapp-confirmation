@@ -83,8 +83,19 @@ export function loadProductMapFile(filePath) {
   return loadProductMap(fs.readFileSync(filePath, 'utf8'));
 }
 
-export function warehouseQuantity(product) {
+function rawQuantity(product) {
   return Number(product?.quantity_available ?? product?.quantityAvailable ?? 0);
+}
+
+// An answer such as "abc" is not a quantity. Callers that write stock check this first.
+export function hasValidQuantity(product) {
+  return Number.isFinite(rawQuantity(product));
+}
+
+// Unreadable counts as 0: an order is then held for a human instead of being sent against stock nobody can read.
+export function warehouseQuantity(product) {
+  const quantity = rawQuantity(product);
+  return Number.isFinite(quantity) ? quantity : 0;
 }
 
 // The order lines that name a product and ask for at least one piece.

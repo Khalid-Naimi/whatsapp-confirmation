@@ -267,3 +267,24 @@ test('the unlinked products and HighDelivery items of the last run are reported'
   const snapshot = service.healthSnapshot();
   assert.deepEqual(snapshot.unlinked, { woo: 1, hd: 5, products: 1 });
 });
+
+test('a garbage HighDelivery quantity never reaches the shop: that unit is skipped and the others still sync', async () => {
+  const products = [simpleProduct(100, 24, { stock: 1 }), ...[1, 2, 3, 4].map((n) => simpleProduct(100 + n, 30 + n, { stock: 1 }))];
+  const hd = [...FILLER, { id: 24, name: 'bad', quantity_available: 'abc' }, ...[31, 32, 33, 34].map((id) => ({ id, name: `ok ${id}`, quantity_available: 6 }))];
+  const shop = makeShop({ products, hd });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, '');
+  assert.equal(result.plan.find((row) => row.productId === 100).action, 'skip_hd_bad');
+  assert.equal(shop.stockWrites().length, 4);
+  assert.ok(shop.stockWrites().every((write) => Number.isInteger(write.fields.stock_quantity)));
+  assert.equal(shop.products.find((p) => p.id === 100).stock_quantity, 1);
+});
+
+test('when most HighDelivery quantities are garbage the whole run stops', async () => {
+  const products = [1, 2].map((n) => simpleProduct(100 + n, 20 + n, { stock: 1 }));
+  const hd = [...FILLER, { id: 21, name: 'a', quantity_available: 'x' }, { id: 22, name: 'b', quantity_available: 'y' }];
+  const shop = makeShop({ products, hd });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, 'hd_ids_missing');
+  assert.equal(shop.stockWrites().length, 0);
+});

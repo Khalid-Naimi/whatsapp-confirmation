@@ -152,3 +152,29 @@ test('mode: live needs the env setting AND a readable control record that is not
   assert.equal(describeMode('dry_run', read({ paused: false })).effective, 'dry_run');
   assert.equal(describeMode('off', read({ paused: false })).effective, 'off');
 });
+
+// --- unreadable HighDelivery quantities ---
+
+test('an unreadable HighDelivery quantity is skipped, never planned as a NaN write', () => {
+  const product = wooProduct(5, { stock: 3, manage: true, doc: linkDoc({ p: linkUnit() }) });
+  for (const quantity of ['abc', NaN, {}]) {
+    const [row] = plan([product], { warehouse: [{ id: 512, name: 'x', quantity_available: quantity }] });
+    assert.equal(row.action, 'skip_hd_bad');
+    assert.equal(row.target, null);
+  }
+  assert.equal(plan([product], { warehouse: [{ id: 512, name: 'x', quantity_available: '4' }] })[0].target, 4); // a numeric string is fine
+});
+
+test('guards: a write whose target is not a whole number of 0 or more is refused and cannot be approved', () => {
+  const warehouse = [...FILLER, ...hdRows([512, 5])];
+  for (const target of [NaN, null, undefined, -1, 1.5]) {
+    const result = checkGuards([{ ...writeRow(1, 1, 2), target }], { warehouse, limits });
+    assert.deepEqual([result.ok, result.reason, result.approvable], [false, 'bad_target', false]);
+  }
+});
+
+test('guards: many unreadable HighDelivery quantities stop the run like missing ones', () => {
+  const rows = [1, 2, 3].map((id) => ({ productId: id, unit: 'p', hdId: id, action: id <= 2 ? 'skip_hd_bad' : 'same', current: 1, target: 1 }));
+  const result = checkGuards(rows, { warehouse: [...FILLER, ...hdRows([512, 5])], limits });
+  assert.deepEqual([result.reason, result.approvable], ['hd_ids_missing', false]);
+});

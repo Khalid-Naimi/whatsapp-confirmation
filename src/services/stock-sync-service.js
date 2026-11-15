@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { HD_META } from './hd-auto-send-service.js';
-import { warehouseQuantity } from './hd-product-match.js';
+import { hasValidQuantity, warehouseQuantity } from './hd-product-match.js';
 import { findUnlinked } from './matching-watch.js';
 import { resolveOrderLines } from './order-resolver.js';
 import { LINK_META, canonicalJson, readMeta } from './product-links.js';
@@ -110,6 +110,9 @@ function planUnit(product, key, unit, { variationsByProduct, hdById, reservation
   if (!hdRow) {
     return { ...base, action: 'skip_hd_missing', why: `HighDelivery item ${unit.items[0].hd_id} was not in the list` };
   }
+  if (!hasValidQuantity(hdRow)) {
+    return { ...base, action: 'skip_hd_bad', why: `HighDelivery item ${unit.items[0].hd_id} has an unreadable quantity` };
+  }
   const hd = warehouseQuantity(hdRow);
   const reserved = reservations.get(unit.items[0].hd_id) || 0;
   return finish(computeTarget(hd, reserved, unit), hd, reserved);
@@ -162,10 +165,14 @@ export function checkGuards(plan, { warehouse, limits }) {
   } else if (warehouse.length < limits.minHdItems) {
     fail('hd_too_few_items', `HighDelivery returned only ${warehouse.length} items (at least ${limits.minHdItems} expected)`, false);
   }
-  const linkedIds = new Set(plan.filter((row) => row.hdId !== null && ['write', 'same', 'skip_hd_missing'].includes(row.action)).map((row) => row.hdId));
-  const missingIds = new Set(plan.filter((row) => row.action === 'skip_hd_missing').map((row) => row.hdId));
+  const unreadable = (row) => row.action === 'skip_hd_missing' || row.action === 'skip_hd_bad';
+  const linkedIds = new Set(plan.filter((row) => row.hdId !== null && (['write', 'same'].includes(row.action) || unreadable(row))).map((row) => row.hdId));
+  const missingIds = new Set(plan.filter(unreadable).map((row) => row.hdId));
   if (linkedIds.size > 0 && missingIds.size / linkedIds.size > MAX_MISSING_HD_SHARE) {
-    fail('hd_ids_missing', `${missingIds.size} of ${linkedIds.size} linked HighDelivery items are missing from its list`, false);
+    fail('hd_ids_missing', `${missingIds.size} of ${linkedIds.size} linked HighDelivery items are missing or unreadable in its list`, false);
+  }
+  if (plan.some((row) => row.action === 'write' && !(Number.isInteger(row.target) && row.target >= 0))) {
+    fail('bad_target', 'a planned stock value is not a whole number of 0 or more', false);
   }
 
   const writes = writesOf(plan);
