@@ -46,9 +46,11 @@ const MAX_WOO_SYNC_ATTEMPTS = 6;
 const MAX_FEEDBACK_PAYLOAD_JSON_LENGTH = 4000;
 const INBOUND_MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 const OUTBOUND_RESERVATION_STALE_MS = 2 * 60 * 60 * 1000;
+// The Wasender webhook is answered after at most this long; the work goes on in the background.
+const DEFAULT_INBOUND_ACK_BUDGET_MS = 1000;
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, claimSettleMs = DEFAULT_CLAIM_SETTLE_MS, instanceId = INSTANCE_ID, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, claimSettleMs = DEFAULT_CLAIM_SETTLE_MS, instanceId = INSTANCE_ID, inboundAckBudgetMs = DEFAULT_INBOUND_ACK_BUDGET_MS, logger = console }) {
     this.store = store;
     // Opt-outs are also saved in WooCommerce (services/durable-state.js): the local store is wiped on every restart.
     this.durableState = durableState;
@@ -58,6 +60,8 @@ export class ConfirmationService {
     // How long a send reservation waits before reading its claim back (services/claim.js); 0 = no wait.
     this.claimSettleMs = Number(claimSettleMs) || 0;
     this.instanceId = instanceId;
+    // How long the Wasender webhook answer waits for the messages to be handled before answering "accepted".
+    this.inboundAckBudgetMs = Math.max(0, Number(inboundAckBudgetMs) || 0);
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
     this.mailService = mailService;
@@ -76,6 +80,8 @@ export class ConfirmationService {
     this.orderMutexes = new Map();
     this.inFlightWooEvents = new Map();
     this.pendingInitialConfirmations = new Map();
+    // orderId -> { dueAt, payload } for first-confirmation timers that have not fired yet.
+    this.initialConfirmationDueAt = new Map();
     this.inFlightWasenderEvents = new Map();
     this.recentInboundMessageKeys = new Map();
   }
@@ -131,15 +137,47 @@ export class ConfirmationService {
       return { status: 202, body: { ok: true, duplicate: true, reason: 'confirmation_scheduled' } };
     }
 
-    const timer = setTimeout(() => {
-      this.runDelayedInitialConfirmation(payload, key)
-        .catch((error) => this.logger.error(error))
-        .finally(() => this.pendingInitialConfirmations.delete(key));
-    }, delayMs);
+    const timer = setTimeout(() => this.startDelayedInitialConfirmation(payload, key), delayMs);
     this.pendingInitialConfirmations.set(key, timer);
+    this.initialConfirmationDueAt.set(key, { dueAt: Date.now() + delayMs, payload });
     this.logger.log(`[confirmation] initial send scheduled orderId=${key} delayMs=${delayMs}`);
 
     return { status: 202, body: { ok: true, scheduled: true, delayMs } };
+  }
+
+  // The timer fired (or a shutdown flush found it due): the send runs as a tracked background task, and the order stays
+  // in pendingInitialConfirmations until it is done, so the hourly backfill never sends it as well.
+  startDelayedInitialConfirmation(payload, key) {
+    this.initialConfirmationDueAt.delete(key);
+    const run = this.runDelayedInitialConfirmation(payload, key)
+      .catch((error) => this.logger.error(error))
+      .finally(() => this.pendingInitialConfirmations.delete(key));
+    return this.trackBackground(run, `first confirmation ${key}`);
+  }
+
+  // For a shutdown (SIGTERM). A first message whose 30-second wait is over is started now (drain() then waits for it);
+  // one that is not due yet is dropped here and logged: the order has no confirmation yet, so the hourly backfill
+  // sends it (orders up to 72 hours old). Returns { started, leftToBackfill } (order ids).
+  flushDueConfirmations({ now = Date.now() } = {}) {
+    const started = [];
+    const leftToBackfill = [];
+    for (const [key, timer] of [...this.pendingInitialConfirmations.entries()]) {
+      const pending = this.initialConfirmationDueAt.get(key);
+      if (!pending) {
+        continue; // already running
+      }
+      clearTimeout(timer);
+      if (pending.dueAt <= now) {
+        started.push(key);
+        this.startDelayedInitialConfirmation(pending.payload, key);
+        continue;
+      }
+      this.initialConfirmationDueAt.delete(key);
+      this.pendingInitialConfirmations.delete(key);
+      leftToBackfill.push(key);
+      this.logger.warn(`[confirmation] shutdown: first WhatsApp message not sent yet orderId=${key} dueInMs=${pending.dueAt - now}; the hourly backfill sends it`);
+    }
+    return { started, leftToBackfill };
   }
 
   async runDelayedInitialConfirmation(payload, orderId) {
@@ -269,6 +307,12 @@ export class ConfirmationService {
     }
   }
 
+  // The Wasender webhook. The cheap part runs before the answer: parse, and drop messages already seen (in memory).
+  // The rest (matching the order, the customer reply, the team alerts, the Woo writes, all inside the order lock) runs
+  // as a tracked background task of the service (see drain()). The answer waits for it at most inboundAckBudgetMs:
+  // when it finishes in time the answer carries the full summary as before, otherwise it says the messages were
+  // accepted and are still being handled. A message seen again after a restart is still recognised inside the order
+  // lock (the reply markers in the order meta are read again there).
   async processWasenderInbound(payload, eventKey) {
     if (this.inFlightWasenderEvents.has(eventKey)) {
       this.safeRecordEvent('wasender', eventKey, payload, 'duplicate_request');
@@ -276,37 +320,69 @@ export class ConfirmationService {
     }
     this.inFlightWasenderEvents.set(eventKey, Date.now());
 
+    let inboundMessages;
     try {
-      const inboundMessages = extractWasenderInboundMessages(payload, eventKey, this.logger);
-      if (!inboundMessages.length) {
-        this.safeRecordEvent('wasender', eventKey, payload, 'ignored_non_message');
-        return { status: 200, body: { ok: true, ignored: true, messageCount: 0 } };
-      }
+      inboundMessages = extractWasenderInboundMessages(payload, eventKey, this.logger);
+    } catch (error) {
+      this.inFlightWasenderEvents.delete(eventKey);
+      this.safeRecordEvent('wasender', eventKey, payload, 'processing_failed');
+      throw error;
+    }
+    if (!inboundMessages.length) {
+      this.inFlightWasenderEvents.delete(eventKey);
+      this.safeRecordEvent('wasender', eventKey, payload, 'ignored_non_message');
+      return { status: 200, body: { ok: true, ignored: true, messageCount: 0 } };
+    }
 
+    // Dedupe now (not after routing): a second delivery of the same message arriving while this one is still being
+    // handled is a duplicate, not a second reply.
+    const messageStatuses = new Array(inboundMessages.length).fill('');
+    const fresh = [];
+    let duplicates = 0;
+    this.pruneRecentInboundMessageKeys();
+    inboundMessages.forEach((message, index) => {
+      if (this.recentInboundMessageKeys.has(message.messageKey)) {
+        duplicates += 1;
+        messageStatuses[index] = 'duplicate_message';
+        this.safeRecordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, 'duplicate_message');
+        return;
+      }
+      this.recentInboundMessageKeys.set(message.messageKey, Date.now());
+      fresh.push({ message, index });
+    });
+
+    const work = this.handleInboundMessages(payload, eventKey, inboundMessages.length, fresh, messageStatuses, duplicates)
+      .finally(() => this.inFlightWasenderEvents.delete(eventKey));
+    this.trackBackground(work, `wasender event ${eventKey}`);
+
+    const settled = await settleWithin(work, this.inboundAckBudgetMs);
+    if (settled.done) {
+      if (settled.error) {
+        throw settled.error;
+      }
+      return settled.value;
+    }
+    this.logger.log(`[webhook][wasender] answered before the work finished eventId=${eventKey} messages=${inboundMessages.length} pending=${fresh.length}`);
+    return {
+      status: 200,
+      body: { ok: true, accepted: true, pending: fresh.length, messageCount: inboundMessages.length, duplicates }
+    };
+  }
+
+  async handleInboundMessages(payload, eventKey, messageCount, fresh, messageStatuses, duplicates) {
+    try {
       const summary = {
-        messageCount: inboundMessages.length,
+        messageCount,
         processed: 0,
         ignored: 0,
-        duplicates: 0,
+        duplicates,
         failed: 0,
         feedback: 0,
         confirmation: 0,
         optOut: 0
       };
-      const messageStatuses = [];
 
-      for (const message of inboundMessages) {
-        this.pruneRecentInboundMessageKeys();
-        if (this.recentInboundMessageKeys.has(message.messageKey)) {
-          summary.duplicates += 1;
-          messageStatuses.push('duplicate_message');
-          this.safeRecordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, 'duplicate_message');
-          continue;
-        }
-
-        // Marked before routing (not after): a second delivery of the same message arriving while this one is still
-        // being handled is a duplicate, not a second reply.
-        this.recentInboundMessageKeys.set(message.messageKey, Date.now());
+      for (const { message, index } of fresh) {
         let result;
         try {
           result = await this.routeInboundMessage(message);
@@ -326,7 +402,7 @@ export class ConfirmationService {
         const eventStatus = result.eventStatus || 'processed';
         this.recentInboundMessageKeys.set(message.messageKey, Date.now());
         this.safeRecordEvent('wasender_message', message.messageKey, message.rawEnvelopeSnapshot, eventStatus);
-        messageStatuses.push(eventStatus);
+        messageStatuses[index] = eventStatus;
 
         if (result.duplicate) {
           summary.duplicates += 1;
@@ -355,7 +431,7 @@ export class ConfirmationService {
         }
       }
 
-      const requestStatus = summarizeWasenderRequestStatus(messageStatuses);
+      const requestStatus = summarizeWasenderRequestStatus(messageStatuses.filter(Boolean));
       this.safeRecordEvent('wasender', eventKey, payload, requestStatus);
       return {
         status: 200,
@@ -367,9 +443,16 @@ export class ConfirmationService {
     } catch (error) {
       this.safeRecordEvent('wasender', eventKey, payload, 'processing_failed');
       throw error;
-    } finally {
-      this.inFlightWasenderEvents.delete(eventKey);
     }
+  }
+
+  // Keeps a promise on the list drain() waits for. Its failure is logged here (the caller may still await it).
+  trackBackground(promise, label = 'background task') {
+    const task = Promise.resolve(promise)
+      .catch((error) => this.logger.warn(`[background] ${label} failed: ${error?.message || error}`))
+      .finally(() => this.backgroundTasks.delete(task));
+    this.backgroundTasks.add(task);
+    return task;
   }
 
   async routeInboundMessage(message) {
@@ -2798,10 +2881,17 @@ export class ConfirmationService {
     return task;
   }
 
-  async drainBackgroundTasks() {
+  // Resolves when every tracked background task is done: inbound Wasender messages still being handled, HighDelivery
+  // auto-sends, and first confirmations whose timer already fired. Tasks started meanwhile are waited for too. Timers
+  // that have not fired are not waited for (see flushDueConfirmations). Never rejects.
+  async drain() {
     while (this.backgroundTasks.size) {
-      await Promise.all([...this.backgroundTasks]);
+      await Promise.allSettled([...this.backgroundTasks]);
     }
+  }
+
+  drainBackgroundTasks() {
+    return this.drain();
   }
 
   async markManualOverride({ order, status }) {
@@ -3114,6 +3204,17 @@ function isTransientWooError(error) {
 
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// { done: true, value | error } when the promise settles within ms, otherwise { done: false } after ms.
+function settleWithin(promise, ms) {
+  let timer;
+  const outcome = promise.then((value) => ({ done: true, value }), (error) => ({ done: true, error }));
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ done: false }), ms);
+    timer.unref?.();
+  });
+  return Promise.race([outcome, timeout]).finally(() => clearTimeout(timer));
 }
 
 function buildApiOrder({ liveOrder, localOrder, messages }) {
