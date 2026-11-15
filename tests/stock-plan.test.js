@@ -208,3 +208,13 @@ test('a variation whose stock is managed on the parent product is skipped, never
   assert.deepEqual(rows.map((row) => [row.unit, row.action, row.target]), [['91', 'skip_parent_stock', null], ['92', 'write', 2]]);
   assert.equal(planHash(rows), planHash(rows.filter((row) => row.unit === '92')));
 });
+
+test('a preview run is stopped by the same HighDelivery checks as a live run: desktop-written units do not count', () => {
+  const doc = linkDoc({ 1: linkUnit({ writer: 'desktop', items: [{ hd_id: 77777, hd_name: 'gone', qty: 1 }] }), 2: linkUnit({ writer: 'server' }) });
+  const product = wooProduct(9, { type: 'variable', doc });
+  const variations = { 9: [wooVariation(1, 'a', { stock: 1 }), wooVariation(2, 'b', { stock: 1 })] };
+  const rows = plan([product], { variations, preview: true });
+  assert.equal(rows.find((row) => row.unit === '1').action, 'skip_hd_missing');
+  const warehouse = hdRows([512, 2], [24, 20]);
+  assert.equal(checkGuards(rows, { warehouse: [...FILLER, ...warehouse], limits }).ok, true);
+});

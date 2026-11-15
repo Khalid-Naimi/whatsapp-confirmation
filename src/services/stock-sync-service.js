@@ -75,7 +75,7 @@ function rowFor(product, key, unit) {
   const item = unit.items[0];
   return {
     productId: product.id, unit: key, label: unit.label, hdId: item ? item.hd_id : null, hdName: item ? item.hd_name : '',
-    hd: null, reserved: 0, offset: unit.offset, cap: unit.max_online, hold: unit.hold, current: null, target: null, action: '', why: ''
+    hd: null, reserved: 0, offset: unit.offset, cap: unit.max_online, hold: unit.hold, writer: unit.writer, current: null, target: null, action: '', why: ''
   };
 }
 
@@ -176,12 +176,15 @@ export function checkGuards(plan, { warehouse, limits }) {
     fail('hd_too_few_items', `HighDelivery returned only ${warehouse.length} items (at least ${limits.minHdItems} expected)`, false);
   }
   const unreadable = (row) => row.action === 'skip_hd_missing' || row.action === 'skip_hd_bad';
-  const linkedIds = new Set(plan.filter((row) => row.hdId !== null && (['write', 'same', 'preview_write', 'preview_same'].includes(row.action) || unreadable(row))).map((row) => row.hdId));
-  const missingIds = new Set(plan.filter(unreadable).map((row) => row.hdId));
+  // Only units this server writes count here, so a test run (which also shows desktop-written units) is stopped
+  // by exactly the checks a live run would be.
+  const mine = plan.filter((row) => row.writer !== 'desktop');
+  const linkedIds = new Set(mine.filter((row) => row.hdId !== null && (['write', 'same'].includes(row.action) || unreadable(row))).map((row) => row.hdId));
+  const missingIds = new Set(mine.filter(unreadable).map((row) => row.hdId));
   if (linkedIds.size > 0 && missingIds.size / linkedIds.size > MAX_MISSING_HD_SHARE) {
     fail('hd_ids_missing', `${missingIds.size} of ${linkedIds.size} linked HighDelivery items are missing or unreadable in its list`, false);
   }
-  if (plan.some((row) => (row.action === 'write' || row.action === 'preview_write') && !(Number.isInteger(row.target) && row.target >= 0))) {
+  if (plan.some((row) => row.action === 'write' && !(Number.isInteger(row.target) && row.target >= 0))) {
     fail('bad_target', 'a planned stock value is not a whole number of 0 or more', false);
   }
 
