@@ -112,24 +112,22 @@ function isOutageStatus(status) {
 // GET /health/ready: booleans only, no customer data, no secret needed. ok is false (503) when the configuration has
 // errors, the durable state (opt-outs) is not loaded, the hourly cron is late (after the first 90 minutes of uptime),
 // or WhatsApp or WooCommerce is down (2 outage failures in a row, or one older than 2 minutes; see isDown).
-// A missing control product (the desktop app has not created it yet) is only 'degraded': ok stays true (200) and
-// `degraded` names it, since the service works without it (opt-outs are then kept until the next restart only).
+// A missing control product (the desktop app has not created it yet) is not ready too: opt-outs would be kept only
+// until the next restart. The team also gets one critical alert when it is first seen (services/durable-state.js).
 export function buildReadiness({ config = {}, tracker = null, durableState = null, now = new Date(), lateMs = HOURLY_LATE_MS }) {
   const nowMs = now.getTime();
   const startedMs = Date.parse(tracker?.startedAt || '') || nowMs;
   const lastRunMs = Date.parse(tracker?.runs(1)?.[0]?.at || '') || 0;
   const hourly = nowMs - startedMs < lateMs || (lastRunMs > 0 && nowMs - lastRunMs <= lateMs);
-  const controlMissing = Boolean(durableState && !durableState.loaded && durableState.lastError === 'control_missing');
   const checks = {
     config: (config.errors || []).length === 0,
-    durableState: durableState ? Boolean(durableState.loaded) || controlMissing : true,
+    durableState: durableState ? Boolean(durableState.loaded) : true,
     hourly: tracker ? hourly : true,
     wasender: tracker ? !tracker.isDown('wasender', now) : true,
     woocommerce: tracker ? !tracker.isDown('woocommerce', now) : true
   };
-  const degraded = controlMissing ? ['control_product_missing'] : [];
   const ok = Object.values(checks).every(Boolean);
-  return { ok, status: ok ? (degraded.length ? 'degraded' : 'ready') : 'not_ready', checks, degraded };
+  return { ok, status: ok ? 'ready' : 'not_ready', checks };
 }
 
 // Wraps the listed async methods of a client so each success or failure is noted. The client itself is unchanged.

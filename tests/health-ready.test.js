@@ -28,8 +28,7 @@ test('ready when everything is fine, also before the first hourly run during the
   assert.deepEqual(buildReadiness({ config, tracker, durableState, now: minutes(80) }), {
     ok: true,
     status: 'ready',
-    checks: { config: true, durableState: true, hourly: true, wasender: true, woocommerce: true },
-    degraded: []
+    checks: { config: true, durableState: true, hourly: true, wasender: true, woocommerce: true }
   });
 });
 
@@ -78,11 +77,11 @@ test('Wasender or Woo is down after 2 outage failures in a row (or one older tha
   assert.equal(buildReadiness({ ...ctx, now: START }).checks.woocommerce, false);
 });
 
-test('a missing control product is degraded (200), not a 503; another durable-state problem still is', () => {
+test('a missing control product is not ready (503), like any other durable-state problem', () => {
   const missing = setup();
   missing.durableState = { loaded: false, lastError: 'control_missing' };
   const result = buildReadiness({ ...missing, now: minutes(1) });
-  assert.deepEqual([result.ok, result.status, result.degraded], [true, 'degraded', ['control_product_missing']]);
+  assert.deepEqual([result.ok, result.status, result.checks.durableState], [false, 'not_ready', false]);
   const down = setup();
   down.durableState = { loaded: false, lastError: 'woo_read_failed' };
   assert.deepEqual([buildReadiness({ ...down, now: minutes(1) }).ok, buildReadiness({ ...down, now: minutes(1) }).status], [false, 'not_ready']);

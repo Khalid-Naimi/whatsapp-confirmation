@@ -113,6 +113,8 @@ const alerts = createAlerts({
   store,
   logger
 });
+// The durable state is built before the alert path exists; it alerts once if the control product is missing.
+durableState.alerts = alerts;
 const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, alerts, logger });
 
 const confirmationService = new ConfirmationService({

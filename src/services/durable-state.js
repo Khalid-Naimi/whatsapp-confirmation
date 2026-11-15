@@ -77,7 +77,7 @@ function parseObject(text) {
 }
 
 export class DurableState {
-  constructor({ wooClient, wordpressClient = null, store = null, sku = CONTROL_SKU, limits = DURABLE_LIMITS, now = () => Date.now(), verifySettleMs = DEFAULT_VERIFY_SETTLE_MS, staleRetryMs = DEFAULT_STALE_RETRY_MS, sleep = defaultSleep, logger = console } = {}) {
+  constructor({ wooClient, wordpressClient = null, store = null, sku = CONTROL_SKU, limits = DURABLE_LIMITS, now = () => Date.now(), alerts = null, verifySettleMs = DEFAULT_VERIFY_SETTLE_MS, staleRetryMs = DEFAULT_STALE_RETRY_MS, sleep = defaultSleep, logger = console } = {}) {
     this.wooClient = wooClient;
     this.wordpressClient = wordpressClient;
     this.store = store;
@@ -88,6 +88,10 @@ export class DurableState {
     this.verifySettleMs = Math.max(0, Number(verifySettleMs) || 0);
     // A read-back that still shows the value from before our save (a cached GET) is read once more after this long.
     this.staleRetryMs = Math.max(0, Number(staleRetryMs) || 0);
+    // The team alert path (services/alerts.js); may be set after construction. One critical alert per process when
+    // the control product is first found missing.
+    this.alerts = alerts;
+    this.controlMissingAlerted = false;
     this.sleep = sleep;
     this.logger = logger;
     this.optOuts = new Map(); // phone -> day (YYYY-MM-DD)
@@ -154,11 +158,24 @@ export class DurableState {
     const product = (Array.isArray(rows) ? rows : []).find((row) => row?.sku === this.sku);
     if (!product) {
       this.lastError = 'control_missing';
+      this.alertControlMissing();
       this.logger.warn(`[durable] WARNING: the hidden WooCommerce product with SKU ${this.sku} does not exist, so opt-outs and stock alert outcomes are kept only until the next restart. Open the desktop app's Matching page once to create it.`);
       return null;
     }
     this.productId = product.id;
     return product;
+  }
+
+  alertControlMissing() {
+    if (this.controlMissingAlerted || !this.alerts?.alert) {
+      return;
+    }
+    this.controlMissingAlerted = true;
+    Promise.resolve(this.alerts.alert({
+      key: 'durable_control_missing',
+      level: 'critical',
+      text: `ATTENTION serveur: le produit cache ${this.sku} est introuvable dans WooCommerce. Les desabonnements (STOP) ne sont gardes que jusqu'au prochain redemarrage. Ouvrir la page Matching de l'app desktop une fois pour le creer.`
+    })).catch((error) => this.logger.warn(`[durable] control product alert failed: ${error?.message || error}`));
   }
 
   markDirty(key) {

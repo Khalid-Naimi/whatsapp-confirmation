@@ -325,3 +325,15 @@ test('a stale read-back by modification time is told apart from an overwrite', a
   assert.equal(await state.recordOptOut('+212600000912'), true);
   assert.equal(shop.writes.length, 1);
 });
+
+test('a missing control product sends ONE critical team alert, however often it is seen', async () => {
+  const shop = fakeShop({ product: null });
+  const sent = [];
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, alerts: { async alert(payload) { sent.push(payload); return { delivered: true }; } }, logger: quiet });
+  await state.load();
+  await state.recordOptOut('+212600000921');
+  await state.recordOptOut('+212600000922');
+  assert.equal(sent.length, 1);
+  assert.deepEqual([sent[0].key, sent[0].level], ['durable_control_missing', 'critical']);
+  assert.doesNotMatch(sent[0].text, /\+2126/u);
+});
