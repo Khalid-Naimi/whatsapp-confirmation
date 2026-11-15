@@ -64,3 +64,13 @@ test('an unexpected route error is logged as one redacted JSON line', async () =
   assert.equal(JSON.parse(lines[0]).event, 'http_handler_failed');
   assert.doesNotMatch(lines[0], /612345678/u);
 });
+
+test('redact masks local numbers written with spaces or dashes, and leaves epoch milliseconds alone', () => {
+  const text = redact('call 06 12 34 56 78 or 0612-345678 or 07.12.34.56.78 at=1763200000000 date=2026-11-15 order 123');
+  assert.doesNotMatch(text, /06 12 34 56 78|0612-345678|07\.12\.34\.56\.78/u);
+  assert.match(text, /at=1763200000000/u);
+  assert.match(text, /date=2026-11-15/u);
+  assert.match(text, /order 123/u);
+  // A phone still masked, also with its plus.
+  assert.doesNotMatch(redact('+212612345678 212612345678'), /12345678/u);
+});

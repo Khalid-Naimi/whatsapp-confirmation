@@ -22,9 +22,14 @@ export function redact(input, { secrets = [] } = {}) {
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gu, (match) => maskEmail(match))
     // a phone in a URL path or query (%2B212...)
     .replace(/%2B(\d{8,15})(?!\d)/giu, (match, digits) => maskPhone(`+${digits}`))
+    // +212612345678 written in one piece first, so the spaced rule below cannot run on into the next number
+    .replace(/\+\d{8,15}(?!\d)/gu, (match) => maskPhone(match))
     // +212 6 12-34-56-78 style (needs the plus, so dates such as 2026-11-15 are left alone)
     .replace(/\+\d{1,3}(?:[\s().-]*\d){7,13}/gu, (match) => maskPhone(match.replace(/[^\d+]/gu, '')))
-    .replace(/(?<![\w*])\+?\d{9,15}(?!\d)/gu, (match) => maskPhone(match));
+    // a Moroccan local number written with spaces, dashes or dots: 06 12 34 56 78, 0612-345678, 06.12.34.56.78
+    .replace(/(?<![\w*+])0[5-7](?:[\s.-]?\d){8}(?![\d])/gu, (match) => maskPhone(match.replace(/\D/gu, '')))
+    // a bare 9 to 15 digit number; a 13-digit epoch in milliseconds (1xxxxxxxxxxxx) is a time stamp, not a phone
+    .replace(/(?<![\w*])\+?\d{9,15}(?!\d)/gu, (match) => (/^1\d{12}$/u.test(match) ? match : maskPhone(match)));
 }
 
 let sink = console;
