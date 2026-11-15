@@ -224,3 +224,18 @@ test('claim(): a live claim held by someone else is refused, an expired one is t
   await later.release();
   assert.equal(metaOf(700, 'rhymat_test_claim'), '');
 });
+
+test('claim(): a competing claim that lands only after the first read-back is still caught by the second read', async () => {
+  const { woo } = sharedWoo([order(701)]);
+  const waits = [];
+  const slowCompetitor = async (ms) => {
+    waits.push(ms);
+    if (waits.length === 2) {
+      // Another instance's claim write arrives late, between our two read-backs.
+      await woo.updateOrderMeta(701, [{ key: 'rhymat_test_claim', value: JSON.stringify({ state: 'x', claimId: 'other:1', at: new Date().toISOString() }) }]);
+    }
+  };
+  const result = await claim(woo, 701, 'rhymat_test_claim', { instanceId: 'mine', sleep: slowCompetitor });
+  assert.deepEqual(waits, [2000, 500]);
+  assert.deepEqual([result.ok, result.reason], [false, 'lost']);
+});

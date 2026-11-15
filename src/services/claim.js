@@ -7,14 +7,16 @@ import { randomBytes } from 'node:crypto';
 //   1. read the record (or take the one the caller just read) and refuse when someone else holds a live claim, or when
 //      the caller's own check says the work is already done;
 //   2. write { state, claimId, at } (together with the caller's own reservation rows, one write);
-//   3. wait a moment (settleMs, 1 s by default) so a competing write that started at the same time has landed;
-//   4. read again and go on only if our claimId is still there (last writer wins, the other one backs off).
+//   3. wait a moment (settleMs, 2 s by default) so a competing write that started at the same time has landed;
+//   4. read again, wait a little more (recheckMs, 0.5 s) and read a second time; go on only if our claimId is still
+//      there both times (last writer wins, the other one backs off; the second read catches a slow competing write).
 //
 // A claim that has disappeared on the re-read (released by its holder, or a WooCommerce that did not keep it) is not
 // someone else's claim: the caller goes on. A re-read that fails also lets the caller go on (one instance is the
 // normal case; the caller's own reservation state stays the guard), with a warning.
 
-export const DEFAULT_CLAIM_SETTLE_MS = 1000;
+export const DEFAULT_CLAIM_SETTLE_MS = 2000;
+export const DEFAULT_CLAIM_RECHECK_MS = 500;
 
 // Random per process: no host name or other machine detail goes into the shop's data.
 export const INSTANCE_ID = `srv-${process.pid}-${randomBytes(4).toString('hex')}`;
@@ -60,6 +62,7 @@ export async function claimRecord({
   ttlMs = 10 * 60 * 1000,
   state = 'claimed',
   settleMs = DEFAULT_CLAIM_SETTLE_MS,
+  recheckMs = null,
   sleep = defaultSleep,
   now = () => new Date(),
   instanceId = INSTANCE_ID,
@@ -99,20 +102,24 @@ export async function claimRecord({
   if (!read) {
     return { ok: true, claimId, order: written || record, written, verified: false, release };
   }
-  if (settleMs > 0) {
-    await sleep(settleMs);
-  }
+  // Two reads: after the settle wait, and again a little later.
+  const waits = [settleMs, recheckMs ?? Math.min(DEFAULT_CLAIM_RECHECK_MS, settleMs)];
   let reread;
-  try {
-    reread = await read();
-  } catch (error) {
-    logger.warn(`[claim] ${label}: could not read the claim back (${error.message}); going on`);
-    return { ok: true, claimId, order: written || record, written, verified: false, release };
-  }
-  const holder = parseClaim(readMetaValue(reread, key));
-  if (holder && holder.claimId !== claimId) {
-    logger.warn(`[claim] ${label}: another instance claimed it at the same time (${holder.claimId}); backing off`);
-    return { ok: false, reason: 'lost', holder, order: reread, written };
+  for (const wait of waits) {
+    if (wait > 0) {
+      await sleep(wait);
+    }
+    try {
+      reread = await read();
+    } catch (error) {
+      logger.warn(`[claim] ${label}: could not read the claim back (${error.message}); going on`);
+      return { ok: true, claimId, order: written || record, written, verified: false, release };
+    }
+    const holder = parseClaim(readMetaValue(reread, key));
+    if (holder && holder.claimId !== claimId) {
+      logger.warn(`[claim] ${label}: another instance claimed it at the same time (${holder.claimId}); backing off`);
+      return { ok: false, reason: 'lost', holder, order: reread, written };
+    }
   }
   return { ok: true, claimId, order: reread || written || record, written, verified: true, release };
 }
