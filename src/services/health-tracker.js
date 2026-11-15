@@ -7,6 +7,10 @@ const MAX_NEEDS = 20;
 export const HOURLY_LATE_MS = 90 * 60 * 1000;
 // Versions of what the desktop app reads from here: the /api answers, this health payload, the product link document.
 export const CONTRACT = Object.freeze({ api: 1, health: 1, linkDoc: 1 });
+// A Wasender / WooCommerce outage only makes /health/ready fail after 2 outage failures in a row, or when the first of
+// them is at least this old with no success since: one dropped request is not an outage.
+export const OUTAGE_MIN_FAILURES = 2;
+export const OUTAGE_MIN_AGE_MS = 2 * 60 * 1000;
 
 // Remembers when each outside service last worked (passively, from the calls the service already makes) and keeps the
 // summaries of the hourly runs. Nothing here calls Woo, HighDelivery or WhatsApp by itself.
@@ -16,8 +20,8 @@ export class HealthTracker {
     this.now = now;
     this.startedAt = (startedAt || now()).toISOString();
     this.services = new Map();
-    // name -> true while the last call failed in a way that says the service is down (not a clean refusal of one
-    // request, such as a customer number WhatsApp does not know). Feeds GET /health/ready only.
+    // name -> { count, sinceMs } of the outage failures in a row since the last success (a clean refusal of one request,
+    // such as a customer number WhatsApp does not know, counts as an answer). Feeds GET /health/ready only.
     this.down = new Map();
   }
 
@@ -30,12 +34,17 @@ export class HealthTracker {
 
   recordOk(name) {
     this.entry(name).lastOkAt = this.now().toISOString();
-    this.down.set(name, false);
+    this.down.delete(name);
   }
 
   recordFail(name, error) {
     const entry = this.entry(name);
-    this.down.set(name, isOutage(error));
+    if (isOutage(error)) {
+      const previous = this.down.get(name);
+      this.down.set(name, { count: (previous?.count || 0) + 1, sinceMs: previous?.sinceMs ?? this.now().getTime() });
+    } else {
+      this.down.delete(name);
+    }
     entry.lastFailAt = this.now().toISOString();
     // Only a short plain reason: never a token, URL or customer detail.
     entry.lastError = redact(String(error?.message || error || 'error').replace(/https?:\/\/\S+/g, '')).trim().slice(0, 120);
@@ -64,7 +73,16 @@ export class HealthTracker {
 
   // true when the last call to that service failed because the service (or our access to it) is down.
   lastCallFailed(name) {
-    return this.down.get(name) === true;
+    return Boolean(this.down.get(name));
+  }
+
+  // true when the service counts as down: 2 outage failures in a row, or one older than 2 minutes, no success since.
+  isDown(name, now = this.now()) {
+    const outage = this.down.get(name);
+    if (!outage) {
+      return false;
+    }
+    return outage.count >= OUTAGE_MIN_FAILURES || now.getTime() - outage.sinceMs >= OUTAGE_MIN_AGE_MS;
   }
 
   runs(limit = 24) {
@@ -93,20 +111,25 @@ function isOutageStatus(status) {
 
 // GET /health/ready: booleans only, no customer data, no secret needed. ok is false (503) when the configuration has
 // errors, the durable state (opt-outs) is not loaded, the hourly cron is late (after the first 90 minutes of uptime),
-// or the last WhatsApp or WooCommerce call failed because that service is down.
+// or WhatsApp or WooCommerce is down (2 outage failures in a row, or one older than 2 minutes; see isDown).
+// A missing control product (the desktop app has not created it yet) is only 'degraded': ok stays true (200) and
+// `degraded` names it, since the service works without it (opt-outs are then kept until the next restart only).
 export function buildReadiness({ config = {}, tracker = null, durableState = null, now = new Date(), lateMs = HOURLY_LATE_MS }) {
   const nowMs = now.getTime();
   const startedMs = Date.parse(tracker?.startedAt || '') || nowMs;
   const lastRunMs = Date.parse(tracker?.runs(1)?.[0]?.at || '') || 0;
   const hourly = nowMs - startedMs < lateMs || (lastRunMs > 0 && nowMs - lastRunMs <= lateMs);
+  const controlMissing = Boolean(durableState && !durableState.loaded && durableState.lastError === 'control_missing');
   const checks = {
     config: (config.errors || []).length === 0,
-    durableState: durableState ? Boolean(durableState.loaded) : true,
+    durableState: durableState ? Boolean(durableState.loaded) || controlMissing : true,
     hourly: tracker ? hourly : true,
-    wasender: tracker ? !tracker.lastCallFailed('wasender') : true,
-    woocommerce: tracker ? !tracker.lastCallFailed('woocommerce') : true
+    wasender: tracker ? !tracker.isDown('wasender', now) : true,
+    woocommerce: tracker ? !tracker.isDown('woocommerce', now) : true
   };
-  return { ok: Object.values(checks).every(Boolean), checks };
+  const degraded = controlMissing ? ['control_product_missing'] : [];
+  const ok = Object.values(checks).every(Boolean);
+  return { ok, status: ok ? (degraded.length ? 'degraded' : 'ready') : 'not_ready', checks, degraded };
 }
 
 // Wraps the listed async methods of a client so each success or failure is noted. The client itself is unchanged.

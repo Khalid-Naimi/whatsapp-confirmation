@@ -27,7 +27,9 @@ test('ready when everything is fine, also before the first hourly run during the
   const { tracker, config, durableState } = setup();
   assert.deepEqual(buildReadiness({ config, tracker, durableState, now: minutes(80) }), {
     ok: true,
-    checks: { config: true, durableState: true, hourly: true, wasender: true, woocommerce: true }
+    status: 'ready',
+    checks: { config: true, durableState: true, hourly: true, wasender: true, woocommerce: true },
+    degraded: []
   });
 });
 
@@ -48,25 +50,42 @@ test('the hourly run is late after 90 minutes of uptime without a run, or when t
   assert.equal(buildReadiness({ ...ctx, now: minutes(191) }).checks.hourly, false);
 });
 
-test('a failed Wasender or Woo call makes it not ready until the next success; a clean 4xx refusal does not', async () => {
+// Test change (listed): one outage failure is no longer enough; it takes 2 in a row, or one older than 2 minutes.
+test('Wasender or Woo is down after 2 outage failures in a row (or one older than 2 minutes) until the next success; a clean 4xx refusal is not', async () => {
   const ctx = setup();
   let fail = null;
   const wasender = { async sendMessageWithRetries() { if (fail) { throw fail; } return {}; } };
   trackCalls(wasender, 'wasender', ['sendMessageWithRetries'], ctx.tracker);
   fail = Object.assign(new Error('Wasender send-message failed with 422'), { status: 422 });
   await assert.rejects(wasender.sendMessageWithRetries());
+  await assert.rejects(wasender.sendMessageWithRetries());
   assert.equal(buildReadiness({ ...ctx, now: minutes(1) }).checks.wasender, true);
   fail = Object.assign(new Error('no answer'), { status: 0 });
   await assert.rejects(wasender.sendMessageWithRetries());
-  assert.equal(buildReadiness({ ...ctx, now: minutes(1) }).checks.wasender, false);
+  assert.equal(buildReadiness({ ...ctx, now: START }).checks.wasender, true);
+  assert.equal(buildReadiness({ ...ctx, now: minutes(2) }).checks.wasender, false);
+  await assert.rejects(wasender.sendMessageWithRetries());
+  assert.equal(buildReadiness({ ...ctx, now: START }).checks.wasender, false);
   fail = null;
   await wasender.sendMessageWithRetries();
-  assert.equal(buildReadiness({ ...ctx, now: minutes(1) }).checks.wasender, true);
+  assert.equal(buildReadiness({ ...ctx, now: minutes(3) }).checks.wasender, true);
 
   const woo = { async request() { throw new Error('WooCommerce request failed with 503: empty body'); } };
   trackCalls(woo, 'woocommerce', ['request'], ctx.tracker);
   await assert.rejects(woo.request());
-  assert.equal(buildReadiness({ ...ctx, now: minutes(1) }).checks.woocommerce, false);
+  assert.equal(buildReadiness({ ...ctx, now: START }).checks.woocommerce, true);
+  await assert.rejects(woo.request());
+  assert.equal(buildReadiness({ ...ctx, now: START }).checks.woocommerce, false);
+});
+
+test('a missing control product is degraded (200), not a 503; another durable-state problem still is', () => {
+  const missing = setup();
+  missing.durableState = { loaded: false, lastError: 'control_missing' };
+  const result = buildReadiness({ ...missing, now: minutes(1) });
+  assert.deepEqual([result.ok, result.status, result.degraded], [true, 'degraded', ['control_product_missing']]);
+  const down = setup();
+  down.durableState = { loaded: false, lastError: 'woo_read_failed' };
+  assert.deepEqual([buildReadiness({ ...down, now: minutes(1) }).ok, buildReadiness({ ...down, now: minutes(1) }).status], [false, 'not_ready']);
 });
 
 function get(handler, url, headers = {}) {
