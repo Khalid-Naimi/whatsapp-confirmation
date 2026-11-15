@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ENV_TABLE, isConfigStrict, loadConfig, validateEnv } from '../src/config.js';
+import { normalizeNotifyPhone, ENV_TABLE, isConfigStrict, loadConfig, validateEnv } from '../src/config.js';
 import { checkConfigAtBoot } from '../src/lifecycle.js';
 
 const quiet = { log() {}, warn() {}, error() {} };
@@ -50,7 +50,7 @@ test('bad numbers, unknown choices and wrong status slugs are errors', () => {
     WOO_STATUS_DELIVERED: 'Delivered!',
     QUIET_HOURS_START: '25',
     QUIET_HOURS_TIMEZONE: 'Mars/Base',
-    INTERNAL_NOTIFY_PHONES: '0600000000',
+    INTERNAL_NOTIFY_PHONES: '+212600000001, 06000',
     WOOCOMMERCE_BASE_URL: 'shop.example'
   });
   for (const name of ['PORT', 'STOCK_SYNC_MAX_RESTOCKS', 'CONFIRMATION_DELAY_SECONDS', 'HD_MIN_TRUST_SCORE', 'STOCK_SYNC_MODE', 'HD_LINKS_FOR_ORDERS', 'HD_AUTO_SEND_ENABLED', 'WOO_STATUS_CONFIRMED', 'WOO_STATUS_DELIVERED', 'QUIET_HOURS_START', 'QUIET_HOURS_TIMEZONE', 'INTERNAL_NOTIFY_PHONES', 'WOOCOMMERCE_BASE_URL']) {
@@ -98,4 +98,26 @@ test('boot stops on errors unless CONFIG_STRICT=0, and logs every problem', () =
   assert.equal(isConfigStrict({}), true);
   assert.equal(isConfigStrict({ CONFIG_STRICT: '0' }), false);
   assert.equal(isConfigStrict({ CONFIG_STRICT: 'false' }), false);
+});
+
+test('team phones are normalised as people write them; only an entry with fewer than 8 digits is an error', () => {
+  assert.equal(normalizeNotifyPhone('+212 708357533'), '+212708357533');
+  assert.equal(normalizeNotifyPhone('212708357533'), '+212708357533');
+  assert.equal(normalizeNotifyPhone('00212-708.357.533'), '+212708357533');
+  assert.equal(normalizeNotifyPhone('0708357533'), '+212708357533');
+  assert.equal(normalizeNotifyPhone('49 172 9031097'), '+491729031097');
+  assert.equal(normalizeNotifyPhone('(+49) 172-903-1097'), '+491729031097');
+  assert.equal(normalizeNotifyPhone('0612'), '');
+  const env = { ...GOOD, INTERNAL_NOTIFY_PHONES: '+212 708357533, 212600000002' };
+  assert.deepEqual(validateEnv(env).errors, []);
+  assert.deepEqual(loadConfig(env).messages.internalNotifyPhones, ['+212708357533', '+212600000002']);
+});
+
+test('without SHOP_CONTACT_PHONE (CONFIG_STRICT=0) the default texts leave the "write to this number" sentence out', () => {
+  const config = loadConfig({ ...GOOD, SHOP_CONTACT_PHONE: '', CONFIG_STRICT: '0' });
+  for (const key of ['confirmationTemplate', 'invalidReply', 'reminderMessage']) {
+    assert.ok(!config.messages[key].includes('numero:'), key);
+    assert.ok(!config.messages[key].includes('3endek chi question'), key);
+  }
+  assert.ok(config.messages.confirmationTemplate.endsWith('jawb b "2".'));
 });

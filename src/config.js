@@ -134,7 +134,7 @@ function checkValue(row, raw) {
       return /^\+?[\d\s().-]{8,20}$/u.test(value) && value.replace(/\D/gu, '').length >= 8 ? '' : 'must be a phone number';
     case 'phones': {
       const phones = value.split(',').map((item) => item.trim()).filter(Boolean);
-      return phones.length > 0 && phones.every((phone) => /^\+\d{8,15}$/u.test(phone)) ? '' : 'must be a comma list of phones like +212600000000';
+      return phones.length > 0 && phones.every((phone) => normalizeNotifyPhone(phone)) ? '' : 'must be a comma list of phones (at least 8 digits each) like +212600000000';
     }
     case 'email':
       return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/u.test(value) ? '' : 'must be an email address';
@@ -277,12 +277,12 @@ export function loadConfig(env = process.env) {
       confirmationDelayMs: Number(env.CONFIRMATION_DELAY_SECONDS ?? 30) * 1000,
       confirmationPollEnabled: parseBooleanEnv(env.CONFIRMATION_POLL_ENABLED, false),
       confirmationPollQuestion: env.CONFIRMATION_POLL_QUESTION || 'Confirmer votre commande ?',
-      confirmationTemplate: env.CONFIRMATION_MESSAGE_TEMPLATE ||
-        'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".\n-Ila 3endek chi question, seft la question dyalk l had numero: ' + shopContactPhone,
-      invalidReply: env.INVALID_REPLY_MESSAGE ||
-        '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.\n\nIla 3endek chi question, seft la question dyalk l had numero: ' + shopContactPhone,
-      reminderMessage: env.REMINDER_MESSAGE ||
-        'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.\n\nIla 3endek chi question, seft la question dyalk l had numero: ' + shopContactPhone,
+      confirmationTemplate: env.CONFIRMATION_MESSAGE_TEMPLATE || withShopContact(
+        'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".', '\n-', shopContactPhone),
+      invalidReply: env.INVALID_REPLY_MESSAGE || withShopContact(
+        '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.', '\n\n', shopContactPhone),
+      reminderMessage: env.REMINDER_MESSAGE || withShopContact(
+        'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.', '\n\n', shopContactPhone),
       confirmedReply: env.CONFIRMED_REPLY_MESSAGE ||
         'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
       cancelledReply: env.CANCELLED_REPLY_MESSAGE ||
@@ -316,11 +316,37 @@ export function loadConfig(env = process.env) {
   };
 }
 
+// A team phone as written by a person -> +<digits>, or '' when it has fewer than 8 digits. Spaces, dashes, dots and
+// brackets are dropped; 00 at the start becomes +; a Moroccan local number (0 and 9 digits) gets +212; any other
+// number without + is taken as already having its country code (212..., 49...).
+export function normalizeNotifyPhone(value) {
+  const raw = String(value ?? '').trim();
+  const plus = raw.startsWith('+');
+  let digits = raw.replace(/\D/gu, '');
+  if (digits.length < 8) {
+    return '';
+  }
+  if (!plus) {
+    if (digits.startsWith('00')) {
+      digits = digits.slice(2);
+    } else if (/^0\d{9}$/u.test(digits)) {
+      digits = `212${digits.slice(1)}`;
+    }
+  }
+  return digits.length >= 8 ? `+${digits}` : '';
+}
+
 function parsePhoneList(value) {
   return String(value)
     .split(',')
-    .map((item) => item.trim())
+    .map((item) => normalizeNotifyPhone(item))
     .filter(Boolean);
+}
+
+// The "write to this number with a question" sentence of the default customer texts. Without SHOP_CONTACT_PHONE
+// (possible only with CONFIG_STRICT=0) the sentence is left out instead of ending on an empty number.
+function withShopContact(text, separator, shopContactPhone) {
+  return shopContactPhone ? `${text}${separator}Ila 3endek chi question, seft la question dyalk l had numero: ${shopContactPhone}` : text;
 }
 
 // An unknown value falls back to the safe default instead of switching something on by accident.
