@@ -22,8 +22,9 @@ export class WooCommerceClient {
   }
 
   // `after` (ISO date) keeps only orders created since then. A status the shop does not know (for example the
-  // "confirmed" status before the Rhymat Order Statuses plugin is active) is skipped instead of failing the whole list.
-  async listOrdersByStatuses(statuses, { perPage = 100, after = '', fields = '' } = {}) {
+  // "confirmed" status before the Rhymat Order Statuses plugin is active) is skipped instead of failing the whole list;
+  // pass an array as `skipped` to learn which statuses were skipped.
+  async listOrdersByStatuses(statuses, { perPage = 100, after = '', fields = '', skipped = null } = {}) {
     const allOrders = [];
     const seenOrderIds = new Set();
 
@@ -43,6 +44,7 @@ export class WooCommerceClient {
         } catch (error) {
           if (/failed with 400/u.test(String(error?.message)) && /rest_invalid_param/u.test(String(error?.message))) {
             this.logger.warn(`[woo] status "${status}" is not known to the shop; skipped in the order list`);
+            skipped?.push(status);
             break;
           }
           throw error;
@@ -121,8 +123,11 @@ export class WooCommerceClient {
 
 
   // Open orders with only what the stock reservation needs (no billing or shipping data).
+  // -> { orders, skippedStatuses }: a status the shop rejected means its orders are missing from the list.
   async listOpenOrdersLite(statuses, { after = '' } = {}) {
-    return this.listOrdersByStatuses(statuses, { after, fields: ORDER_LITE_FIELDS });
+    const skippedStatuses = [];
+    const orders = await this.listOrdersByStatuses(statuses, { after, fields: ORDER_LITE_FIELDS, skipped: skippedStatuses });
+    return { orders, skippedStatuses };
   }
 
   async listProductsPage({ page = 1, perPage = 100, fields = PRODUCT_FIELDS, status = 'any', sku = '' } = {}) {

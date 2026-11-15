@@ -273,7 +273,7 @@ export class StockSyncService {
     const mode = describeMode(this.config.mode, controlRead);
     this.lastMode = mode;
     const writesAllowed = !dryRun && mode.effective === 'live';
-    const outcome = { at, mode, runMode: writesAllowed ? 'live' : 'dry_run', controlRead, plan: [], unlinked: null, errors: 0, written: [], aborted: '', abortDetail: '', approvable: false, approval: '' };
+    const outcome = { at, mode, runMode: writesAllowed ? 'live' : 'dry_run', controlRead, plan: [], unlinked: null, errors: 0, skippedStatuses: [], written: [], aborted: '', abortDetail: '', approvable: false, approval: '' };
 
     try {
       await this.compute(outcome);
@@ -301,24 +301,33 @@ export class StockSyncService {
 
   // Reads everything and fills outcome.plan, planHash, unlinked and the guard result.
   async compute(outcome) {
-    const { reserveStatuses, reserveDays } = this.config;
     await this.step('woo_products_failed', () => this.linkIndex.load());
     const products = this.linkIndex.products();
     outcome.productsById = new Map(products.map(({ product }) => [product.id, product]));
     const warehouse = await this.step('hd_unavailable', () => this.hdClient.listWarehouseProducts());
-    const after = new Date(this.now().getTime() - reserveDays * 24 * 60 * 60 * 1000).toISOString();
-    const orders = await this.step('orders_failed', () => this.wooClient.listOpenOrdersLite(reserveStatuses, { after }));
+    const reservations = await this.readReservations(warehouse, outcome);
     const variationsByProduct = await this.readVariations(products, outcome);
-
-    const resolveLines = (lineItems) => {
-      const { wanted } = resolveOrderLines(lineItems, { unitLookup: (productId, variationId) => this.linkIndex.lookup(productId, variationId), csvMap: this.productMap, warehouse });
-      return [...wanted.values()].map(({ product, quantity }) => ({ hdId: Number(product.id), quantity }));
-    };
-    const reservations = computeReservations(orders, resolveLines);
     outcome.plan = computeStockPlan({ products, variationsByProduct, warehouse, reservations });
     outcome.hash = planHash(outcome.plan);
     outcome.guards = checkGuards(outcome.plan, { warehouse, limits: this.config });
     outcome.unlinked = findUnlinked({ products, variationsByProduct, warehouse, control: outcome.controlRead.control });
+  }
+
+  // Units of each HighDelivery item that open orders still need. If the shop rejected one of the configured
+  // statuses, its orders are missing from the list and the numbers would be too high: the run stops.
+  async readReservations(warehouse, outcome) {
+    const { reserveStatuses, reserveDays } = this.config;
+    const after = new Date(this.now().getTime() - reserveDays * 24 * 60 * 60 * 1000).toISOString();
+    const { orders, skippedStatuses } = await this.step('orders_failed', () => this.wooClient.listOpenOrdersLite(reserveStatuses, { after }));
+    outcome.skippedStatuses = skippedStatuses;
+    if (skippedStatuses.length > 0) {
+      throw new SyncAbort('reserve_status_rejected', `the shop does not know the order status ${skippedStatuses.join(', ')}, so those orders cannot be reserved`);
+    }
+    const resolveLines = (lineItems) => {
+      const { wanted } = resolveOrderLines(lineItems, { unitLookup: (productId, variationId) => this.linkIndex.lookup(productId, variationId), csvMap: this.productMap, warehouse });
+      return [...wanted.values()].map(({ product, quantity }) => ({ hdId: Number(product.id), quantity }));
+    };
+    return computeReservations(orders, resolveLines);
   }
 
   // The variation lists of the variable products that matter. One failing product is skipped; more than three stop the run.
@@ -434,6 +443,7 @@ export class StockSyncService {
       changed: outcome.runMode === 'live' ? outcome.written.length : planned.length,
       skipped: plan.filter((row) => row.action.startsWith('skip_')).length,
       errors: outcome.errors,
+      skippedStatuses: outcome.skippedStatuses,
       aborted: outcome.aborted,
       abortDetail: outcome.abortDetail,
       planHash: outcome.hash || ''

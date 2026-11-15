@@ -59,7 +59,8 @@ export function makeShop({ products = [], variations = {}, orders = [], control 
       calls.orders += 1;
       calls.lastOrderQuery = { statuses, ...options };
       if (failOn.orders) { throw new Error('orders down'); }
-      return orders.filter((order) => statuses.includes(order.status));
+      const skippedStatuses = statuses.filter((status) => failOn.rejectedStatuses?.includes(status));
+      return { orders: orders.filter((order) => statuses.includes(order.status) && !skippedStatuses.includes(order.status)), skippedStatuses };
     },
     async updateProduct(id, fields) {
       writes.push({ kind: 'product', id, fields });

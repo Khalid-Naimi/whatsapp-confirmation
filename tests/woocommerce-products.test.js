@@ -67,8 +67,8 @@ test('listProductsPage can look a product up by SKU', async () => {
 
 test('open orders are listed with a small field list, never the whole order', async () => {
   const { client, calls } = makeClient([{ body: [{ id: 1 }] }, { body: [] }]);
-  const orders = await client.listOpenOrdersLite(['processing', 'on-hold'], { after: '2026-10-01T00:00:00Z' });
-  assert.deepEqual(orders, [{ id: 1 }]);
+  const { orders, skippedStatuses } = await client.listOpenOrdersLite(['processing', 'on-hold'], { after: '2026-10-01T00:00:00Z' });
+  assert.deepEqual([orders, skippedStatuses], [[{ id: 1 }], []]);
   assert.equal(calls[0].url.searchParams.get('_fields'), 'id,status,line_items,meta_data');
   assert.equal(calls[0].url.searchParams.get('after'), '2026-10-01T00:00:00Z');
   assert.equal(calls[1].url.searchParams.get('status'), 'on-hold');
@@ -143,4 +143,10 @@ test('a failure reply that echoes the meta does not put the JSON in the log or t
     return true;
   });
   assert.doesNotMatch(logs.join('\n'), /175cm/u);
+});
+
+test('a status the shop rejects is skipped in the open order list, and the answer says so', async () => {
+  const { client } = makeClient([{ body: [{ id: 1 }] }, { body: [] }, { status: 400, body: { code: 'rest_invalid_param' } }]);
+  const { orders, skippedStatuses } = await client.listOpenOrdersLite(['processing', 'on-hold', 'confirmed']);
+  assert.deepEqual([orders.length, skippedStatuses], [1, ['confirmed']]);
 });

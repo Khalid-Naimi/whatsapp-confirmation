@@ -300,3 +300,17 @@ test('a unit made of two HighDelivery pieces shows half the pool, and an open or
   assert.deepEqual([reserved.plan[0].reserved, reserved.plan[0].target], [2, 4]);
   assert.equal(shop.stockWrites()[0].fields.stock_quantity, 4);
 });
+
+test('a reserve status the shop rejects stops the run (its orders would be missing) and is reported', async () => {
+  const shop = standardShop({ failOn: { rejectedStatuses: ['confirmed'] } });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, 'reserve_status_rejected');
+  assert.deepEqual(result.summary.skippedStatuses, ['confirmed']);
+  assert.match(result.summary.abortDetail, /order status confirmed/u);
+  assert.equal(shop.stockWrites().length, 0);
+  const approved = await makeService(shop).run({ approveHash: result.summary.planHash });
+  assert.equal(approved.summary.aborted, 'reserve_status_rejected');
+  assert.equal(shop.stockWrites().length, 0);
+  const fine = await makeService(standardShop({ failOn: { rejectedStatuses: ['confirmed'] } }), { config: { reserveStatuses: ['processing', 'on-hold'] } }).run({ dryRun: true });
+  assert.deepEqual([fine.summary.aborted, fine.summary.skippedStatuses], ['', []]);
+});
