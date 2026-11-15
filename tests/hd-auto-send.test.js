@@ -203,7 +203,8 @@ test('success: reserve, create, complete in Woo and tell both numbers', async ()
   assert.deepEqual({ status: result.status, tracking: result.trackingNumber, completed: result.completed, notified: result.notified }, { status: 'sent', tracking: 'HD-42', completed: true, notified: 2 });
   assert.equal(hdCalls[0].recipientPhone, '0612345678');
   // the reservation is written before the parcel is created, and the order is completed after
-  assert.ok(events.indexOf('meta:state=sending,error=') < events.indexOf('hd:create'));
+  const reserveAt = events.findIndex((e) => e.startsWith('meta:state=sending,error=,sending_at='));
+  assert.ok(reserveAt >= 0 && reserveAt < events.indexOf('hd:create'));
   assert.ok(events.indexOf('hd:create') < events.indexOf('status:completed'));
   assert.equal(woo.order.status, 'completed');
   const meta = Object.fromEntries(woo.order.meta_data.map((m) => [m.key, m.value]));

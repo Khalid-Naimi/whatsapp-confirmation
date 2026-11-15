@@ -92,6 +92,8 @@ export class HighDeliveryClient {
       headers.Authorization = `Bearer ${this.token}`;
     }
 
+    // A write (not the login) may have been carried out even when its answer is broken: such failures are ambiguous.
+    const mayHaveActed = method !== 'GET' && auth;
     let response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -115,7 +117,16 @@ export class HighDeliveryClient {
       return { unauthorized: true };
     }
     if (!payload || typeof payload !== 'object') {
-      throw new HighDeliveryError(`HighDelivery returned an unexpected reply (HTTP ${response.status}).`, { status: response.status });
+      throw new HighDeliveryError(`HighDelivery returned an unexpected reply (HTTP ${response.status}).`, { status: response.status, ambiguous: mayHaveActed });
+    }
+    if (response.status >= 500 && mayHaveActed) {
+      // A server error after a write: the parcel may exist, so this is never treated as a clean refusal.
+      const detail = payload.errors ?? payload.error ?? payload.data ?? '';
+      throw new HighDeliveryError(String(payload.message || `HTTP ${response.status}`), {
+        status: response.status,
+        body: typeof detail === 'string' ? detail : JSON.stringify(detail),
+        ambiguous: true
+      });
     }
     if (response.status >= 400 || payload.success !== true) {
       const detail = payload.errors ?? payload.error ?? payload.data ?? '';

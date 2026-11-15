@@ -9,8 +9,15 @@ export const HD_META = {
   state: 'rhymat_hd_api_state', // sending | sent | failed | unknown
   tracking: 'rhymat_hd_api_tracking',
   sentAt: 'rhymat_hd_api_sent_at',
-  error: 'rhymat_hd_api_error'
+  error: 'rhymat_hd_api_error',
+  // When the state became "sending": a send that never finished (process killed) is found by its age.
+  sendingAt: 'rhymat_hd_api_sending_at',
+  // Set once when the hourly task retries an auto-send that never ran (so it is never retried twice).
+  retryAt: 'rhymat_hd_api_retry_at'
 };
+
+// A "sending" older than this is a send that died half way (deploy, crash): the parcel may or may not exist.
+export const STUCK_SENDING_MS = 10 * 60 * 1000;
 
 const BLOCKING_STATES = new Set(['sending', 'sent', 'unknown']);
 
@@ -91,6 +98,11 @@ export function buildParcelFromWooOrder(order) {
     problems,
     parcel: { recipientName, recipientPhone, address, city, productName, codAmount, isExpress, comment: `Woo #${order?.id ?? ''}`.trim() }
   };
+}
+
+function isStuck(sendingAt, now) {
+  const startedMs = Date.parse(String(sendingAt || ''));
+  return Number.isNaN(startedMs) || now.getTime() - startedMs >= STUCK_SENDING_MS;
 }
 
 export class HdAutoSendService {
@@ -234,7 +246,8 @@ export class HdAutoSendService {
     try {
       await this.wooClient.updateOrderMeta(orderId, [
         { key: HD_META.state, value: 'sending' },
-        { key: HD_META.error, value: '' }
+        { key: HD_META.error, value: '' },
+        { key: HD_META.sendingAt, value: new Date().toISOString() }
       ]);
     } catch (error) {
       this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=reservation_failed ${error.message}`);
@@ -284,6 +297,43 @@ export class HdAutoSendService {
 
     const notified = await this.notify(orderId, full, tracking);
     return { status: 'sent', trackingNumber: tracking, completed, notified };
+  }
+
+  // Hourly: a "sending" that is older than 10 minutes (or has no start time, from before this check existed) died half
+  // way. It becomes "unknown" (still blocks any automatic resend), gets a note, and the team is told once: the next
+  // run sees "unknown", not "sending", so it never alerts twice. Returns true when the order was changed. Never throws.
+  async reviewStuckSend(order, now = new Date()) {
+    const orderId = String(order?.id ?? '');
+    if (!this.enabled || !orderId || metaValue(order, HD_META.state) !== 'sending' || this.inFlight.has(orderId)) {
+      return false;
+    }
+    if (!isStuck(metaValue(order, HD_META.sendingAt), now)) {
+      return false;
+    }
+    let fresh;
+    try {
+      fresh = await this.wooClient.getOrder(orderId);
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] could not re-read a stuck send orderId=${orderId}: ${error.message}`);
+      return false;
+    }
+    if (this.inFlight.has(orderId) || metaValue(fresh, HD_META.state) !== 'sending' || !isStuck(metaValue(fresh, HD_META.sendingAt), now)) {
+      return false;
+    }
+    const detail = 'the send stopped half way (server restart?) and never got an answer';
+    try {
+      await this.wooClient.updateOrderMeta(orderId, [
+        { key: HD_META.state, value: 'unknown' },
+        { key: HD_META.error, value: detail }
+      ]);
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] could not mark a stuck send orderId=${orderId}: ${error.message}`);
+      return false;
+    }
+    this.logger.warn(`[hd-auto-send] stuck sending -> unknown orderId=${orderId}`);
+    await this.note(orderId, `Auto-send to HighDelivery stopped half way (${detail}). The parcel may exist: check HighDelivery before sending this order again from the desktop app.`);
+    await this.notifyProblem(orderId, fresh, { status: 'unknown', error: detail });
+    return true;
   }
 
   // off: by name through the CSV, exactly as before. shadow: still by name, but the link result is compared and
