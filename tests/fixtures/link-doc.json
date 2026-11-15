@@ -1,0 +1,318 @@
+{
+  "about": "Shared with the desktop app: both implementations must agree on every entry.",
+  "valid": [
+    {
+      "name": "saumon hoodie with a hold unit",
+      "text": "{\n  \"schema\": 1,\n  \"rev\": 7,\n  \"updated_at\": \"2026-11-15T10:12:03Z\",\n  \"updated_by\": \"desktop\",\n  \"kind\": \"linked\",\n  \"units\": {\n    \"8975\": {\n      \"label\": \"190cm >\",\n      \"size\": \"XL\",\n      \"items\": [],\n      \"offset\": 0,\n      \"max_online\": null,\n      \"hold\": true,\n      \"sync\": true,\n      \"writer\": \"desktop\"\n    },\n    \"8978\": {\n      \"label\": \"175cm <\",\n      \"size\": \"XS\",\n      \"items\": [\n        {\n          \"hd_id\": 512,\n          \"hd_name\": \"Zip up Hoodie Saumon XL\",\n          \"qty\": 1\n        }\n      ],\n      \"offset\": 0,\n      \"max_online\": null,\n      \"hold\": false,\n      \"sync\": true,\n      \"writer\": \"desktop\"\n    }\n  }\n}",
+      "canonical": "{\"kind\":\"linked\",\"rev\":7,\"schema\":1,\"units\":{\"8975\":{\"hold\":true,\"items\":[],\"label\":\"190cm >\",\"max_online\":null,\"offset\":0,\"size\":\"XL\",\"sync\":true,\"writer\":\"desktop\"},\"8978\":{\"hold\":false,\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"label\":\"175cm <\",\"max_online\":null,\"offset\":0,\"size\":\"XS\",\"sync\":true,\"writer\":\"desktop\"}},\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\"}"
+    },
+    {
+      "name": "simple product with a cap and an accent",
+      "text": "{\n  \"schema\": 1,\n  \"rev\": 7,\n  \"updated_at\": \"2026-11-15T10:12:03Z\",\n  \"updated_by\": \"desktop\",\n  \"kind\": \"linked\",\n  \"units\": {\n    \"p\": {\n      \"label\": \"Casquette noire é\",\n      \"size\": \"\",\n      \"items\": [\n        {\n          \"hd_id\": 24,\n          \"hd_name\": \"Military cap\",\n          \"qty\": 1\n        }\n      ],\n      \"offset\": 1,\n      \"max_online\": 6,\n      \"hold\": false,\n      \"sync\": true,\n      \"writer\": \"desktop\"\n    }\n  }\n}",
+      "canonical": "{\"kind\":\"linked\",\"rev\":7,\"schema\":1,\"units\":{\"p\":{\"hold\":false,\"items\":[{\"hd_id\":24,\"hd_name\":\"Military cap\",\"qty\":1}],\"label\":\"Casquette noire é\",\"max_online\":6,\"offset\":1,\"size\":\"\",\"sync\":true,\"writer\":\"desktop\"}},\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\"}"
+    },
+    {
+      "name": "ignored product without units",
+      "text": "{\n  \"schema\": 1,\n  \"rev\": 0,\n  \"updated_at\": \"2026-11-15T10:12:03Z\",\n  \"updated_by\": \"desktop\",\n  \"kind\": \"ignore\",\n  \"units\": {}\n}",
+      "canonical": "{\"kind\":\"ignore\",\"rev\":0,\"schema\":1,\"units\":{},\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\"}"
+    },
+    {
+      "name": "bundle of two items on a server unit",
+      "text": "{\n  \"schema\": 1,\n  \"rev\": 7,\n  \"updated_at\": \"2026-11-15T10:12:03Z\",\n  \"updated_by\": \"desktop\",\n  \"kind\": \"linked\",\n  \"units\": {\n    \"9001\": {\n      \"label\": \"Pack\",\n      \"size\": \"M\",\n      \"items\": [\n        {\n          \"hd_id\": 30,\n          \"hd_name\": \"Military Cargo S\",\n          \"qty\": 1\n        },\n        {\n          \"hd_id\": 24,\n          \"hd_name\": \"Military cap\",\n          \"qty\": 2\n        }\n      ],\n      \"offset\": 0,\n      \"max_online\": null,\n      \"hold\": false,\n      \"sync\": false,\n      \"writer\": \"server\"\n    }\n  }\n}",
+      "canonical": "{\"kind\":\"linked\",\"rev\":7,\"schema\":1,\"units\":{\"9001\":{\"hold\":false,\"items\":[{\"hd_id\":30,\"hd_name\":\"Military Cargo S\",\"qty\":1},{\"hd_id\":24,\"hd_name\":\"Military cap\",\"qty\":2}],\"label\":\"Pack\",\"max_online\":null,\"offset\":0,\"size\":\"M\",\"sync\":false,\"writer\":\"server\"}},\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\"}"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "empty value",
+      "text": "",
+      "error": "missing"
+    },
+    {
+      "name": "not json",
+      "text": "{\"schema\": 1,",
+      "error": "not_json"
+    },
+    {
+      "name": "newer schema",
+      "text": "{\"schema\":2,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"8978\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "schema_unsupported"
+    },
+    {
+      "name": "schema 0",
+      "text": "{\"schema\":0,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"8978\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "rev is not an integer",
+      "text": "{\"schema\":1,\"rev\":1.5,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"8978\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "unknown kind",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"maybe\",\"units\":{\"8978\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "unit key is not a number",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"abc\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "negative offset",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"1\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":-1,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "max_online below zero",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"1\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":0,\"max_online\":-1,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "hold off and no items",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"1\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "hd_id is zero",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"1\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":0,\"hd_name\":\"x\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "qty is zero",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"1\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":5,\"hd_name\":\"x\",\"qty\":0}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "writer is unknown",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"1\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"robot\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "backslash in a name",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"1\":{\"label\":\"175cm <\",\"size\":\"XS\",\"items\":[{\"hd_id\":5,\"hd_name\":\"a\\\\b\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    },
+    {
+      "name": "double quote in a label",
+      "text": "{\"schema\":1,\"rev\":7,\"updated_at\":\"2026-11-15T10:12:03Z\",\"updated_by\":\"desktop\",\"kind\":\"linked\",\"units\":{\"1\":{\"label\":\"say \\\"hi\\\"\",\"size\":\"XS\",\"items\":[{\"hd_id\":512,\"hd_name\":\"Zip up Hoodie Saumon XL\",\"qty\":1}],\"offset\":0,\"max_online\":null,\"hold\":false,\"sync\":true,\"writer\":\"desktop\"}}}",
+      "error": "invalid"
+    }
+  ],
+  "targets": [
+    {
+      "name": "plain",
+      "hd": 10,
+      "reserved": 0,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 0,
+        "max_online": null,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 10
+    },
+    {
+      "name": "offset keeps units back",
+      "hd": 10,
+      "reserved": 0,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 3,
+        "max_online": null,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 7
+    },
+    {
+      "name": "reservations are subtracted",
+      "hd": 10,
+      "reserved": 4,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 0,
+        "max_online": null,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 6
+    },
+    {
+      "name": "offset and reservations together",
+      "hd": 10,
+      "reserved": 4,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 3,
+        "max_online": null,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 3
+    },
+    {
+      "name": "never below zero when offset is larger",
+      "hd": 2,
+      "reserved": 0,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 5,
+        "max_online": null,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 0
+    },
+    {
+      "name": "never below zero when reserved is larger",
+      "hd": 2,
+      "reserved": 5,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 0,
+        "max_online": null,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 0
+    },
+    {
+      "name": "cap lowers a big pool",
+      "hd": 20,
+      "reserved": 0,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 0,
+        "max_online": 6,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 6
+    },
+    {
+      "name": "cap does not raise a small pool",
+      "hd": 4,
+      "reserved": 0,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 0,
+        "max_online": 6,
+        "hold": false,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 4
+    },
+    {
+      "name": "hold forces zero",
+      "hd": 15,
+      "reserved": 0,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [],
+        "offset": 0,
+        "max_online": null,
+        "hold": true,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 0
+    },
+    {
+      "name": "hold with kept items still forces zero",
+      "hd": 15,
+      "reserved": 2,
+      "unit": {
+        "label": "175cm <",
+        "size": "XS",
+        "items": [
+          {
+            "hd_id": 512,
+            "hd_name": "Zip up Hoodie Saumon XL",
+            "qty": 1
+          }
+        ],
+        "offset": 0,
+        "max_online": null,
+        "hold": true,
+        "sync": true,
+        "writer": "desktop"
+      },
+      "expected": 0
+    }
+  ]
+}

@@ -2,8 +2,15 @@ function buildAuthHeader(consumerKey, consumerSecret) {
   return `Basic ${Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64')}`;
 }
 
+export const PRODUCT_FIELDS = 'id,name,type,status,sku,meta_data,stock_quantity,manage_stock';
+export const VARIATION_FIELDS = 'id,attributes,status,stock_quantity,manage_stock,meta_data';
+export const ORDER_LITE_FIELDS = 'id,status,line_items,meta_data';
+
+const MAX_LIST_PAGES = 20;
+const MAX_BATCH_SIZE = 100;
+
 export class WooCommerceClient {
-  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, timeoutMs = 30000, logger = console }) {
+  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, timeoutMs = 30000, logger = console, sleepImpl = sleep }) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
     this.consumerKey = consumerKey;
     this.consumerSecret = consumerSecret;
@@ -11,11 +18,12 @@ export class WooCommerceClient {
     this.fetch = fetchImpl;
     this.timeoutMs = timeoutMs;
     this.logger = logger;
+    this.sleep = sleepImpl;
   }
 
   // `after` (ISO date) keeps only orders created since then. A status the shop does not know (for example the
   // "confirmed" status before the Rhymat Order Statuses plugin is active) is skipped instead of failing the whole list.
-  async listOrdersByStatuses(statuses, { perPage = 100, after = '' } = {}) {
+  async listOrdersByStatuses(statuses, { perPage = 100, after = '', fields = '' } = {}) {
     const allOrders = [];
     const seenOrderIds = new Set();
 
@@ -29,7 +37,8 @@ export class WooCommerceClient {
             status,
             perPage,
             page,
-            after
+            after,
+            fields
           });
         } catch (error) {
           if (/failed with 400/u.test(String(error?.message)) && /rest_invalid_param/u.test(String(error?.message))) {
@@ -63,8 +72,11 @@ export class WooCommerceClient {
     return allOrders;
   }
 
-  async listOrders({ status, perPage = 100, page = 1, after = '' }) {
+  async listOrders({ status, perPage = 100, page = 1, after = '', fields = '' }) {
     const params = new URLSearchParams();
+    if (fields) {
+      params.set('_fields', fields);
+    }
     if (status) {
       params.set('status', status);
     }
@@ -107,7 +119,61 @@ export class WooCommerceClient {
     });
   }
 
-  async request(path, { method, body }) {
+
+  // Open orders with only what the stock reservation needs (no billing or shipping data).
+  async listOpenOrdersLite(statuses, { after = '' } = {}) {
+    return this.listOrdersByStatuses(statuses, { after, fields: ORDER_LITE_FIELDS });
+  }
+
+  async listProductsPage({ page = 1, perPage = 100, fields = PRODUCT_FIELDS, status = 'any', sku = '' } = {}) {
+    const params = new URLSearchParams({ per_page: String(perPage), page: String(page), status, _fields: fields });
+    if (sku) {
+      params.set('sku', sku);
+    }
+    return this.request(`/wp-json/wc/v3/products?${params.toString()}`, { method: 'GET', idempotent: true });
+  }
+
+  async listAllProducts({ fields = PRODUCT_FIELDS } = {}) {
+    return this.collectPages((page) => this.listProductsPage({ page, fields }), 'product list');
+  }
+
+  async getProduct(productId, { fields = PRODUCT_FIELDS } = {}) {
+    return this.request(`/wp-json/wc/v3/products/${productId}?_fields=${fields}`, { method: 'GET', idempotent: true });
+  }
+
+  async listVariations(productId, { fields = VARIATION_FIELDS } = {}) {
+    return this.collectPages(
+      (page) => this.request(`/wp-json/wc/v3/products/${productId}/variations?per_page=100&page=${page}&_fields=${fields}`, { method: 'GET', idempotent: true }),
+      `variation list of product ${productId}`
+    );
+  }
+
+  // Absolute values only (a stock quantity, a meta document): repeating the call is harmless, so it may be retried.
+  async updateProduct(productId, fields) {
+    return this.request(`/wp-json/wc/v3/products/${productId}`, { method: 'PUT', body: fields, idempotent: true });
+  }
+
+  async batchUpdateVariations(productId, updates) {
+    if (updates.length > MAX_BATCH_SIZE) {
+      throw new Error(`A variation batch holds at most ${MAX_BATCH_SIZE} updates`);
+    }
+    return this.request(`/wp-json/wc/v3/products/${productId}/variations/batch`, { method: 'POST', body: { update: updates }, idempotent: true });
+  }
+
+  // Reads page after page until a short page; refuses to loop forever.
+  async collectPages(readPage, what) {
+    const all = [];
+    for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
+      const rows = await readPage(page);
+      all.push(...rows);
+      if (rows.length < 100) {
+        return all;
+      }
+    }
+    throw new Error(`WooCommerce ${what} is longer than ${MAX_LIST_PAGES} pages`);
+  }
+
+  async request(path, { method, body, idempotent = false }) {
     const authStrategies = [{ mode: 'header' }];
     if (method === 'GET') {
       authStrategies.push({ mode: 'query' });
@@ -116,11 +182,11 @@ export class WooCommerceClient {
     let lastError = null;
 
     for (const strategy of authStrategies) {
-      const maxAttempts = shouldRetryTransient(method) ? 3 : 1;
+      const maxAttempts = shouldRetryTransient(method, idempotent) ? 3 : 1;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         if (attempt > 1) {
-          await sleep(1000);
+          await this.sleep(1000 * (attempt - 1));
         }
 
         if (shouldLogWooRequest({ method })) {
@@ -218,8 +284,9 @@ function shouldRetryWithQueryAuth({ method, status, authMode }) {
   return method === 'GET' && authMode === 'header' && [401, 403, 415].includes(status);
 }
 
-function shouldRetryTransient(method) {
-  return method !== 'GET';
+// Writes are retried today; reads only when the caller says a repeat is harmless (idempotent).
+function shouldRetryTransient(method, idempotent) {
+  return idempotent || method !== 'GET';
 }
 
 function isTransientStatus(status) {
@@ -293,9 +360,14 @@ function summarizeWooBody(body) {
   return parts.length ? ` ${parts.join(' ')}` : '';
 }
 
+// The link documents and sync state live in rhymat_* product meta; their JSON must never reach a log or an error text.
+function hideRhymatMeta(text) {
+  return text.replace(/("key":"rhymat_[a-z_]+","value":)"(?:[^"\\]|\\.)*"/gu, '$1"[hidden]"');
+}
+
 function safeJson(value) {
   try {
-    return JSON.stringify(value);
+    return hideRhymatMeta(String(JSON.stringify(value)));
   } catch {
     return '"[unserializable]"';
   }
@@ -387,7 +459,7 @@ function buildWooError(status, parsedBody) {
   const { data, rawText, bodyFormat } = parsedBody;
 
   if (bodyFormat === 'json') {
-    return new Error(`WooCommerce request failed with ${status}: ${JSON.stringify(data)}`);
+    return new Error(`WooCommerce request failed with ${status}: ${safeJson(data)}`);
   }
 
   if (bodyFormat === 'text') {
