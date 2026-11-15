@@ -10,7 +10,7 @@ import {
   outboundFailureKey,
   WORKFLOW_META_KEYS
 } from '../../domain/order-meta.js';
-import { DECISION, WOO_STATUS, WORKFLOW_STATE } from '../../domain/order-states.js';
+import { assertState, DECISION, OUTBOUND_SEND, WHATSAPP_WORKFLOW, WOO_STATUS, WORKFLOW_STATE } from '../../domain/order-states.js';
 import { formatOrderTotal, normalizePhone, summarizeOrderItems } from '../../utils/format.js';
 import { DEFAULT_WOO_STATUSES, wooStatusMatchesTarget } from '../../utils/hd-status.js';
 
@@ -212,6 +212,9 @@ export function getFeedbackMeta(order) {
 
 export function buildWorkflowMetaUpdate(order, values) {
   const existingMeta = Array.isArray(order?.meta_data) ? order.meta_data : [];
+  if (values.state !== undefined) {
+    assertState(WHATSAPP_WORKFLOW, values.state);
+  }
 
   return Object.entries({
     [WORKFLOW_META_KEYS.state]: values.state,
@@ -296,6 +299,9 @@ export function buildLogicalSendMetaUpdate(order, logicalKey, values) {
   const keys = OUTBOUND_META_KEYS[logicalKey];
   if (!keys) {
     return [];
+  }
+  if (values.state !== undefined) {
+    assertState(OUTBOUND_SEND, values.state);
   }
 
   const existingMeta = Array.isArray(order?.meta_data) ? order.meta_data : [];

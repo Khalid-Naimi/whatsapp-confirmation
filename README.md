@@ -72,7 +72,7 @@ When `HD_AUTO_SEND_ENABLED=true`, an order the customer confirms (reply `1` or t
 
 - **Sent:** the parcel is created, the WooCommerce order is set to `completed` (so the desktop app no longer loads it), the tracking number is saved in `rhymat_hd_api_*` meta and an order note, and `INTERNAL_NOTIFY_PHONES` receive `INTERNAL_HD_SENT_TEMPLATE`.
 - **Anything else** (missing address or phone, city not served, HighDelivery refuses or is down, no credentials): nothing is sent twice, the order stays `on-hold` with an order note saying why, and the desktop app picks it up exactly as before.
-- **Never twice:** `rhymat_hd_api_state` (`sending` / `sent` / `failed` / `unknown`) is written before the call; `sending`, `sent` and `unknown` (no answer, the parcel may exist) block any further automatic send.
+- **Never twice:** `rhymat_hd_api_state` (`sending` / `sent` / `failed` / `unknown`) is written before the warehouse and trust checks and the parcel creation; `sending`, `sent` and `unknown` (no answer, the parcel may exist) block any further automatic send. A held or unmatched order gets its `sending` taken back (state empty again). The reservation is also a claim (`rhymat_hd_api_claim`, see below), so two instances during a deploy never both create the parcel.
 
 ## Product links and the hourly stock sync
 
@@ -123,7 +123,8 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
 - A signed WooCommerce delivery is answered 200 even when the WhatsApp send fails; the hourly backfill retries it.
 - On SIGTERM the service stops listening and waits up to 10 s for background work. With `RENDER_EXTERNAL_URL` (set by Render) it pings its own `/health` every 10 minutes.
 - Duplicate guards: before any customer send the hourly run reads the order again; a WhatsApp send without an answer for 2 hours is not sent again and the team is alerted once that it may not have gone out (a send that failed cleanly is recorded in `rhymat_whatsapp_*_failed_for` and its reservation is cleared instead, so it is sent again); the one-time HighDelivery retry of a confirmed order is skipped when the order has a tracking number, a HighDelivery status or any HighDelivery note; a HighDelivery `sending` older than 10 minutes becomes `unknown` (team alerted once); a 5xx or unreadable HighDelivery answer to a parcel creation is `unknown`, never `failed`.
-- Production is designed for a single app instance plus an external hourly task caller.
+- Production is designed for a single app instance plus an external hourly task caller. During a deploy the old and the new instance overlap for a while: every customer WhatsApp message and every HighDelivery parcel is reserved with a claim in the order meta (`rhymat_whatsapp_<send>_claim`, `rhymat_hd_api_claim`, `src/services/claim.js`): the order is read fresh, the reservation and claim are written, and after about 1 second the order is read back; only the instance whose claim is still there goes on. Opt-out saves are read back the same way and saved again if another instance wrote over them.
+- Every meta key with its owner (server, desktop, WordPress), the state machines and the WooCommerce status roles are in `src/domain/` and exported to `contracts/order-meta.json` (`npm run export:contracts`; a test fails when it is out of date). The status the auto-send writes once the parcel exists is the `sentToHd` role (default `completed`).
 - Confirmation/reminder state is stored on WooCommerce orders using `rhymat_whatsapp_*` meta keys.
 - Customer-facing send reservations are stored on WooCommerce orders so ambiguous post-send failures do not automatically resend messages.
 - Feedback replies are stored on WooCommerce orders using `rhymat_feedback_*` meta keys:
@@ -146,7 +147,7 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
   - tokenless production feedback replies are matched automatically by normalized phone against the newest active non-self-test feedback candidate
   - if multiple production candidates share a phone, newest `rhymat_feedback_sent_at` wins, then newest `rhymat_feedback_requested_at`, then newest order recency
   - everything else is logged/skipped as unmatched inbound
-- Verified Wasender webhook requests return `200 OK` even if some inbound messages are skipped or feedback persistence fails.
+- Verified Wasender webhook requests return `200 OK` even if some inbound messages are skipped or feedback persistence fails. The answer waits at most 1 second for the messages to be handled; after that it answers `{ ok, accepted, pending }` and the work (matching, customer reply, team alerts, Woo writes, in the order lock) finishes in the background. On shutdown the service waits for that work (`confirmationService.drain()`), and `flushDueConfirmations()` sends first messages already due and leaves the others to the hourly backfill.
 - Wasender payload parsing is defensive. The receiver accepts `data.messages` as an object or array and logs reduced key summaries for unknown inbound payload shapes instead of failing the whole request.
 - Contactability failures from Wasender that indicate an invalid or non-WhatsApp number now auto-cancel the order and attempt a customer email using the WooCommerce billing email.
 - Self-test and production feedback candidates are cached locally when their Woo webhook arrives, and tokenless replies can recover after restart/deploy using bounded recent Woo reads instead of a full-store scan.
