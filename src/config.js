@@ -134,7 +134,7 @@ function checkValue(row, raw) {
       return /^\+?[\d\s().-]{8,20}$/u.test(value) && value.replace(/\D/gu, '').length >= 8 ? '' : 'must be a phone number';
     case 'phones': {
       const phones = value.split(',').map((item) => item.trim()).filter(Boolean);
-      return phones.length > 0 && phones.every((phone) => normalizeNotifyPhone(phone)) ? '' : 'must be a comma list of phones (at least 8 digits each) like +212600000000';
+      return phones.length > 0 && phones.every((phone) => normalizeNotifyPhone(phone)) ? '' : 'must be a comma list of phones (at least 8 digits, no 0 right after the + or the country code) like +212600000000';
     }
     case 'email':
       return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/u.test(value) ? '' : 'must be an email address';
@@ -316,9 +316,13 @@ export function loadConfig(env = process.env) {
   };
 }
 
-// A team phone as written by a person -> +<digits>, or '' when it has fewer than 8 digits. Spaces, dashes, dots and
-// brackets are dropped; 00 at the start becomes +; a Moroccan local number (0 and 9 digits) gets +212; any other
-// number without + is taken as already having its country code (212..., 49...).
+// Country codes after which a 0 (the national trunk prefix, as in +212 06...) is checked for.
+const TRUNK_ZERO_COUNTRY_CODES = ['212', '213', '216', '33', '34', '39', '31', '32', '41', '43', '44', '49', '90', '971', '966', '1'];
+
+// A team phone as written by a person -> +<digits>, or '' when it has fewer than 8 digits or a 0 right after the plus
+// or after the country code (+0172..., +212 0612...: the local 0 must be dropped in the international form). Spaces,
+// dashes, dots and brackets are dropped; 00 at the start becomes +; a Moroccan local number (0 and 9 digits) gets
+// +212; any other number without + is taken as already having its country code (212..., 49...).
 export function normalizeNotifyPhone(value) {
   const raw = String(value ?? '').trim();
   const plus = raw.startsWith('+');
@@ -333,7 +337,10 @@ export function normalizeNotifyPhone(value) {
       digits = `212${digits.slice(1)}`;
     }
   }
-  return digits.length >= 8 ? `+${digits}` : '';
+  if (digits.length < 8 || digits.startsWith('0') || TRUNK_ZERO_COUNTRY_CODES.some((code) => digits.startsWith(`${code}0`))) {
+    return '';
+  }
+  return `+${digits}`;
 }
 
 function parsePhoneList(value) {

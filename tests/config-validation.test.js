@@ -108,6 +108,12 @@ test('team phones are normalised as people write them; only an entry with fewer 
   assert.equal(normalizeNotifyPhone('49 172 9031097'), '+491729031097');
   assert.equal(normalizeNotifyPhone('(+49) 172-903-1097'), '+491729031097');
   assert.equal(normalizeNotifyPhone('0612'), '');
+  // A 0 right after the plus or the country code is the local trunk 0 left in by mistake: an error, not a guess.
+  assert.equal(normalizeNotifyPhone('+01729031097'), '');
+  assert.equal(normalizeNotifyPhone('+2120612345678'), '');
+  assert.equal(normalizeNotifyPhone('+49 0172 9031097'), '');
+  assert.equal(normalizeNotifyPhone('0049 0172 9031097'), '');
+  assert.ok(validateEnv({ ...GOOD, INTERNAL_NOTIFY_PHONES: '+212600000001, +2120612345678' }).errors.some((text) => text.startsWith('INTERNAL_NOTIFY_PHONES ')));
   const env = { ...GOOD, INTERNAL_NOTIFY_PHONES: '+212 708357533, 212600000002' };
   assert.deepEqual(validateEnv(env).errors, []);
   assert.deepEqual(loadConfig(env).messages.internalNotifyPhones, ['+212708357533', '+212600000002']);
