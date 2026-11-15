@@ -6,6 +6,7 @@ import { buildUnitLookup, describeResolution, resolveOrderItems, sameResolution 
 import { HD_META, SHIPPING_LINE_META } from '../domain/order-meta.js';
 import { HD_BLOCKING_STATES, HD_SEND, HD_STATE, assertTransition, resolveWooStatuses } from '../domain/order-states.js';
 import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID, claim } from './claim.js';
+import { KeyedLock } from '../utils/keyed-lock.js';
 
 // Woo order meta written by the auto-send (domain/order-meta.js). The state doubles as the "never send twice" guard.
 export { HD_META };
@@ -125,7 +126,9 @@ export class HdAutoSendService {
     this.sleep = sleep;
     this.instanceId = instanceId;
     this.logger = logger;
-    this.inFlight = new Set();
+    // Orders being sent by this process (utils/keyed-lock.js tryRun: a second call skips, it never waits).
+    this.inFlightLock = new KeyedLock({ logger: () => this.logger });
+    this.inFlight = this.inFlightLock.held;
   }
 
   // Sends one confirmed order to HighDelivery. Never throws: whatever happens, the order is either completed in Woo
@@ -138,25 +141,25 @@ export class HdAutoSendService {
     if (!orderId) {
       return { status: 'skipped', reason: 'missing_order_id' };
     }
-    if (this.inFlight.has(orderId)) {
+    const attempt = await this.inFlightLock.tryRun(orderId, async () => {
+      try {
+        const context = {};
+        const outcome = await this.run(orderId, order, context);
+        this.rememberOutcome(orderId, outcome);
+        await this.notifyProblem(orderId, context.raw || order, outcome);
+        return outcome;
+      } catch (error) {
+        this.logger.warn(`[hd-auto-send] unexpected error orderId=${orderId}: ${error.message}`);
+        const outcome = { status: 'error', error: error.message };
+        this.rememberOutcome(orderId, outcome);
+        await this.notifyProblem(orderId, order, outcome);
+        return outcome;
+      }
+    });
+    if (!attempt.ran) {
       return { status: 'skipped', reason: 'already_running' };
     }
-    this.inFlight.add(orderId);
-    try {
-      const context = {};
-      const outcome = await this.run(orderId, order, context);
-      this.rememberOutcome(orderId, outcome);
-      await this.notifyProblem(orderId, context.raw || order, outcome);
-      return outcome;
-    } catch (error) {
-      this.logger.warn(`[hd-auto-send] unexpected error orderId=${orderId}: ${error.message}`);
-      const outcome = { status: 'error', error: error.message };
-      this.rememberOutcome(orderId, outcome);
-      await this.notifyProblem(orderId, order, outcome);
-      return outcome;
-    } finally {
-      this.inFlight.delete(orderId);
-    }
+    return attempt.value;
   }
 
   // Keeps the last result on the stored order so the health page can list what needs a human. Never throws.

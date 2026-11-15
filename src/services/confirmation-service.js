@@ -6,6 +6,7 @@ import { maskEmail, maskPhone, redactPhones } from '../utils/format.js';
 import { isQuietHours } from '../utils/quiet-hours.js';
 import { WasenderSendError } from './wasender-client.js';
 import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID, claim } from './claim.js';
+import { KeyedLock } from '../utils/keyed-lock.js';
 import {
   DECISION_META_KEYS,
   FEEDBACK_META_KEYS,
@@ -76,8 +77,10 @@ export class ConfirmationService {
     this.quietHours = messages?.quietHours?.enabled ? messages.quietHours : null;
     this.clock = () => new Date();
     this.logger = logger;
-    this.activeOrderLocks = new Map();
-    this.orderMutexes = new Map();
+    // The per-order lock (utils/keyed-lock.js); the two maps keep their old names.
+    this.orderLock = new KeyedLock({ prefix: 'order:', logger: () => this.logger });
+    this.activeOrderLocks = this.orderLock.depths;
+    this.orderMutexes = this.orderLock.mutexes;
     this.inFlightWooEvents = new Map();
     this.pendingInitialConfirmations = new Map();
     // orderId -> { dueAt, payload } for first-confirmation timers that have not fired yet.
@@ -96,37 +99,8 @@ export class ConfirmationService {
     }
   }
 
-  async withOrderLock(orderId, work) {
-    const lockKey = `order:${orderId}`;
-    const currentDepth = this.activeOrderLocks.get(lockKey) || 0;
-    if (currentDepth > 0) {
-      this.activeOrderLocks.set(lockKey, currentDepth + 1);
-      try {
-        return await work();
-      } finally {
-        this.activeOrderLocks.set(lockKey, currentDepth);
-      }
-    }
-
-    while (this.orderMutexes.has(lockKey)) {
-      await this.orderMutexes.get(lockKey);
-    }
-
-    let releaseLock;
-    const pendingLock = new Promise((resolve) => {
-      releaseLock = resolve;
-    });
-    this.orderMutexes.set(lockKey, pendingLock);
-    this.logger.log(`[lock] acquired lockKey=${lockKey}`);
-    this.activeOrderLocks.set(lockKey, 1);
-    try {
-      return await work();
-    } finally {
-      this.activeOrderLocks.delete(lockKey);
-      this.orderMutexes.delete(lockKey);
-      releaseLock();
-      this.logger.log(`[lock] released lockKey=${lockKey}`);
-    }
+  withOrderLock(orderId, work) {
+    return this.orderLock.run(orderId, work);
   }
 
   // Held back so the customer sees the thank-you page before the WhatsApp message lands.
