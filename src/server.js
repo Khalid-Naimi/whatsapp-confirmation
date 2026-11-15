@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import { createApp } from './app.js';
-import { createShutdown, keepAwakeUrl, startKeepAwake } from './lifecycle.js';
-import { loadConfig } from './config.js';
+import { checkConfigAtBoot, createShutdown, keepAwakeUrl, shutdownWork, startKeepAwake } from './lifecycle.js';
+import { isConfigStrict, loadConfig } from './config.js';
 import { JsonStore } from './json-store.js';
 import { ConfirmationService } from './services/confirmation-service.js';
 import { DurableState } from './services/durable-state.js';
@@ -17,6 +17,7 @@ import { StockAlertService } from './services/stock-alert-service.js';
 import { StockSyncService } from './services/stock-sync-service.js';
 import { SyncControl } from './services/sync-control.js';
 import { createTeamNotifier } from './services/team-notifier.js';
+import { createAlerts } from './services/alerts.js';
 import { HealthTracker, trackCalls } from './services/health-tracker.js';
 import { WasenderClient } from './services/wasender-client.js';
 import { WooCommerceClient } from './services/woocommerce-client.js';
@@ -25,6 +26,10 @@ import { buildOptOutKeywords } from './utils/opt-out.js';
 
 const config = loadConfig();
 const logger = console;
+if (!checkConfigAtBoot({ config, strict: isConfigStrict(process.env), logger })) {
+  // exit(1) was called; nothing below may run.
+  await new Promise(() => {});
+}
 const store = new JsonStore(config.dataFile, { logger });
 
 const optOutKeywords = buildOptOutKeywords(config.optOut.keywords);
@@ -99,7 +104,16 @@ for (const [name, value] of secretChecks) {
   }
 }
 
-const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, logger });
+// The one team alert path: WhatsApp (low-priority lane), deduplicated by key, email when WhatsApp fails.
+const alerts = createAlerts({
+  wasenderClient,
+  phones: config.messages.internalNotifyPhones,
+  mailService,
+  mailTo: config.alertEmailTo || config.mail.user,
+  store,
+  logger
+});
+const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, alerts, logger });
 
 const confirmationService = new ConfirmationService({
   store,
@@ -144,6 +158,7 @@ const stockSyncService = new StockSyncService({
   productMap: hdProductMap,
   matchingWatch: new MatchingWatch({ notify: notifyTeam, enabled: config.matchingAlertsEnabled, logger }),
   notify: notifyTeam,
+  alert: alerts.alert,
   config: config.stockSync,
   logger
 });
@@ -159,6 +174,7 @@ const app = createApp({
   hdClient: hdAutoSend.hdClient,
   stockSyncService,
   durableState,
+  alerts,
   logger
 });
 
@@ -168,11 +184,8 @@ let stopKeepAwake = () => {};
 const shutdown = createShutdown({
   server,
   stop: [() => stopKeepAwake()],
-  waitFor: [
-    () => confirmationService.drainBackgroundTasks(),
-    () => stockAlertService.processing,
-    () => durableState.chain
-  ],
+  waitFor: shutdownWork({ confirmationService, stockSyncService, stockAlertService, durableState }),
+  finally: [() => store.flush?.()],
   logger
 });
 process.once('SIGTERM', () => shutdown('SIGTERM'));

@@ -14,10 +14,7 @@ export function verifyWooSignature(rawBody, signatureHeader, secret) {
   }
 
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
-  if (expected.length !== signatureHeader.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
+  return secretMatches(String(signatureHeader), expected);
 }
 
 export function verifyWasenderSignature(rawBody, providedSignature, secret) {
@@ -31,12 +28,11 @@ export function verifyWasenderSignature(rawBody, providedSignature, secret) {
   const normalizedSecret = String(secret).trim();
   const normalizedSignature = String(providedSignature).trim();
 
-  if (safeEqual(normalizedSecret, normalizedSignature)) {
-    return true;
-  }
-
+  // Both checks always run, through the one constant-time helper (no early answer that leaks which one matched).
+  const plain = secretMatches(normalizedSignature, normalizedSecret);
   const expectedHmac = crypto.createHmac('md5', normalizedSecret).update(rawBody).digest('hex');
-  return safeEqual(expectedHmac, normalizedSignature);
+  const hmac = secretMatches(normalizedSignature, expectedHmac);
+  return plain || hmac;
 }
 
 // Constant-time check of a shared secret (the task secret header). Both sides are hashed first, so the comparison
@@ -50,10 +46,14 @@ export function secretMatches(provided, expected) {
   return crypto.timingSafeEqual(left, right);
 }
 
-function safeEqual(expected, actual) {
-  if (expected.length !== actual.length) {
-    return false;
+// True when `provided` matches any of the configured secrets (empty ones never match). Every secret is compared,
+// so the time taken does not say which one matched.
+export function secretMatchesAny(provided, secrets = []) {
+  let matched = false;
+  for (const secret of secrets) {
+    if (secretMatches(provided, secret)) {
+      matched = true;
+    }
   }
-
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
+  return matched;
 }

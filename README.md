@@ -14,7 +14,8 @@ Backend-only Node.js service that:
 - `POST /tasks/order-followups`
 - `GET /tasks/stock-alerts/status?ids=1,2` (same secret; says `queued`, `sent`, `failed` or `unknown` per alert id, so WordPress can close or retry its list)
 - `POST /tasks/stock-alerts` (back-in-stock WhatsApp alerts per size, sent by the WordPress theme)
-- `GET /health`
+- `GET /health` (always `{ "ok": true }` while the process runs; Render and the keep-awake ping use it)
+- `GET /health/ready` (public, no secret, booleans only: `{ ok, checks: { config, durableState, hourly, wasender, woocommerce } }`; `503` when the configuration has errors, the opt-outs are not loaded from WooCommerce, the hourly cron has not run for 90 minutes (checked after the first 90 minutes of uptime), or the last WhatsApp or WooCommerce call failed because that service is down (a clean refusal of one message, such as a number not on WhatsApp, does not count))
 - `GET /api/health/details` (same secret; read-only picture for the desktop Backend health page)
 - `GET /api/matching/hd-items` (same secret; the HighDelivery items as `{ id, name, quantity }`, 502 `hd_unavailable` when HighDelivery cannot be read)
 - `GET /api/stock-sync/status` (same secret; effective mode, last run, the last plan, unlinked products and items, broken links)
@@ -36,6 +37,7 @@ Backend-only Node.js service that:
 - `PORT`: HTTP port
 - `DATA_FILE`: JSON storage file path
 - `TASK_SECRET`: secret required by `POST /tasks/order-followups`
+- `API_READ_SECRET` (optional): a second secret (same `x-task-secret` header) that opens only the read-only `GET /api/*` routes. When it is set, `GET /api/*` accept it or `TASK_SECRET` (so the desktop app keeps working), and `/tasks/*` accept `TASK_SECRET` only. When it is unset nothing changes. Later the desktop app can be moved to the read-only secret, so a leaked desktop copy can read but never run tasks. Every secret check is constant-time through one helper.
 - `WOOCOMMERCE_BASE_URL`: WooCommerce store URL
 - `WOOCOMMERCE_CONSUMER_KEY`: WooCommerce REST consumer key
 - `WOOCOMMERCE_CONSUMER_SECRET`: WooCommerce REST consumer secret
@@ -65,6 +67,36 @@ Backend-only Node.js service that:
 - `CANCELLED_REPLY_MESSAGE`: cancellation follow-up message
 - `CANCELLATION_EMAIL_SUBJECT`: subject template for invalid/non-WhatsApp cancellation emails
 - `CANCELLATION_EMAIL_BODY`: body template for invalid/non-WhatsApp cancellation emails
+- `INTERNAL_NOTIFY_PHONES` (required): comma list of team phones (`+212...`) that get team notices and alerts. There is no built-in default.
+- `SHOP_CONTACT_PHONE` (required): the number customers are told to write to with a question; it is put, as written (for example `+212 6xx-xxxxxx`), at the end of the default confirmation, invalid-reply and reminder texts. A text set in its own variable is used as it is.
+- `CONFIG_STRICT`: default on. See "Configuration check" below.
+
+## Calls to other services
+
+WooCommerce, WordPress, Wasender and HighDelivery are all called through `src/http/request.js`: one error type (`kind`: `timeout`, `network` or `http`, plus `status` and `ambiguous`), exponential backoff with jitter, and redaction of phones, emails, tokens, consumer keys and secret query values in every message.
+
+- Reads (GET, the order lists too) are retried up to 3 times on no answer, 429 and 5xx.
+- Writes are retried only when repeating them is harmless: a WooCommerce order update or product write (absolute values, meta), the WordPress opt-out. An order note, a WhatsApp send, a HighDelivery parcel (or the login) and the WordPress inbound copy are never repeated by the HTTP layer.
+- A write without an answer, or answered with a 5xx, is marked `ambiguous`. A HighDelivery parcel creation that is ambiguous becomes `unknown`, never `failed`; a WhatsApp send without an answer is never sent again automatically.
+- WordPress calls wait at most 15 s. Wasender and WooCommerce error texts carry the status (and WooCommerce's error code, such as `rest_invalid_param`) but never the reply body or a phone.
+
+## Team alerts
+
+Every server message to the team goes through one path (`src/services/alerts.js`): WhatsApp to `INTERNAL_NOTIFY_PHONES`, the same alert key at most once per 6 hours (some alerts set their own window), and an email (`ALERT_EMAIL_TO`, default `SMTP_USER`) when no phone could be reached. Routine notices use a low-priority lane in the Wasender queue, so they never delay a customer message. A failed hourly run (`POST /tasks/order-followups` answering 500) is told once per 6 hours. The window is kept in memory and in the local JSON file, which Render wipes on a restart: after a restart an alert can go out once more.
+
+- `ALERT_EMAIL_TO` (optional): where the email fallback goes; default `SMTP_USER`. Needs the SMTP settings.
+
+## Outside monitor (free)
+
+Point a free monitor (UptimeRobot, cron-job.org) at `https://<service>/health/ready` with a 5 to 15 minute interval and email alerts. It tells you when the service is up but not working (cron stopped, WhatsApp session disconnected, WooCommerce keys broken). It needs no secret and shows no customer data. The authenticated `GET /api/health/details` also carries `contract: { api: 1, health: 1, linkDoc: 1 }` so the desktop app can tell which version it talks to.
+
+## Configuration check
+
+At start the service checks every variable it reads against one table (`ENV_TABLE` in `src/config.js`: name, type, required, allowed values) and logs each problem by name, never its value.
+
+- **Errors** (the service does not start, exit code 1): a required value is missing (`TASK_SECRET`, `WOOCOMMERCE_BASE_URL`, `WOOCOMMERCE_CONSUMER_KEY`, `WOOCOMMERCE_CONSUMER_SECRET`, `WOOCOMMERCE_WEBHOOK_SECRET`, `WASENDER_API_TOKEN`, `WASENDER_WEBHOOK_SECRET`, `INTERNAL_NOTIFY_PHONES`, `SHOP_CONTACT_PHONE`, and `HD_API_PHONE` / `HD_API_PASSWORD` only when `HD_AUTO_SEND_ENABLED` is on), a number that is not a number, an unknown choice (for example `STOCK_SYNC_MODE=yes`, `HD_AUTO_SEND_ENABLED=ture`), or `WOO_STATUS_CONFIRMED` / `WOO_STATUS_DELIVERED` that do not look like a WooCommerce status slug (lower case, no `wc-` prefix).
+- **Warnings** (logged, the service starts): for example no `SMTP_HOST`.
+- **Way out:** `CONFIG_STRICT=0` logs the errors as warnings and starts anyway, so a bad value can never block an emergency fix. The values themselves still fall back to the safe defaults as before (an unknown mode is `off`).
 
 ## HighDelivery auto-send (optional)
 
@@ -98,7 +130,7 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
 - A variation batch counts a variation as written only when the shop answers for it without an error; an answer without one reply per variation stops the run (`write_failed`).
 - The sync runs after the hourly follow-ups answer has been sent, so the cron call never waits for it. With `STOCK_SYNC_MODE=off`, `?dryRun=1` computes and answers only (no history saved, no digest).
 - Back-in-stock WhatsApp alerts to customers are triggered by 0 to positive changes, hence `STOCK_SYNC_MAX_RESTOCKS`.
-- Team alerts (`INTERNAL_NOTIFY_PHONES`) for aborts go out only in `live` mode, at most once per reason per 6 hours.
+- Team alerts (`INTERNAL_NOTIFY_PHONES`) for aborts go out only in `live` mode, at most once per reason per 6 hours. The unresolved-order message is also told at most once per 6 hours for the same set of order lines (a new line is told at once).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -116,12 +148,14 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
 
 ## Notes
 
-- The JSON file (`DATA_FILE`) is only a fast local cache and debug history: Render wipes it on every deploy or restart. Writes are atomic (temp file + rename), an unreadable file is moved aside as `.corrupt-<time>` and the service starts empty, events and messages keep the newest 5000, and events store a small summary instead of the webhook body.
+- The JSON file (`DATA_FILE`) is only a fast local cache and debug history: Render wipes it on every deploy or restart. The data is kept in memory and written to the file at most once per second, plus on SIGTERM and at process exit; every read hands out a copy. Orders older than 120 days are dropped from it unless still waiting for a confirmation or feedback reply (contacts stay). Writes are atomic (temp file + rename), an unreadable file is moved aside as `.corrupt-<time>` and the service starts empty, events and messages keep the newest 5000, and events store a small summary instead of the webhook body.
 - What must survive a restart lives in WooCommerce: order state in `rhymat_whatsapp_*` / `rhymat_hd_api_*` order meta, and customer opt-outs (`rhymat_server_optouts`) plus back-in-stock alert outcomes (`rhymat_server_stock_alerts`) as small JSON meta on the hidden `rhymat-sync-control` product (the desktop app creates it). A stored value this version cannot read is never overwritten (warning in the log). They are loaded before the server listens (at most 20 s; if WooCommerce is down the service starts anyway and retries on the next write). With `WP_BASE_URL` set, the WordPress opt-out list is merged in too.
+- Logs: `src/log.js` has `log(level, event, fields)` (one JSON line) and `redact()`; both hide phones, emails, tokens, consumer keys and secret query values. Error texts from WooCommerce, Wasender, WordPress and HighDelivery are redacted before they reach a log line, and an unexpected route error is logged as one redacted `http_handler_failed` line.
 - At start the log says only whether each secret is set (`Secrets: WOOCOMMERCE_WEBHOOK_SECRET=set ...`), never the value.
 - Fail closed: with `WOOCOMMERCE_WEBHOOK_SECRET`, `WASENDER_WEBHOOK_SECRET` or `TASK_SECRET` unset, the routes they protect answer 503. Bodies over 1 MB get 413.
 - A signed WooCommerce delivery is answered 200 even when the WhatsApp send fails; the hourly backfill retries it.
-- On SIGTERM the service stops listening and waits up to 10 s for background work. With `RENDER_EXTERNAL_URL` (set by Render) it pings its own `/health` every 10 minutes.
+- On SIGTERM the service stops listening, sends the delayed confirmations that are due (when the confirmation service offers it; otherwise the hourly backfill sends them), and waits up to 25 s for background work (the confirmation service's tasks, a running stock sync, the stock alert queue, the WooCommerce state writes); then it writes the local JSON file once more and exits.
+- A verified Wasender delivery is answered 200 even when processing fails (like the WooCommerce route). With `RENDER_EXTERNAL_URL` (set by Render) it pings its own `/health` every 10 minutes.
 - Duplicate guards: before any customer send the hourly run reads the order again; a WhatsApp send without an answer for 2 hours is not sent again and the team is alerted once that it may not have gone out (a send that failed cleanly is recorded in `rhymat_whatsapp_*_failed_for` and its reservation is cleared instead, so it is sent again); the one-time HighDelivery retry of a confirmed order is skipped when the order has a tracking number, a HighDelivery status or any HighDelivery note; a HighDelivery `sending` older than 10 minutes becomes `unknown` (team alerted once); a 5xx or unreadable HighDelivery answer to a parcel creation is `unknown`, never `failed`.
 - Production is designed for a single app instance plus an external hourly task caller. During a deploy the old and the new instance overlap for a while: every customer WhatsApp message and every HighDelivery parcel is reserved with a claim in the order meta (`rhymat_whatsapp_<send>_claim`, `rhymat_hd_api_claim`, `src/services/claim.js`): the order is read fresh, the reservation and claim are written, and after about 1 second the order is read back; only the instance whose claim is still there goes on. Opt-out saves are read back the same way and saved again if another instance wrote over them.
 - Every meta key with its owner (server, desktop, WordPress), the state machines and the WooCommerce status roles are in `src/domain/` and exported to `contracts/order-meta.json` (`npm run export:contracts`; a test fails when it is out of date). The status the auto-send writes once the parcel exists is the `sentToHd` role (default `completed`).

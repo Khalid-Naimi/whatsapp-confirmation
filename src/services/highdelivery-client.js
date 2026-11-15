@@ -1,3 +1,5 @@
+import { HttpError, request as httpRequest } from '../http/request.js';
+
 // Client for the new HighDelivery platform API (app.highdelivery.pro).
 // Only what the auto-send needs: log in, read the served cities and the warehouse stock, check a phone number, create (and cancel) one parcel.
 // Every refusal keeps the HTTP status and the server reply so the Woo order note can say what was rejected.
@@ -62,7 +64,7 @@ export function extractTrackingNumber(data) {
 const CITY_CACHE_MS = 6 * 60 * 60 * 1000;
 
 export class HighDeliveryClient {
-  constructor({ baseUrl = 'https://api.highdelivery.pro/api', phone = '', password = '', fetchImpl = fetch, timeoutMs = 25000, logger = console, now = () => Date.now(), cityAliases = {} } = {}) {
+  constructor({ baseUrl = 'https://api.highdelivery.pro/api', phone = '', password = '', fetchImpl = fetch, timeoutMs = 25000, logger = console, now = () => Date.now(), cityAliases = {}, sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
     this.baseUrl = String(baseUrl || '').replace(/\/+$/u, '');
     this.phone = String(phone || '').trim();
     this.password = String(password || '').trim();
@@ -70,6 +72,7 @@ export class HighDeliveryClient {
     this.timeoutMs = timeoutMs;
     this.logger = logger;
     this.now = now;
+    this.sleep = sleepImpl;
     this.token = '';
     this.cities = null;
     this.citiesAt = 0;
@@ -83,6 +86,7 @@ export class HighDeliveryClient {
     return Boolean(this.phone && this.password);
   }
 
+  // Reads are retried on no answer / 5xx by the HTTP layer; writes (login, parcel creation, cancel) are never repeated.
   async call(method, path, { body, auth = true } = {}) {
     const headers = { Accept: 'application/json' };
     if (body !== undefined) {
@@ -94,44 +98,53 @@ export class HighDeliveryClient {
 
     // A write (not the login) may have been carried out even when its answer is broken: such failures are ambiguous.
     const mayHaveActed = method !== 'GET' && auth;
-    let response;
+    let status;
+    let payload;
     try {
-      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      const reply = await httpRequest({
         method,
+        url: `${this.baseUrl}${path}`,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(this.timeoutMs)
+        timeoutMs: this.timeoutMs,
+        retry: method === 'GET' ? 'safe' : 'none',
+        baseDelayMs: 500,
+        fetchImpl: this.fetchImpl,
+        sleep: this.sleep,
+        secrets: [this.password, this.token],
+        label: 'HighDelivery'
       });
+      status = reply.status;
+      payload = reply.data;
     } catch (error) {
-      // A POST that died on the wire may still have created the parcel.
-      throw new HighDeliveryError(`Could not reach HighDelivery: ${error.name || 'network error'}`, { ambiguous: method !== 'GET' });
+      if (!(error instanceof HttpError) || error.kind !== 'http') {
+        // A POST that died on the wire may still have created the parcel.
+        const reason = error?.kind === 'timeout' ? 'TimeoutError' : (error?.kind === 'network' ? 'network error' : (error?.name || 'network error'));
+        throw new HighDeliveryError(`Could not reach HighDelivery: ${reason}`, { ambiguous: method !== 'GET' });
+      }
+      status = error.status;
+      payload = error.data;
     }
 
-    let payload = null;
-    try {
-      payload = await response.json();
-    } catch {
-      payload = null;
-    }
-    if (response.status === 401 && auth) {
+    if (status === 401 && auth) {
       return { unauthorized: true };
     }
     if (!payload || typeof payload !== 'object') {
-      throw new HighDeliveryError(`HighDelivery returned an unexpected reply (HTTP ${response.status}).`, { status: response.status, ambiguous: mayHaveActed });
+      throw new HighDeliveryError(`HighDelivery returned an unexpected reply (HTTP ${status}).`, { status, ambiguous: mayHaveActed });
     }
-    if (response.status >= 500 && mayHaveActed) {
+    if (status >= 500 && mayHaveActed) {
       // A server error after a write: the parcel may exist, so this is never treated as a clean refusal.
       const detail = payload.errors ?? payload.error ?? payload.data ?? '';
-      throw new HighDeliveryError(String(payload.message || `HTTP ${response.status}`), {
-        status: response.status,
+      throw new HighDeliveryError(String(payload.message || `HTTP ${status}`), {
+        status,
         body: typeof detail === 'string' ? detail : JSON.stringify(detail),
         ambiguous: true
       });
     }
-    if (response.status >= 400 || payload.success !== true) {
+    if (status >= 400 || payload.success !== true) {
       const detail = payload.errors ?? payload.error ?? payload.data ?? '';
-      throw new HighDeliveryError(String(payload.message || `HTTP ${response.status}`), {
-        status: response.status,
+      throw new HighDeliveryError(String(payload.message || `HTTP ${status}`), {
+        status,
         body: typeof detail === 'string' ? detail : JSON.stringify(detail)
       });
     }

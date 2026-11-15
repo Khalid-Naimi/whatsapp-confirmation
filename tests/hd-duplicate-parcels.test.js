@@ -40,7 +40,7 @@ test('a clean refusal (4xx with a JSON answer) is still a plain failure', async 
 
 test('reads and the login are never ambiguous, even on a 5xx', async () => {
   const down = async () => ({ status: 503, json: async () => { throw new Error('html'); } });
-  const client = new HighDeliveryClient({ phone: 'p', password: 'x', fetchImpl: down, logger: quiet });
+  const client = new HighDeliveryClient({ phone: 'p', password: 'x', fetchImpl: down, logger: quiet, sleepImpl: async () => {} });
   await assert.rejects(client.login(), (error) => error.ambiguous === false);
   client.token = 't';
   await assert.rejects(client.listCities(), (error) => error.ambiguous === false);
@@ -55,7 +55,7 @@ test('the auto-send marks the order unknown, not failed, when HighDelivery answe
     async addOrderNote() { return {}; },
     async updateOrderStatus() { throw new Error('must not complete'); }
   };
-  const hdClient = new HighDeliveryClient({ phone: 'p', password: 'x', fetchImpl: hdFetch(() => ({ status: 500, json: async () => ({ success: false, message: 'Server Error' }) })), logger: quiet });
+  const hdClient = new HighDeliveryClient({ phone: 'p', password: 'x', fetchImpl: hdFetch(() => ({ status: 500, json: async () => ({ success: false, message: 'Server Error' }) })), logger: quiet, sleepImpl: async () => {} });
   const service = new HdAutoSendService({ hdClient, wooClient, wasenderClient: { async sendMessage() { return {}; } }, enabled: true, claimSettleMs: 0, logger: quiet });
   const outcome = await service.autoSend({ orderId: '9' });
   assert.equal(outcome.status, 'unknown');

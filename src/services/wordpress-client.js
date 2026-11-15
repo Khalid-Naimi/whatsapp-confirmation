@@ -1,8 +1,19 @@
+import { HttpError, request as httpRequest } from '../http/request.js';
+import { log } from '../log.js';
+
+// Calls the Rhymat plugin on the WordPress site. Never throws: every call answers { ok, status, data } or
+// { ok: false, error }. 15 s per attempt; reads are retried on no answer / 5xx, the opt-out write too (it sets an
+// absolute state), the inbound copy (a create call) never.
+export const WORDPRESS_TIMEOUT_MS = 15000;
+
 export class WordPressClient {
-  constructor({ baseUrl = '', apiKey = '', logger = console } = {}) {
+  constructor({ baseUrl = '', apiKey = '', logger = console, fetchImpl = fetch, timeoutMs = WORDPRESS_TIMEOUT_MS, sleepImpl = undefined } = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/u, '');
     this.apiKey = apiKey;
     this.logger = logger;
+    this.fetch = fetchImpl;
+    this.timeoutMs = timeoutMs;
+    this.sleep = sleepImpl;
   }
 
   get isConfigured() {
@@ -11,59 +22,55 @@ export class WordPressClient {
 
   // POST /wp-json/rhymat/v1/whatsapp/inbound
   async postInbound(data) {
-    return this._post('/wp-json/rhymat/v1/whatsapp/inbound', data);
+    return this._call('POST', '/wp-json/rhymat/v1/whatsapp/inbound', data, { idempotent: false });
   }
 
   // POST /wp-json/rhymat/v1/whatsapp/contacts/{phone}/opt-out
   // phone is E.164 (e.g. +212...) — encoded for safe URL path placement
   async optOutContact(phone, data = {}) {
     const encodedPhone = encodeURIComponent(phone);
-    return this._post(`/wp-json/rhymat/v1/whatsapp/contacts/${encodedPhone}/opt-out`, data);
+    return this._call('POST', `/wp-json/rhymat/v1/whatsapp/contacts/${encodedPhone}/opt-out`, data, { idempotent: true });
   }
 
   // GET /wp-json/rhymat/v1/whatsapp/contacts?status=opted_out
   async getOptedOutContacts() {
-    return this._get('/wp-json/rhymat/v1/whatsapp/contacts?status=opted_out');
+    return this._call('GET', '/wp-json/rhymat/v1/whatsapp/contacts?status=opted_out');
   }
 
   async _post(path, body) {
-    if (!this.isConfigured) {
-      return { ok: false, skipped: true, reason: 'not_configured' };
-    }
-
-    const url = `${this.baseUrl}${path}`;
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: this._headers(),
-        body: JSON.stringify(body)
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        this.logger.warn(`[wordpress-client] POST ${path} status=${res.status} response=${JSON.stringify(json)}`);
-      }
-      return { ok: res.ok, status: res.status, data: json };
-    } catch (error) {
-      this.logger.warn(`[wordpress-client] POST ${path} error=${error.message}`);
-      return { ok: false, error: error.message };
-    }
+    return this._call('POST', path, body, { idempotent: false });
   }
 
   async _get(path) {
+    return this._call('GET', path);
+  }
+
+  async _call(method, path, body, { idempotent = false } = {}) {
     if (!this.isConfigured) {
       return { ok: false, skipped: true, reason: 'not_configured' };
     }
-
-    const url = `${this.baseUrl}${path}`;
     try {
-      const res = await fetch(url, { headers: this._headers() });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        this.logger.warn(`[wordpress-client] GET ${path} status=${res.status} response=${JSON.stringify(json)}`);
-      }
-      return { ok: res.ok, status: res.status, data: json };
+      const reply = await httpRequest({
+        method,
+        url: `${this.baseUrl}${path}`,
+        headers: this._headers(),
+        body: body === undefined ? undefined : JSON.stringify(body),
+        timeoutMs: this.timeoutMs,
+        retry: 'safe',
+        idempotent,
+        fetchImpl: this.fetch,
+        ...(this.sleep ? { sleep: this.sleep } : {}),
+        secrets: [this.apiKey],
+        label: `WordPress ${method}`
+      });
+      return { ok: true, status: reply.status, data: reply.data ?? {} };
     } catch (error) {
-      this.logger.warn(`[wordpress-client] GET ${path} error=${error.message}`);
+      if (error instanceof HttpError && error.kind === 'http') {
+        // The path can hold a phone and the reply can echo one: log() redacts both.
+        log('warn', 'wordpress_call_failed', { method, path, status: error.status, code: typeof error.data?.code === 'string' ? error.data.code.slice(0, 80) : '' }, { logger: this.logger });
+        return { ok: false, status: error.status, data: error.data ?? {} };
+      }
+      log('warn', 'wordpress_call_failed', { method, path, reason: error?.kind || 'error', message: String(error?.message || '').slice(0, 160) }, { logger: this.logger });
       return { ok: false, error: error.message };
     }
   }

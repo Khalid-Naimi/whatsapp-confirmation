@@ -93,7 +93,9 @@ test('updateProduct and batchUpdateVariations send the body and may be retried',
   assert.deepEqual(calls.map((c) => c.method), ['PUT', 'PUT', 'POST', 'POST', 'POST']);
   assert.match(calls[4].url.pathname, /\/products\/5\/variations\/batch$/u);
   assert.deepEqual(calls[4].body, { update: [{ id: 1, stock_quantity: 2 }] });
-  assert.deepEqual(sleeps, [1000, 1000, 2000]);
+  // Backoff with jitter (behaviour change): about 1 s, then about 1 s and 2 s, each +-25 %.
+  assert.equal(sleeps.length, 3);
+  [1000, 1000, 2000].forEach((base, index) => assert.ok(sleeps[index] >= base * 0.75 && sleeps[index] <= base * 1.25, `sleep ${index}`));
 });
 
 test('a batch of more than 100 updates is refused before any call', async () => {
@@ -102,15 +104,16 @@ test('a batch of more than 100 updates is refused before any call', async () => 
   assert.equal(calls.length, 0);
 });
 
-test('GET is retried only when the caller marks it idempotent; the new reads do', async () => {
+// Behaviour change (backend hardening): every GET is retried now, the order lists too.
+test('every GET is retried on a 5xx, the order lists and the product reads alike', async () => {
   const plain = makeClient([{ status: 500, body: {} }, { body: [] }]);
-  await assert.rejects(plain.client.listOrders({ status: 'processing' }), /failed with 500/u);
-  assert.equal(plain.calls.length, 1);
+  assert.deepEqual(await plain.client.listOrders({ status: 'processing' }), []);
+  assert.equal(plain.calls.length, 2);
 
   const reads = makeClient([{ status: 500, body: {} }, { body: [{ id: 1 }] }]);
   assert.deepEqual(await reads.client.listProductsPage(), [{ id: 1 }]);
   assert.equal(reads.calls.length, 2);
-  assert.deepEqual(reads.sleeps, [1000]);
+  assert.equal(reads.sleeps.length, 1);
 });
 
 test('three transient failures in a row give up with the last error', async () => {
