@@ -64,7 +64,8 @@ function call(handler, url, headers = {}) {
 test('the details route needs the task secret and exposes no customer data', async () => {
   const store = newStore();
   const tracker = new HealthTracker({ store, now: () => NOW });
-  store.upsertOrder({ orderId: '2', phone: '+212600000000', customerName: 'Someone', hdOutcome: 'held', hdOutcomeAt: NOW.toISOString() });
+  // The route counts "today" on the real clock, so the outcome is stamped now (a fixed date failed from the next day on).
+  store.upsertOrder({ orderId: '2', phone: '+212600000000', customerName: 'Someone', hdOutcome: 'held', hdOutcomeAt: new Date().toISOString() });
   const handler = createApp({ config, confirmationService: {}, store, healthTracker: tracker, logger: { log() {}, warn() {}, error() {} } });
   assert.equal((await call(handler, '/api/health/details')).status, 401);
   const response = await call(handler, '/api/health/details', { 'x-task-secret': 's3cret' });

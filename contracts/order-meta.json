@@ -506,7 +506,10 @@
       "key": "rhymat_hd_api_state",
       "entity": "order",
       "owner": "server",
-      "group": "highdelivery auto-send"
+      "group": "highdelivery auto-send",
+      "alsoWrittenBy": [
+        "desktop"
+      ]
     },
     {
       "key": "rhymat_hd_api_tracking",
@@ -518,7 +521,10 @@
       "key": "rhymat_hd_api_sent_at",
       "entity": "order",
       "owner": "server",
-      "group": "highdelivery auto-send"
+      "group": "highdelivery auto-send",
+      "alsoWrittenBy": [
+        "desktop"
+      ]
     },
     {
       "key": "rhymat_hd_api_error",
@@ -542,7 +548,10 @@
       "key": "rhymat_hd_api_claim",
       "entity": "order",
       "owner": "server",
-      "group": "highdelivery auto-send"
+      "group": "highdelivery auto-send",
+      "alsoWrittenBy": [
+        "desktop"
+      ]
     },
     {
       "key": "rhymat_hd_status",

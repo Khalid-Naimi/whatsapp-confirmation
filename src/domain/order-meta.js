@@ -197,6 +197,8 @@ function outboundRows() {
   return result;
 }
 
+const DESKTOP_ALSO_WRITES = [HD_META.claim, HD_META.state, HD_META.sentAt];
+
 function buildRegistry() {
   const all = [
     ...rows('order', 'server', 'whatsapp workflow', WORKFLOW_META_KEYS),
@@ -207,7 +209,10 @@ function buildRegistry() {
     )),
     ...rows('order', 'wordpress', 'feedback request', FEEDBACK_TEST_META_KEYS),
     ...outboundRows(),
-    ...rows('order', 'server', 'highdelivery auto-send', HD_META),
+    // The desktop app writes the same claim, state and sent time when it sends an order itself (two-way claim).
+    ...rows('order', 'server', 'highdelivery auto-send', HD_META).map((row) => (
+      DESKTOP_ALSO_WRITES.includes(row.key) ? { ...row, alsoWrittenBy: ['desktop'] } : row
+    )),
     ...rows('order', 'server', 'highdelivery status', HD_STATUS_META),
     ...rows('shipping_line', 'wordpress', 'checkout delivery', SHIPPING_LINE_META),
     { key: LINK_META.link, entity: 'product', owner: 'desktop', group: 'product links' },

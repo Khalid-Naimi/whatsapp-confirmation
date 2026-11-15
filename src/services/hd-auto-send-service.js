@@ -5,7 +5,7 @@ import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
 import { buildUnitLookup, describeResolution, resolveOrderItems, sameResolution } from './order-resolver.js';
 import { HD_META, SHIPPING_LINE_META } from '../domain/order-meta.js';
 import { HD_BLOCKING_STATES, HD_SEND, HD_STATE, assertTransition, resolveWooStatuses } from '../domain/order-states.js';
-import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID, claim } from './claim.js';
+import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID, claim, parseClaim } from './claim.js';
 import { KeyedLock } from '../utils/keyed-lock.js';
 
 // Woo order meta written by the auto-send (domain/order-meta.js). The state doubles as the "never send twice" guard.
@@ -93,6 +93,13 @@ export function buildParcelFromWooOrder(order) {
     problems,
     parcel: { recipientName, recipientPhone, address, city, productName, codAmount, isExpress, comment: `Woo #${order?.id ?? ''}`.trim() }
   };
+}
+
+// The desktop app's claim ids start with "desktop-" (connector-wo-hd app/services/hd_claim.py); the server's with "srv-".
+export const DESKTOP_CLAIM_PREFIX = 'desktop-';
+
+function isDesktopClaim(existing) {
+  return Boolean(existing?.claimId?.startsWith(DESKTOP_CLAIM_PREFIX));
 }
 
 function defaultSleep(ms) {
@@ -195,8 +202,11 @@ export class HdAutoSendService {
 
     const previousState = metaValue(raw, HD_META.state);
     if (BLOCKING_STATES.has(previousState)) {
-      this.logger.log(`[hd-auto-send] skipped orderId=${orderId} reason=already_${previousState}`);
-      return { status: 'skipped', reason: `already_${previousState}` };
+      // The desktop app sent it (or tried and got no answer) under its own claim: say so, no team alert.
+      const byDesktop = [HD_STATE.sent, HD_STATE.unknown].includes(previousState) && isDesktopClaim(parseClaim(metaValue(raw, HD_META.claim)));
+      const reason = byDesktop ? 'already_sent_by_desktop' : `already_${previousState}`;
+      this.logger.log(`[hd-auto-send] skipped orderId=${orderId} reason=${reason}`);
+      return { status: 'skipped', reason };
     }
     if (raw?.status && !isConfirmedWooStatus(raw.status)) {
       // Someone already handled it (completed, cancelled, ...): do not touch it.

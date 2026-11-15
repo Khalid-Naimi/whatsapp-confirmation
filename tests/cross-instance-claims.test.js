@@ -239,3 +239,46 @@ test('claim(): a competing claim that lands only after the first read-back is st
   assert.deepEqual(waits, [2000, 500]);
   assert.deepEqual([result.ok, result.reason], [false, 'lost']);
 });
+
+// The desktop app sends an order itself under its own claim (ids "desktop-..."), writing state and sent time.
+function desktopSent(id, state) {
+  const at = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  return order(id, {
+    status: 'on-hold',
+    meta_data: [
+      { key: 'rhymat_whatsapp_decision', value: 'confirmed' },
+      { key: 'rhymat_whatsapp_decision_at', value: at },
+      { key: 'rhymat_whatsapp_woo_sync_status', value: 'synced' },
+      { key: 'rhymat_whatsapp_woo_sync_attempts', value: 2 },
+      { key: HD_META.state, value: state },
+      ...(state === 'sent' ? [{ key: HD_META.sentAt, value: at }] : []),
+      { key: HD_META.claim, value: JSON.stringify({ state: 'sending', claimId: 'desktop-abc123', at }) }
+    ]
+  });
+}
+
+test('an order the desktop app sent (state sent or unknown, desktop claim) is never auto-sent or retried by the server', async () => {
+  for (const state of ['sent', 'unknown']) {
+    const { woo, writes } = sharedWoo([desktopSent(610, state)]);
+    const created = [];
+    const alerts = [];
+    const hd = hdInstance(woo, created, 'srv');
+    hd.notifyPhones = ['+212700000001'];
+    hd.errorTemplate = 'ERR {{orderId}}';
+    hd.manualTemplate = 'MAN {{orderId}}';
+    hd.wasenderClient = { async sendMessage(payload) { alerts.push(payload); return {}; } };
+    const outcome = await hd.autoSend({ orderId: '610' });
+    assert.deepEqual(outcome, { status: 'skipped', reason: 'already_sent_by_desktop' });
+
+    // The hourly one-time retry of a confirmed order does not start an auto-send either.
+    const store = new JsonStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'claim-desk-')), 'db.json'), { logger: quiet });
+    const service = new ConfirmationService({ store, wasenderClient: { async sendMessage() { return {}; } }, wooClient: woo, messages, hdAutoSend: hd, claimSettleMs: 0, logger: quiet });
+    assert.equal(await service.maybeRetryHdAutoSend(await woo.getOrder(610)), false);
+    await service.runOrderFollowups();
+    await service.drain();
+
+    assert.equal(created.length, 0);
+    assert.equal(alerts.length, 0);
+    assert.ok(!writes.some((row) => [HD_META.state, HD_META.claim, HD_META.retryAt].includes(row.key)), state);
+  }
+});
