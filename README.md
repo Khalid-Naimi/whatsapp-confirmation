@@ -37,6 +37,7 @@ Backend-only Node.js service that:
 - `PORT`: HTTP port
 - `DATA_FILE`: JSON storage file path
 - `TASK_SECRET`: secret required by `POST /tasks/order-followups`
+- `API_READ_SECRET` (optional): a second secret (same `x-task-secret` header) that opens only the read-only `GET /api/*` routes. When it is set, `GET /api/*` accept it or `TASK_SECRET` (so the desktop app keeps working), and `/tasks/*` accept `TASK_SECRET` only. When it is unset nothing changes. Later the desktop app can be moved to the read-only secret, so a leaked desktop copy can read but never run tasks. Every secret check is constant-time through one helper.
 - `WOOCOMMERCE_BASE_URL`: WooCommerce store URL
 - `WOOCOMMERCE_CONSUMER_KEY`: WooCommerce REST consumer key
 - `WOOCOMMERCE_CONSUMER_SECRET`: WooCommerce REST consumer secret

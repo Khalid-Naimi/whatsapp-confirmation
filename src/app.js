@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { secretMatches, verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
+import { secretMatchesAny, verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 import { buildHealthDetails, buildReadiness } from './services/health-tracker.js';
 import { warehouseQuantity } from './services/hd-product-match.js';
 import { redact } from './log.js';
@@ -11,13 +11,16 @@ export function createApp({ config, confirmationService, store, stockAlertServic
   let followupsRunning = false;
 
   // Fails closed: no secret configured = 503 (nothing is accepted), a wrong secret = 401. Returns true when allowed.
-  function checkTaskSecret(req, res, label, send = sendJson) {
-    if (!config.tasks?.secret) {
+  // `readOnly` (the GET /api/* routes): API_READ_SECRET is accepted too, when it is set; TASK_SECRET always is, so the
+  // desktop app keeps working. /tasks/* accept TASK_SECRET only.
+  function checkTaskSecret(req, res, label, send = sendJson, { readOnly = false } = {}) {
+    const accepted = [config.tasks?.secret, readOnly ? config.tasks?.readSecret : ''].filter(Boolean);
+    if (accepted.length === 0) {
       logger.warn(`[${label}] refused: TASK_SECRET is not set`);
       send(res, 503, { ok: false, error: 'Task secret is not configured' });
       return false;
     }
-    if (!secretMatches(req.headers['x-task-secret'], config.tasks.secret)) {
+    if (!secretMatchesAny(req.headers['x-task-secret'], accepted)) {
       logger.warn(`[${label}] invalid task secret`);
       send(res, 401, { ok: false, error: 'Invalid task secret' });
       return false;
@@ -110,7 +113,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       }
 
       if (req.method === 'GET' && pathname.startsWith('/api/')) {
-        if (!checkTaskSecret(req, res, 'api', sendCorsJson)) {
+        if (!checkTaskSecret(req, res, 'api', sendCorsJson, { readOnly: true })) {
           return undefined;
         }
 
