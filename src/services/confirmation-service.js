@@ -5,6 +5,7 @@ import { DEFAULT_WOO_STATUSES, wooStatusMatchesTarget } from '../utils/hd-status
 import { maskEmail, maskPhone, redactPhones } from '../utils/format.js';
 import { isQuietHours } from '../utils/quiet-hours.js';
 import { WasenderSendError } from './wasender-client.js';
+import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID, claim } from './claim.js';
 import {
   DECISION_META_KEYS,
   FEEDBACK_META_KEYS,
@@ -14,6 +15,7 @@ import {
   OUTBOUND_LOGICAL_KEYS,
   OUTBOUND_META_KEYS,
   WORKFLOW_META_KEYS,
+  outboundClaimKey,
   outboundFailureKey
 } from '../domain/order-meta.js';
 import {
@@ -22,11 +24,13 @@ import {
   FEEDBACK_MATCH_STATUSES,
   FOLLOWUP_CLOSED_STATUSES,
   HD_STATE,
+  OUTBOUND_SEND,
   RECONCILIATION_STATUSES,
   SEND_STATE,
   WOO_STATUS,
   WOO_SYNC_STATUS,
-  WORKFLOW_STATE
+  WORKFLOW_STATE,
+  assertTransition
 } from '../domain/order-states.js';
 
 const REPLY_RECOVERY_STATUSES = [...ACTIVE_CONFIRMATION_STATUSES];
@@ -44,13 +48,16 @@ const INBOUND_MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 const OUTBOUND_RESERVATION_STALE_MS = 2 * 60 * 60 * 1000;
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, claimSettleMs = DEFAULT_CLAIM_SETTLE_MS, instanceId = INSTANCE_ID, logger = console }) {
     this.store = store;
     // Opt-outs are also saved in WooCommerce (services/durable-state.js): the local store is wiped on every restart.
     this.durableState = durableState;
     // One WhatsApp alert to the team phones (services/team-notifier.js); optional.
     this.notifyTeam = notifyTeam;
     this.sleep = sleep;
+    // How long a send reservation waits before reading its claim back (services/claim.js); 0 = no wait.
+    this.claimSettleMs = Number(claimSettleMs) || 0;
+    this.instanceId = instanceId;
     this.wasenderClient = wasenderClient;
     this.wooClient = wooClient;
     this.mailService = mailService;
@@ -1806,14 +1813,43 @@ export class ConfirmationService {
       return { ok: false, duplicate: true, ambiguous: true, orderPayload };
     }
 
-    const reservedOrder = await this.wooClient.updateOrderMeta(
-      orderId,
-      buildLogicalSendMetaUpdate(orderPayload, logicalKey, {
-        state: SEND_STATE.reserved,
+    // Reserve, as a claim another instance can see: the order is read fresh first (a send another instance already
+    // made or started is not made again), the reservation and the claim are written together, and after a short
+    // wait the order is read back; only the instance whose claim is still there sends.
+    const claimed = await claim(this.wooClient, orderId, outboundClaimKey(OUTBOUND_META_KEYS[logicalKey]), {
+      ttlMs: OUTBOUND_RESERVATION_STALE_MS,
+      state: SEND_STATE.reserved,
+      settleMs: this.claimSettleMs,
+      sleep: this.sleep,
+      instanceId: this.instanceId,
+      fallback: orderPayload,
+      logger: this.logger,
+      check: (fresh) => {
+        const freshMeta = getOutboundReservationMeta(fresh, logicalKey);
+        if (freshMeta.state === SEND_STATE.sent) {
+          return 'sent';
+        }
+        if (freshMeta.state === SEND_STATE.reserved) {
+          return isStaleReservation(freshMeta, now) ? 'ambiguous' : 'reserved';
+        }
+        return '';
+      },
+      extraMeta: buildLogicalSendMetaUpdate(orderPayload, logicalKey, {
+        state: assertTransition(OUTBOUND_SEND, outboundMeta.state, SEND_STATE.reserved),
         reservedAt: nowIso
       })
-    );
-    const reservationOrder = reservedOrder || orderPayload;
+    });
+    if (!claimed.ok) {
+      this.logger.warn(`[outbound] not sent here orderId=${orderId} logicalKey=${logicalKey} reason=${claimed.reason}`);
+      if (claimed.reason === 'sent') {
+        return { ok: true, duplicate: true, orderPayload };
+      }
+      if (claimed.reason === 'ambiguous') {
+        return { ok: false, duplicate: true, ambiguous: true, orderPayload };
+      }
+      return { ok: true, duplicate: true, inProgress: true, claimedElsewhere: true, orderPayload };
+    }
+    const reservationOrder = claimed.written || orderPayload;
 
     let sendResult;
     try {
@@ -1831,10 +1867,10 @@ export class ConfirmationService {
       // A clean refusal: nothing went out. The reservation is cleared, and the failure is also recorded on its own
       // (the reservation time it belongs to), so a reservation left behind is never mistaken for a sent message.
       try {
-        await this.wooClient.updateOrderMeta(
-          orderId,
+        // The claim is released in the same write: the message may be sent again later, by any instance.
+        await claimed.release(
           buildLogicalSendMetaUpdate(reservationOrder, logicalKey, {
-            state: '',
+            state: assertTransition(OUTBOUND_SEND, SEND_STATE.reserved, SEND_STATE.none),
             reservedAt: '',
             failedFor: nowIso
           })

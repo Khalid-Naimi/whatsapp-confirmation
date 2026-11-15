@@ -154,6 +154,8 @@ function createTestContext({ optOutKeywords = null, pollEnabled = false, failPol
       deliveryEtaOtherCities: '2 a 3 jours ouvrables',
       defaultCityLabel: 'Maghrib'
     },
+    // No 1 s wait after each send reservation in tests (the cross-instance claim, services/claim.js).
+    claimSettleMs: 0,
     logger
   });
 
@@ -5118,6 +5120,8 @@ function attachHdAutoSend(context, { createImpl, enabled = true } = {}) {
     notifyPhones: ['+212708357533', '+491729031097'],
     template: 'Commande envoyee a High Delivery.\nNumero: {{orderId}}\nTracking: {{trackingNumber}}',
     enabled,
+    // No 1 s wait after the reservation in tests (the cross-instance claim, services/claim.js).
+    claimSettleMs: 0,
     logger: { log() {}, warn() {}, error() {} }
   });
   return hdCalls;

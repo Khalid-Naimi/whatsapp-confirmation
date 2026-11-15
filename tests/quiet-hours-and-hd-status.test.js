@@ -240,6 +240,7 @@ test('auto-send accepts a confirmed order as well as an on-hold one', async () =
   for (const status of ['on-hold', 'confirmed']) {
     let created = 0;
     const service = new HdAutoSendService({
+      claimSettleMs: 0, // no 1 s wait after the reservation in tests (services/claim.js)
       hdClient: { isConfigured: () => true, trustScore: async () => ({ score: 80 }), createPackage: async () => { created += 1; return { trackingNumber: 'NAI000321' }; } },
       wooClient: {
         getOrder: async () => ({

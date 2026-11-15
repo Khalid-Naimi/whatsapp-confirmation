@@ -5,6 +5,7 @@ import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
 import { buildUnitLookup, describeResolution, resolveOrderItems, sameResolution } from './order-resolver.js';
 import { HD_META, SHIPPING_LINE_META } from '../domain/order-meta.js';
 import { HD_BLOCKING_STATES, HD_SEND, HD_STATE, assertTransition, resolveWooStatuses } from '../domain/order-states.js';
+import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID, claim } from './claim.js';
 
 // Woo order meta written by the auto-send (domain/order-meta.js). The state doubles as the "never send twice" guard.
 export { HD_META };
@@ -93,13 +94,17 @@ export function buildParcelFromWooOrder(order) {
   };
 }
 
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function isStuck(sendingAt, now) {
   const startedMs = Date.parse(String(sendingAt || ''));
   return Number.isNaN(startedMs) || now.getTime() - startedMs >= STUCK_SENDING_MS;
 }
 
 export class HdAutoSendService {
-  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', manualTemplate = '', errorTemplate = '', enabled = false, productMap = null, linkIndex = null, linksMode = 'off', minTrustScore = 30, wooStatuses = null, logger = console }) {
+  constructor({ hdClient, wooClient, wasenderClient, store, notifyPhones = [], template = '', manualTemplate = '', errorTemplate = '', enabled = false, productMap = null, linkIndex = null, linksMode = 'off', minTrustScore = 30, wooStatuses = null, claimSettleMs = DEFAULT_CLAIM_SETTLE_MS, sleep = defaultSleep, instanceId = INSTANCE_ID, logger = console }) {
     this.hdClient = hdClient;
     this.wooClient = wooClient;
     this.wasenderClient = wasenderClient;
@@ -115,6 +120,10 @@ export class HdAutoSendService {
     this.minTrustScore = Number.isFinite(Number(minTrustScore)) ? Number(minTrustScore) : 30;
     // The Woo status written once the parcel exists (sentToHd role, "completed" by default).
     this.wooStatuses = resolveWooStatuses(wooStatuses);
+    // How long the reservation waits before reading its claim back (services/claim.js); 0 = no wait.
+    this.claimSettleMs = Number(claimSettleMs) || 0;
+    this.sleep = sleep;
+    this.instanceId = instanceId;
     this.logger = logger;
     this.inFlight = new Set();
   }
@@ -202,6 +211,44 @@ export class HdAutoSendService {
       return { status: 'skipped', reason: 'invalid_order', detail: reason };
     }
 
+    // Reserve first, before the warehouse and trust calls: if we cannot record that we are sending, we must not send
+    // (a retry could create a second parcel). The reservation is also a claim another instance can see
+    // (services/claim.js): only the instance whose claim is still there after a short wait goes on.
+    let claimed;
+    try {
+      claimed = await claim(this.wooClient, orderId, HD_META.claim, {
+        ttlMs: STUCK_SENDING_MS,
+        state: HD_STATE.sending,
+        settleMs: this.claimSettleMs,
+        sleep: this.sleep,
+        instanceId: this.instanceId,
+        current: raw,
+        logger: this.logger,
+        check: (fresh) => {
+          const state = metaValue(fresh, HD_META.state);
+          return BLOCKING_STATES.has(state) ? `already_${state}` : '';
+        },
+        extraMeta: [
+          { key: HD_META.state, value: assertTransition(HD_SEND, previousState, HD_STATE.sending) },
+          { key: HD_META.error, value: '' },
+          { key: HD_META.sendingAt, value: new Date().toISOString() }
+        ]
+      });
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=reservation_failed ${error.message}`);
+      return { status: 'skipped', reason: 'reservation_failed' };
+    }
+    if (!claimed.ok) {
+      const reason = ['held', 'lost'].includes(claimed.reason) ? 'claimed_elsewhere' : claimed.reason;
+      this.logger.log(`[hd-auto-send] skipped orderId=${orderId} reason=${reason}`);
+      return { status: 'skipped', reason };
+    }
+    // Nothing was sent: the reservation and the claim are taken back, so the order can be sent later (by anyone).
+    const unreserve = () => this.safe(() => claimed.release([
+      { key: HD_META.state, value: assertTransition(HD_SEND, HD_STATE.sending, HD_STATE.none) },
+      { key: HD_META.sendingAt, value: '' }
+    ]));
+
     // Which warehouse products and quantities does this order take? Without a match the platform refuses the parcel.
     const parcel = { ...built.parcel };
     if (this.productMap) {
@@ -211,11 +258,13 @@ export class HdAutoSendService {
       } catch (error) {
         const detail = error instanceof HighDeliveryError ? error.detail() : error.message;
         this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=stock_read_failed ${detail}`);
+        await unreserve();
         await this.note(orderId, `Auto-send to HighDelivery skipped: could not read the warehouse stock (${detail}). The order stays on-hold; send it from the desktop app.`);
         return { status: 'skipped', reason: 'stock_read_failed', detail };
       }
       if (!matched.ok) {
         const reason = matched.problems.join('; ');
+        await unreserve();
         await this.note(orderId, `Auto-send to HighDelivery skipped: ${reason}. The order stays on-hold; send it from the desktop app.`);
         return { status: 'skipped', reason: 'no_warehouse_match', detail: reason };
       }
@@ -233,20 +282,9 @@ export class HdAutoSendService {
     }
     if (trust && (trust.blacklisted || trust.score < this.minTrustScore)) {
       const why = trust.blacklisted ? 'the number is blacklisted on HighDelivery' : `its trust score is ${trust.score} (minimum ${this.minTrustScore})`;
+      await unreserve();
       await this.note(orderId, `Auto-send to HighDelivery held for review: ${why} (${trust.totalOrders} parcels, ${trust.deliveredOrders} delivered, ${trust.failedOrders} failed). The order stays on-hold; decide from the desktop app.`);
       return { status: 'held', reason: 'low_trust', trust };
-    }
-
-    // Reserve first: if we cannot record that we are sending, we must not send (a retry could create a second parcel).
-    try {
-      await this.wooClient.updateOrderMeta(orderId, [
-        { key: HD_META.state, value: assertTransition(HD_SEND, previousState, HD_STATE.sending) },
-        { key: HD_META.error, value: '' },
-        { key: HD_META.sendingAt, value: new Date().toISOString() }
-      ]);
-    } catch (error) {
-      this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=reservation_failed ${error.message}`);
-      return { status: 'skipped', reason: 'reservation_failed' };
     }
 
     let result;
@@ -259,7 +297,9 @@ export class HdAutoSendService {
       this.logger.warn(`[hd-auto-send] ${state} orderId=${orderId} ${detail}`);
       await this.safe(() => this.wooClient.updateOrderMeta(orderId, [
         { key: HD_META.state, value: state },
-        { key: HD_META.error, value: detail.slice(0, 500) }
+        { key: HD_META.error, value: detail.slice(0, 500) },
+        // A clean refusal may be retried later by any instance; an unknown answer keeps its claim.
+        ...(ambiguous ? [] : [{ key: HD_META.claim, value: '' }])
       ]));
       await this.note(
         orderId,

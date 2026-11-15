@@ -130,9 +130,13 @@ function makeService({ order = wooOrder(), trust = { score: 50, totalOrders: 0, 
   };
   const service = new HdAutoSendService({
     hdClient, wooClient, wasenderClient: { async sendMessage() { return {}; } }, store: {}, enabled: true, notifyPhones: [],
-    template: 'x', productMap: loadProductMap(CSV), linkIndex, linksMode, minTrustScore, logger
+    template: 'x', productMap: loadProductMap(CSV), linkIndex, linksMode, minTrustScore, logger,
+    // No 1 s wait after the reservation in tests (the cross-instance claim, services/claim.js).
+    claimSettleMs: 0
   });
-  return { service, events, created };
+  // The HighDelivery state the order ends with (the last one written).
+  const finalState = () => meta.filter((row) => row.key === HD_META.state).at(-1)?.value ?? '';
+  return { service, events, created, finalState };
 }
 
 test('auto-send hands HighDelivery the warehouse items, with express when the customer chose it', async () => {
@@ -147,13 +151,16 @@ test('auto-send hands HighDelivery the warehouse items, with express when the cu
   assert.ok(events.some((e) => e.startsWith('note:Sent to HighDelivery automatically. Tracking: NAI7 (express). Customer trust score: 50')));
 });
 
-test('a blacklisted or low-scoring number is held: no reservation, no parcel, a note says why', async () => {
+// The reservation is taken before the warehouse and trust calls (two instances must not both get that far), so a held
+// order is reserved and then released: it ends with no HighDelivery state, as before.
+test('a blacklisted or low-scoring number is held: reservation released, no parcel, a note says why', async () => {
   for (const trust of [{ score: 10, totalOrders: 4, deliveredOrders: 0, failedOrders: 4, blacklisted: false }, { score: 90, totalOrders: 1, deliveredOrders: 1, failedOrders: 0, blacklisted: true }]) {
-    const { service, events, created } = makeService({ trust });
+    const { service, events, created, finalState } = makeService({ trust });
     const result = await service.autoSend({ orderId: '777' });
     assert.equal(result.status, 'held');
     assert.equal(created.length, 0);
-    assert.ok(!events.includes('reserve'));
+    assert.deepEqual(events.filter((e) => e === 'reserve'), ['reserve', 'reserve']);
+    assert.equal(finalState(), '');
     assert.ok(events.some((e) => e.startsWith('note:Auto-send to HighDelivery held for review')));
   }
 });
@@ -164,14 +171,15 @@ test('if the phone check itself is down, a good order still goes', async () => {
   assert.equal(created.length, 1);
 });
 
-test('an order that cannot be matched to warehouse stock stays on-hold untouched', async () => {
+test('an order that cannot be matched to warehouse stock stays on-hold, its reservation released', async () => {
   for (const order of [wooOrder({ line_items: [{ name: 'Mystery hoodie', quantity: 1 }] }), wooOrder({ line_items: [{ name: 'Cargo - S', quantity: 50 }] })]) {
-    const { service, events, created } = makeService({ order });
+    const { service, events, created, finalState } = makeService({ order });
     const result = await service.autoSend({ orderId: '777' });
     assert.equal(result.status, 'skipped');
     assert.equal(result.reason, 'no_warehouse_match');
     assert.equal(created.length, 0);
-    assert.ok(!events.includes('reserve'));
+    assert.deepEqual(events.filter((e) => e === 'reserve'), ['reserve', 'reserve']);
+    assert.equal(finalState(), '');
     assert.ok(events.some((e) => e.startsWith('note:Auto-send to HighDelivery skipped:') && e.includes('desktop app')));
   }
 });

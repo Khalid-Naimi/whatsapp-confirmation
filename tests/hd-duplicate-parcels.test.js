@@ -56,7 +56,7 @@ test('the auto-send marks the order unknown, not failed, when HighDelivery answe
     async updateOrderStatus() { throw new Error('must not complete'); }
   };
   const hdClient = new HighDeliveryClient({ phone: 'p', password: 'x', fetchImpl: hdFetch(() => ({ status: 500, json: async () => ({ success: false, message: 'Server Error' }) })), logger: quiet });
-  const service = new HdAutoSendService({ hdClient, wooClient, wasenderClient: { async sendMessage() { return {}; } }, enabled: true, logger: quiet });
+  const service = new HdAutoSendService({ hdClient, wooClient, wasenderClient: { async sendMessage() { return {}; } }, enabled: true, claimSettleMs: 0, logger: quiet });
   const outcome = await service.autoSend({ orderId: '9' });
   assert.equal(outcome.status, 'unknown');
   assert.equal(meta.find((m) => m.key === HD_META.state).value, 'unknown');

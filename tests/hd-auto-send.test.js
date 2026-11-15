@@ -192,6 +192,8 @@ function makeService({ order = wooOrder(), createImpl, configured = true, enable
     hdClient, wooClient, wasenderClient, store, enabled,
     notifyPhones: ['+212708357533', '+491729031097'],
     template: 'Commande envoyee.\nNumero: {{orderId}}\nTracking: {{trackingNumber}}\nClient: {{customerName}}\nVille: {{deliveryCity}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
+    // No 1 s wait after the reservation in tests (the cross-instance claim, services/claim.js).
+    claimSettleMs: 0,
     logger: quietLogger
   });
   return { service, events, woo, sent, messages, upserts, hdCalls };

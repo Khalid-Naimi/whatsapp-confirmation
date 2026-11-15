@@ -21,6 +21,8 @@ const wooOrder = (extra = {}) => ({
 function makeService({ order = wooOrder(), trust = { score: 80, blacklisted: false, totalOrders: 3, deliveredOrders: 3, failedOrders: 0 }, create, statusFails = false } = {}) {
   const sent = [];
   const service = new HdAutoSendService({
+    // No 1 s wait after the reservation in tests (the cross-instance claim, services/claim.js).
+    claimSettleMs: 0,
     hdClient: {
       isConfigured: () => true,
       trustScore: async () => trust,
