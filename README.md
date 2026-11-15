@@ -83,7 +83,7 @@ WooCommerce, WordPress, Wasender and HighDelivery are all called through `src/ht
 
 ## Team alerts
 
-Every server message to the team goes through one path (`src/services/alerts.js`): WhatsApp to `INTERNAL_NOTIFY_PHONES`, the same alert key at most once per 6 hours (some alerts set their own window), and an email (`ALERT_EMAIL_TO`, default `SMTP_USER`) when no phone could be reached. Routine notices use a low-priority lane in the Wasender queue, so they never delay a customer message. A failed hourly run (`POST /tasks/order-followups` answering 500) is told once per 6 hours. The window is kept in memory and in the local JSON file, which Render wipes on a restart: after a restart an alert can go out once more.
+Every server message to the team goes through one path (`src/services/alerts.js`): WhatsApp to `INTERNAL_NOTIFY_PHONES`, the same alert key at most once per 6 hours (some alerts set their own window), and an email (`ALERT_EMAIL_TO`, default `SMTP_USER`) when no phone could be reached. Only routine `info` notices use the low-priority lane in the Wasender queue (they wait behind customer messages, at most 60 seconds); warnings, alerts and critical notices use the normal lane. A failed hourly run (`POST /tasks/order-followups` answering 500) is told once per 6 hours. The window is kept in memory and in the local JSON file, which Render wipes on a restart: after a restart an alert can go out once more.
 
 - `ALERT_EMAIL_TO` (optional): where the email fallback goes; default `SMTP_USER`. Needs the SMTP settings.
 

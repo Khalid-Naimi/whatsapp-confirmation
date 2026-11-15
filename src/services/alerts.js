@@ -3,8 +3,8 @@ import { maskPhone } from '../utils/format.js';
 
 // The one way the server tells the team something. alert({ key, text, level, windowMs }):
 //  - the same key is sent at most once per window (default 6 hours, per-call override); no key = never deduplicated;
-//  - goes to every INTERNAL_NOTIFY_PHONES number over WhatsApp; routine levels ('info', 'warn') use Wasender's low
-//    lane so they wait for customer messages, 'critical' goes in the normal lane;
+//  - goes to every INTERNAL_NOTIFY_PHONES number over WhatsApp; only routine 'info' notices use Wasender's low lane
+//    (they wait for customer messages, at most 60 s); 'warn', 'alert' and 'critical' go in the normal lane;
 //  - when no phone got it (Wasender down or disconnected) it falls back to one email through MailService;
 //  - never throws.
 // The window is remembered in memory and in the local JSON store (db.alerts). That file is wiped on a Render restart,
@@ -45,7 +45,7 @@ export function createAlerts({ wasenderClient, phones = [], mailService = null, 
   }
 
   async function deliver(text, level) {
-    const priority = level === 'critical' ? 'normal' : 'low';
+    const priority = level === 'info' ? 'low' : 'normal';
     let sent = 0;
     for (const phone of phones) {
       try {

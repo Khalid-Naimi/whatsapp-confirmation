@@ -2,6 +2,9 @@ import { HttpError, request as httpRequest } from '../http/request.js';
 import { redact } from '../log.js';
 import { maskPhone } from '../utils/format.js';
 
+// The longest a routine team notice (low lane) waits behind customer messages.
+export const LOW_LANE_MAX_WAIT_MS = 60 * 1000;
+
 export class WasenderClient {
   constructor({
     baseUrl,
@@ -12,7 +15,8 @@ export class WasenderClient {
     maxRetries = 3,
     timeoutMs = 20000,
     nowImpl = () => Date.now(),
-    sleepImpl = sleep
+    sleepImpl = sleep,
+    lowLaneMaxWaitMs = LOW_LANE_MAX_WAIT_MS
   }) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
     this.apiToken = apiToken;
@@ -25,8 +29,10 @@ export class WasenderClient {
     this.sleep = sleepImpl;
     this.nextAvailableAt = 0;
     // One send at a time (the account is rate limited). Two lanes: customer messages first, routine team notices
-    // (priority 'low') only when no customer message is waiting, so a burst of alerts never delays a customer.
+    // (priority 'low') only when no customer message is waiting, so a burst of alerts never delays a customer. A low
+    // send never waits longer than lowLaneMaxWaitMs (60 s): then it goes next even with customer messages waiting.
     this.lanes = { normal: [], low: [] };
+    this.lowLaneMaxWaitMs = lowLaneMaxWaitMs;
     this.pumping = false;
   }
 
@@ -46,7 +52,7 @@ export class WasenderClient {
   enqueue(job, priority) {
     const lane = priority === 'low' ? 'low' : 'normal';
     return new Promise((resolve, reject) => {
-      this.lanes[lane].push({ job, resolve, reject });
+      this.lanes[lane].push({ job, resolve, reject, queuedAt: this.now() });
       this.pump();
     });
   }
@@ -58,7 +64,8 @@ export class WasenderClient {
     this.pumping = true;
     try {
       for (;;) {
-        const next = this.lanes.normal.shift() || this.lanes.low.shift();
+        const lowOverdue = this.lanes.low.length > 0 && this.now() - this.lanes.low[0].queuedAt >= this.lowLaneMaxWaitMs;
+        const next = lowOverdue ? this.lanes.low.shift() : (this.lanes.normal.shift() || this.lanes.low.shift());
         if (!next) {
           return;
         }

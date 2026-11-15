@@ -41,17 +41,20 @@ test('the same key is sent once per window (6 hours by default), a new key or no
   clock = 6 * HOUR + 1;
   assert.equal((await alert({ key: 'a', text: 'later' })).deduped, false);
   assert.equal(wasender.sent.length, 2 * 5);
-  assert.ok(wasender.sent.every((message) => message.priority === 'low'));
+  // Test change (listed): the default level 'warn' now goes in the normal lane; only 'info' uses the low lane.
+  assert.ok(wasender.sent.every((message) => message.priority === 'normal'));
 });
 
-test('a per-key window overrides the default, critical alerts use the normal lane', async () => {
+test('a per-key window overrides the default; only routine info notices use the low lane', async () => {
   let clock = 0;
   const wasender = fakeWasender();
   const { alert } = createAlerts({ wasenderClient: wasender, phones: ['+212600000001'], logger: quiet, now: () => clock });
   await alert({ key: 'k', text: 'x', windowMs: 60000, level: 'critical' });
   clock = 61000;
   assert.equal((await alert({ key: 'k', text: 'x', windowMs: 60000 })).deduped, false);
-  assert.deepEqual(wasender.sent.map((m) => m.priority), ['normal', 'low']);
+  await alert({ text: 'y', level: 'alert' });
+  await alert({ text: 'z', level: 'info' });
+  assert.deepEqual(wasender.sent.map((m) => m.priority), ['normal', 'normal', 'normal', 'low']);
 });
 
 test('two alerts with the same key at the same moment send once', async () => {
@@ -87,12 +90,12 @@ test('the window is kept in the local store, so a new alerts object (same proces
   assert.equal(wasender.sent.length, 0);
 });
 
-test('the team notifier goes through the alert path (low lane, email fallback) and never throws', async () => {
+test('the team notifier goes through the alert path (normal lane, email fallback) and never throws', async () => {
   const wasender = fakeWasender();
   const alerts = createAlerts({ wasenderClient: wasender, phones: ['+212600000001', '+212600000002'], logger: quiet });
   const notify = createTeamNotifier({ wasenderClient: wasender, phones: [], alerts, logger: quiet });
   assert.equal(await notify('hi'), 2);
-  assert.deepEqual(wasender.sent[0], { to: '+212600000001', message: 'hi', priority: 'low' });
+  assert.deepEqual(wasender.sent[0], { to: '+212600000001', message: 'hi', priority: 'normal' });
   const broken = createTeamNotifier({ wasenderClient: wasender, phones: [], alerts: { notify: async () => { throw new Error('x'); } }, logger: quiet });
   assert.equal(await broken('hi'), 0);
 });
@@ -126,6 +129,30 @@ test('Wasender sends customer messages before waiting routine team notices', asy
   release();
   await Promise.all(sends);
   assert.deepEqual(order, ['first', 'customer', 'team 1', 'team 2']);
+});
+
+test('a routine team notice never waits more than 60 s behind customer messages', async () => {
+  const order = [];
+  let clock = 0;
+  const client = new WasenderClient({
+    baseUrl: 'https://wa.example/api',
+    apiToken: 'token',
+    minIntervalMs: 0,
+    logger: quiet,
+    nowImpl: () => clock,
+    fetchImpl: async (url, init) => {
+      order.push(JSON.parse(init.body).text);
+      clock += 25000; // every send takes 25 s on this clock
+      return { ok: true, status: 200, async text() { return '{"success":true}'; } };
+    }
+  });
+  const sends = [client.sendMessage({ to: '+212600000001', message: 'c1' }), client.sendMessage({ to: '+212600000009', message: 'team', priority: 'low' })];
+  for (let i = 2; i <= 5; i += 1) {
+    sends.push(client.sendMessage({ to: '+212600000001', message: `c${i}` }));
+  }
+  await Promise.all(sends);
+  // queued at 0: after c1 (25 s) and c2 (50 s) it is still under 60 s; after c3 (75 s) it goes before c4.
+  assert.deepEqual(order, ['c1', 'c2', 'c3', 'team', 'c4', 'c5']);
 });
 
 // --- stock sync: the unresolved-order alert is deduplicated, the abort alert goes through the same path ---
