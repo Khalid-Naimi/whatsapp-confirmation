@@ -55,7 +55,7 @@ const metaOf = (shop, key) => shop.product.meta_data.find((row) => row.key === k
 
 test('an opt-out survives a restart: saved to WooCommerce, loaded into a fresh local store before work', async () => {
   const shop = fakeShop();
-  const first = new DurableState({ wooClient: shop, verifySettleMs: 0, store: freshStore(), logger: quiet });
+  const first = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, store: freshStore(), logger: quiet });
   await first.load();
   assert.equal(await first.recordOptOut('+212600000101', '2026-11-15T10:00:00.000Z'), true);
   assert.deepEqual(JSON.parse(metaOf(shop, DURABLE_META.optOuts)), { schema: 1, phones: { '+212600000101': '2026-11-15' } });
@@ -64,7 +64,7 @@ test('an opt-out survives a restart: saved to WooCommerce, loaded into a fresh l
 
   // "Restart": new process, empty disk.
   const store = freshStore();
-  const second = new DurableState({ wooClient: shop, verifySettleMs: 0, store, logger: quiet });
+  const second = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, store, logger: quiet });
   await second.load();
   assert.equal(second.isOptedOut('+212600000101'), true);
   assert.equal(store.isPhoneOptedOut('+212600000101'), true);
@@ -75,7 +75,7 @@ test('WooCommerce unreachable at boot: the service still starts, and the next wr
   shop.product.meta_data.push({ key: DURABLE_META.optOuts, value: '{"schema":1,"phones":{"+212600000001":"2026-10-01"}}' });
   shop.failRead = true;
   const warnings = [];
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, store: freshStore(), logger: { ...quiet, warn: (message) => warnings.push(message) } });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, store: freshStore(), logger: { ...quiet, warn: (message) => warnings.push(message) } });
   const result = await state.load();
   assert.equal(result.ok, false);
   assert.ok(warnings.some((message) => message.includes('WARNING: could not read')));
@@ -94,7 +94,7 @@ test('WooCommerce unreachable at boot: the service still starts, and the next wr
 test('a missing control product is reported clearly and never blocks', async () => {
   const shop = fakeShop({ product: null });
   const warnings = [];
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: { ...quiet, warn: (message) => warnings.push(message) } });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: { ...quiet, warn: (message) => warnings.push(message) } });
   assert.equal((await state.load()).ok, false);
   assert.equal(state.status().error, 'control_missing');
   assert.ok(warnings.some((message) => message.includes('rhymat-sync-control')));
@@ -111,7 +111,7 @@ test('WordPress opt-outs are merged in when WordPress is configured', async () =
     }
   };
   const store = freshStore();
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, wordpressClient, store, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, wordpressClient, store, logger: quiet });
   await state.load();
   assert.equal(state.isOptedOut('+212600000201'), true);
   assert.equal(store.isPhoneOptedOut('+212600000201'), true);
@@ -121,7 +121,7 @@ test('WordPress opt-outs are merged in when WordPress is configured', async () =
 test('stock alert outcomes are bounded: old ones pruned, count capped, unsafe ids never stored', async () => {
   const shop = fakeShop();
   let nowMs = Date.parse('2026-11-15T00:00:00Z');
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet, limits: { stockAlerts: 3, stockAlertDays: 30 }, now: () => nowMs });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet, limits: { stockAlerts: 3, stockAlertDays: 30 }, now: () => nowMs });
   await state.load();
   await state.recordStockAlert('old', 'sent');
   nowMs += 31 * 24 * 60 * 60 * 1000;
@@ -140,14 +140,14 @@ test('after a restart WordPress gets "sent" for an alert sent before it, and the
   const wasenderClient = { async sendMessage(payload) { sends.push(payload); return { id: 'm' }; } };
   const alert = { id: 'sa-1', phone: '+212600000301', productName: 'Hoodie', size: 'M', productUrl: 'https://shop.example/p/1' };
 
-  const firstState = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
+  const firstState = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
   await firstState.load();
   const first = new StockAlertService({ store: freshStore(), wasenderClient, durableState: firstState, autoProcess: false, logger: quiet });
   first.accept([alert]);
   await first.processQueue();
   assert.equal(sends.length, 1);
 
-  const secondState = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
+  const secondState = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
   await secondState.load();
   const second = new StockAlertService({ store: freshStore(), wasenderClient, durableState: secondState, autoProcess: false, logger: quiet });
   assert.deepEqual(second.statuses(['sa-1', 'sa-2']), { 'sa-1': 'sent', 'sa-2': 'unknown' });
@@ -160,7 +160,7 @@ test('after a restart WordPress gets "sent" for an alert sent before it, and the
 test('a durable opt-out blocks stock alerts even when the local cache was wiped', async () => {
   const shop = fakeShop();
   shop.product.meta_data.push({ key: DURABLE_META.optOuts, value: '{"schema":1,"phones":{"+212600000401":"2026-10-01"}}' });
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
   await state.load();
   const service = new StockAlertService({ store: freshStore(), wasenderClient: { async sendMessage() { throw new Error('must not send'); } }, durableState: state, autoProcess: false, logger: quiet });
   const result = service.accept([{ id: 'x1', phone: '+212600000401', productName: 'Tee', size: 'S', productUrl: 'https://shop.example/p/2' }]);
@@ -169,7 +169,7 @@ test('a durable opt-out blocks stock alerts even when the local cache was wiped'
 
 test('an inbound STOP is saved durably through the confirmation service', async () => {
   const shop = fakeShop();
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
   await state.load();
   const service = new ConfirmationService({
     store: freshStore(),
@@ -186,7 +186,7 @@ test('an inbound STOP is saved durably through the confirmation service', async 
 
 test('a change that arrives while a save is running is saved too (no lost write)', async () => {
   const shop = fakeShop();
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
   await state.load();
   const original = shop.updateProduct;
   let release;
@@ -216,7 +216,7 @@ test('a stored value that cannot be read is never overwritten; the change stays 
   const shop = fakeShop();
   shop.product.meta_data.push({ key: DURABLE_META.optOuts, value: '{"schema":9,"phones":{}}' });
   const warnings = [];
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: { ...quiet, warn: (message) => warnings.push(message) } });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: { ...quiet, warn: (message) => warnings.push(message) } });
   await state.load();
   assert.equal(await state.recordOptOut('+212600000701'), false);
   assert.equal(metaOf(shop, DURABLE_META.optOuts), '{"schema":9,"phones":{}}');
@@ -259,18 +259,69 @@ test('two instances saving opt-outs at the same time: the one saved over notices
 
 test('an opt-out that is saved over twice stays marked for the next write', async () => {
   const shop = fakeShop();
-  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, logger: quiet });
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
   await state.load();
-  // Something keeps writing an empty list right after every save.
+  // Another writer keeps saving its own list (without ours) right after every save.
   const original = shop.updateProduct;
+  let other = 0;
   shop.updateProduct = async (id, body) => {
     const result = await original(id, body);
-    await original(id, { meta_data: [{ key: DURABLE_META.optOuts, value: '{"schema":1,"phones":{}}' }] });
+    other += 1;
+    await original(id, { meta_data: [{ key: DURABLE_META.optOuts, value: `{"schema":1,"phones":{"+21260000098${other}":"2026-11-15"}}` }] });
     return result;
   };
   assert.equal(await state.recordOptOut('+212600000901'), false);
   assert.deepEqual(state.status().pendingWrites, ['optOuts']);
   shop.updateProduct = original;
   assert.equal(await state.recordOptOut('+212600000902'), true);
-  assert.deepEqual(Object.keys(JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones).sort(), ['+212600000901', '+212600000902']);
+  const saved = Object.keys(JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones);
+  assert.ok(saved.includes('+212600000901') && saved.includes('+212600000902'));
+});
+
+test('a read-back served from before the save (stale cache) is read again after a moment, not re-written or failed', async () => {
+  const shop = fakeShop();
+  const waits = [];
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 1000, sleep: async (ms) => { waits.push(ms); }, logger: quiet });
+  await state.load();
+  // The first read after each save still shows the old value (as a page cache would).
+  const read = shop.listProductsPage;
+  let staleBefore = null;
+  shop.listProductsPage = async (query) => {
+    const rows = await read(query);
+    if (staleBefore) {
+      const old = staleBefore;
+      staleBefore = null;
+      return [old];
+    }
+    return rows;
+  };
+  const write = shop.updateProduct;
+  shop.updateProduct = async (id, body) => {
+    staleBefore = structuredClone(shop.product);
+    return write(id, body);
+  };
+  assert.equal(await state.recordOptOut('+212600000911'), true);
+  assert.deepEqual(waits, [1000]);
+  assert.equal(shop.writes.length, 1);
+  assert.deepEqual(Object.keys(JSON.parse(metaOf(shop, DURABLE_META.optOuts)).phones), ['+212600000911']);
+});
+
+test('a stale read-back by modification time is told apart from an overwrite', async () => {
+  const shop = fakeShop();
+  shop.product.date_modified_gmt = '2026-11-15T10:00:00';
+  const state = new DurableState({ wooClient: shop, verifySettleMs: 0, staleRetryMs: 0, logger: quiet });
+  await state.load();
+  const write = shop.updateProduct;
+  let reads = 0;
+  shop.updateProduct = async (id, body) => {
+    const before = structuredClone(shop.product);
+    const result = await write(id, body);
+    shop.product.date_modified_gmt = '2026-11-15T10:00:05';
+    // Every read-back keeps serving the copy from before the save.
+    const read = shop.listProductsPage;
+    shop.listProductsPage = async () => { reads += 1; shop.listProductsPage = read; return [before]; };
+    return { ...result, date_modified_gmt: '2026-11-15T10:00:05' };
+  };
+  assert.equal(await state.recordOptOut('+212600000912'), true);
+  assert.equal(shop.writes.length, 1);
 });

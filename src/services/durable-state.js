@@ -19,7 +19,8 @@ export { DURABLE_META };
 export const DURABLE_LIMITS = Object.freeze({ optOuts: 5000, stockAlerts: 2000, stockAlertDays: 60 });
 
 const SCHEMA = 1;
-const FIELDS = 'id,sku,meta_data';
+const FIELDS = 'id,sku,date_modified_gmt,meta_data';
+const DEFAULT_STALE_RETRY_MS = 1000;
 const DEFAULT_VERIFY_SETTLE_MS = 1000;
 
 function defaultSleep(ms) {
@@ -76,7 +77,7 @@ function parseObject(text) {
 }
 
 export class DurableState {
-  constructor({ wooClient, wordpressClient = null, store = null, sku = CONTROL_SKU, limits = DURABLE_LIMITS, now = () => Date.now(), verifySettleMs = DEFAULT_VERIFY_SETTLE_MS, sleep = defaultSleep, logger = console } = {}) {
+  constructor({ wooClient, wordpressClient = null, store = null, sku = CONTROL_SKU, limits = DURABLE_LIMITS, now = () => Date.now(), verifySettleMs = DEFAULT_VERIFY_SETTLE_MS, staleRetryMs = DEFAULT_STALE_RETRY_MS, sleep = defaultSleep, logger = console } = {}) {
     this.wooClient = wooClient;
     this.wordpressClient = wordpressClient;
     this.store = store;
@@ -85,6 +86,8 @@ export class DurableState {
     this.now = now;
     // How long the read-back after an opt-out save waits for a competing save to land; 0 = read back at once.
     this.verifySettleMs = Math.max(0, Number(verifySettleMs) || 0);
+    // A read-back that still shows the value from before our save (a cached GET) is read once more after this long.
+    this.staleRetryMs = Math.max(0, Number(staleRetryMs) || 0);
     this.sleep = sleep;
     this.logger = logger;
     this.optOuts = new Map(); // phone -> day (YYYY-MM-DD)
@@ -297,14 +300,15 @@ export class DurableState {
     }
     const snapshot = { ...this.versions };
     const meta = this.buildMeta(keys);
+    let saved;
     try {
-      await this.wooClient.updateProduct(this.productId, { meta_data: meta });
+      saved = await this.wooClient.updateProduct(this.productId, { meta_data: meta });
     } catch (error) {
       this.lastError = 'woo_write_failed';
       this.logger.warn(`[durable] WARNING: could not save ${keys.join(', ')} to WooCommerce (${error.message}); will retry on the next write`);
       return false;
     }
-    if (!(await this.confirmSaved(keys, meta))) {
+    if (!(await this.confirmSaved(keys, meta, true, writeMarks(product, saved, meta)))) {
       return false;
     }
     for (const key of keys) {
@@ -330,17 +334,35 @@ export class DurableState {
 
   // Reads the value back after a save. Something just written that is missing means another writer saved over it in
   // the meantime: merge what is there now and save once more (retry = false on that second check).
-  async confirmSaved(keys, meta, retry = true) {
+  // `marks` tells a stale read-back apart from a real overwrite: the stored values and modification time from before
+  // our save, and the modification time WooCommerce gave our save.
+  async confirmSaved(keys, meta, retry = true, marks = null) {
     if (keys.includes('optOuts') && this.verifySettleMs > 0) {
       await this.sleep(this.verifySettleMs);
     }
-    const product = await this.readProduct();
+    let product = await this.readProduct();
     if (!product) {
       // The save itself was accepted; only the check could not run.
       this.logger.warn(`[durable] could not read ${keys.join(', ')} back after saving; counted as saved`);
       return true;
     }
-    const missing = missingAfterWrite(product, meta);
+    let missing = missingAfterWrite(product, meta);
+    if (missing.length && isStaleRead(product, marks)) {
+      // The read was served from before our save (a cache): read once more after a moment before re-writing anything.
+      if (this.staleRetryMs > 0) {
+        await this.sleep(this.staleRetryMs);
+      }
+      product = await this.readProduct();
+      if (!product) {
+        this.logger.warn(`[durable] could not read ${keys.join(', ')} back after saving; counted as saved`);
+        return true;
+      }
+      missing = missingAfterWrite(product, meta);
+      if (missing.length && isStaleRead(product, marks)) {
+        this.logger.warn(`[durable] the read-back of ${missing.join(', ')} still shows the value from before the save (cached read); counted as saved`);
+        return true;
+      }
+    }
     if (!missing.length) {
       return true;
     }
@@ -363,7 +385,8 @@ export class DurableState {
       this.logger.warn(`[durable] WARNING: could not save ${again.join(', ')} again (${error.message}); will retry on the next write`);
       return false;
     }
-    return this.confirmSaved(again, retryMeta, false);
+    const marksAgain = writeMarks(product, null, retryMeta);
+    return this.confirmSaved(again, retryMeta, false, marksAgain);
   }
 
   serializeOptOuts() {
@@ -405,4 +428,39 @@ function missingAfterWrite(product, meta) {
     }
   }
   return missing;
+}
+
+// What a read-back is compared with: the stored values before our save, the product's modification time then, and
+// the one WooCommerce answered for our save (when it gives one).
+function writeMarks(before, saved, meta) {
+  return {
+    beforeValues: Object.fromEntries(meta.map((row) => [row.key, readMeta(before, row.key)])),
+    beforeModified: modifiedMs(before),
+    savedModified: modifiedMs(saved)
+  };
+}
+
+function modifiedMs(product) {
+  const raw = String(product?.date_modified_gmt || '').trim();
+  if (!raw) {
+    return NaN;
+  }
+  return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/u.test(raw) ? raw : `${raw}Z`);
+}
+
+// A read-back is stale (served from before our save) when it is older than our save by its modification time, or,
+// without times, when every value we wrote still reads exactly as it did before the save. Another writer's save would
+// be at least as new as ours and carry its own changes.
+function isStaleRead(product, marks) {
+  if (!marks) {
+    return false;
+  }
+  const readMs = modifiedMs(product);
+  if (Number.isFinite(readMs) && Number.isFinite(marks.savedModified)) {
+    return readMs < marks.savedModified;
+  }
+  if (Number.isFinite(readMs) && Number.isFinite(marks.beforeModified) && readMs > marks.beforeModified) {
+    return false;
+  }
+  return Object.entries(marks.beforeValues).every(([key, value]) => readMeta(product, key) === value);
 }
