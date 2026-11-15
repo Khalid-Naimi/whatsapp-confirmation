@@ -193,10 +193,25 @@ test('an open order of a product with an unreadable link document stops the run 
   assert.equal(shop.stockWrites().length, 0);
 });
 
-test('an open order of a size missing from a linked document (and not in the CSV) stops the run', async () => {
-  const product = wooProduct(7, { type: 'variable', doc: linkDoc({ 71: linkUnit({ items: [item(24)] }) }) });
-  const shop = makeShop({ products: [product], variations: { 7: [wooVariation(71, 'a', { stock: 0 }), wooVariation(79, 'new', { stock: 0 })] }, hd: [...FILLER, ...hdRows([24, 3])], orders: [orderFor(7, 79)] });
-  assert.equal((await makeService(shop).run()).summary.aborted, 'orders_unresolved');
+test('an open order of a size missing from a linked document skips that product and its items only, with one alert', async () => {
+  const product = wooProduct(7, { type: 'variable', doc: linkDoc({ 71: linkUnit({ items: [item(24)] }), 72: linkUnit({ items: [item(26)] }) }) });
+  const sharing = simpleProduct(100, 24, { stock: 0 }); // reads item 24 too
+  const other = simpleProduct(101, 25, { stock: 0 });
+  const variations = { 7: [wooVariation(71, 'a', { stock: 0 }), wooVariation(72, 'b', { stock: 0 }), wooVariation(79, 'new', { stock: 0 })] };
+  const sent = [];
+  const shop = makeShop({ products: [product, sharing, other], variations, hd: [...FILLER, ...hdRows([24, 3], [25, 3], [26, 3])], orders: [orderFor(7, 79)] });
+  const result = await makeService(shop, { notify: async (m) => { sent.push(m); return 1; } }).run();
+  assert.equal(result.summary.aborted, '');
+  assert.equal(result.summary.ordersUnresolved, 1);
+  const actions = Object.fromEntries(result.plan.map((row) => [`${row.productId}/${row.unit}`, row.action]));
+  assert.deepEqual(actions, { '7/71': 'skip_orders_unresolved', '7/72': 'skip_orders_unresolved', '100/p': 'skip_orders_unresolved', '101/p': 'write' });
+  assert.deepEqual(shop.stockWrites().map((w) => w.id), [101]);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /order 31: 'Line 7' is not in its product's link document/u);
+  // a dry-run setup stays quiet
+  const quiet = [];
+  await makeService(shop, { config: { mode: 'dry_run' }, notify: async (m) => { quiet.push(m); return 1; } }).run();
+  assert.equal(quiet.length, 0);
 });
 
 test('orders of unlinked, ignored and held products do not stop the run; a held unit with items still reserves them', async () => {
@@ -218,26 +233,48 @@ test('resolveReserveLines: what each kind of line reserves and which lines block
   const line = (productId, name = `P${productId}`, quantity = 1) => ({ name, quantity, product_id: productId, variation_id: 0 });
   const { wanted, blocking } = resolveReserveLines([line(1, 'A', 3), line(2), line(3), line(4), line(6, 'Old'), line(9, 'Unknown'), line(5, 'Linked but no size')], { unitLookup, linkKind, csvMap, warehouse: hdRows([30, 1, 'HD item 30']) });
   assert.deepEqual([...wanted], [[24, 6], [77, 1], [30, 1]]);
-  assert.equal(blocking.length, 2);
-  assert.match(blocking[0], /link document of "P3" cannot be read \(not_json\)/u);
-  assert.match(blocking[1], /"Linked but no size" is not in its product's link document/u);
+  assert.deepEqual(blocking.map((b) => [b.productId, b.kind]), [[3, 'bad_doc'], [5, 'unplaced']]);
+  assert.match(blocking[0].text, /link document of "P3" cannot be read \(not_json\)/u);
+  assert.match(blocking[1].text, /"Linked but no size" is not in its product's link document/u);
 });
 
 // --- 5. the confirmed status is always reserved: see config-stock-sync.test.js ---
 
 // --- 7. backorders ---
 
-test('a unit that allows backorders is written with backorders "no", even when its stock is already right', async () => {
-  const product = simpleProduct(100, 24, { stock: 3 });
-  product.backorders = 'notify';
+test('a unit whose stock is right but allows backorders gets backorders_fix: outside the limits and the hash, live only', async () => {
+  const fixable = () => {
+    const products = Array.from({ length: 12 }, (_, i) => simpleProduct(100 + i, 30 + i, { stock: 3 }));
+    products.forEach((p) => { p.backorders = 'notify'; });
+    return makeShop({ products, hd: [...FILLER, ...products.map((_, i) => hdRows([30 + i, 3])[0])] });
+  };
+  const shop = fixable();
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, ''); // 12 fixes are not 12 changed units
+  assert.deepEqual([result.summary.changed, result.summary.backordersFixed], [0, 12]);
+  assert.equal(result.plan[0].action, 'backorders_fix');
+  assert.match(result.plan[0].why, /only backorders turned off$/u);
+  assert.equal(result.summary.planHash, (await import('../src/services/stock-sync-service.js')).planHash([]));
+  assert.deepEqual(shop.stockWrites()[0].fields, { backorders: 'no' });
+  assert.equal((await makeService(shop).run()).plan[0].action, 'same');
+
+  const dry = fixable();
+  await makeService(dry, { config: { mode: 'dry_run' } }).run();
+  assert.equal(dry.stockWrites().length, 0);
+  const paused = fixable();
+  paused.products[0].meta_data.find((meta) => meta.key === LINK_META.control).value = JSON.stringify({ schema: 1, rev: 2, paused: true, ignored_hd_ids: [] });
+  await makeService(paused).run();
+  assert.equal(paused.stockWrites().length, 0);
+});
+
+test('a unit that changes stock and allows backorders is written with backorders "no" in the same write', async () => {
+  const product = simpleProduct(100, 24, { stock: 1 });
+  product.backorders = 'yes';
   const shop = makeShop({ products: [product], hd: [...FILLER, ...hdRows([24, 3])] });
   const result = await makeService(shop).run();
-  const row = result.plan.find((r) => r.productId === 100);
-  assert.deepEqual([row.action, row.target], ['write', 3]);
-  assert.match(row.why, /backorders turned off$/u);
+  assert.equal(result.plan[0].action, 'write');
+  assert.match(result.plan[0].why, /, backorders turned off$/u);
   assert.deepEqual([shop.stockWrites()[0].fields.backorders, shop.stockWrites()[0].fields.stock_quantity], ['no', 3]);
-  product.backorders = 'no';
-  assert.equal((await makeService(shop).run()).plan.find((r) => r.productId === 100).action, 'same');
 });
 
 // --- 8. an unexpected error ---
@@ -284,14 +321,35 @@ test('a grouped or external product is never written as if it had stock of its o
   }
 });
 
-test('the order list stops after 20 pages per status instead of looping forever', async () => {
-  const calls = [];
-  const client = new WooCommerceClient({
-    baseUrl: 'https://shop.example', consumerKey: 'ck', consumerSecret: 'cs', logger: quietLogger, sleepImpl: async () => {},
-    fetchImpl: async (url) => { calls.push(url); return { ok: true, status: 200, async text() { return JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ id: calls.length * 1000 + i }))); } }; }
-  });
-  await assert.rejects(client.listOpenOrdersLite(['processing']), /order list for status "processing" is longer than 20 pages/u);
-  assert.equal(calls.length, 20);
+test('the stock sync order list stops after 50 pages per status; other callers keep reading', async () => {
+  const make = (pages) => {
+    const calls = [];
+    const client = new WooCommerceClient({
+      baseUrl: 'https://shop.example', consumerKey: 'ck', consumerSecret: 'cs', logger: quietLogger, sleepImpl: async () => {},
+      fetchImpl: async (url) => { calls.push(url); return { ok: true, status: 200, async text() { return JSON.stringify(calls.length > pages ? [] : Array.from({ length: 100 }, (_, i) => ({ id: calls.length * 1000 + i }))); } }; }
+    });
+    return { client, calls };
+  };
+  const capped = make(60);
+  await assert.rejects(capped.client.listOpenOrdersLite(['processing']), /order list for status "processing" is longer than 50 pages/u);
+  assert.equal(capped.calls.length, 50);
+  const followups = make(60);
+  assert.equal((await followups.client.listOrdersByStatuses(['processing'])).length, 6000);
+});
+
+test('an order list that is too long stops only the sync (orders_failed)', async () => {
+  const shop = makeShop({ products: [simpleProduct(100, 24, { stock: 0 })], hd: [...FILLER, ...hdRows([24, 3])] });
+  shop.wooClient.listOpenOrdersLite = async () => { throw new Error('WooCommerce order list for status "processing" is longer than 50 pages'); };
+  const result = await makeService(shop).run();
+  assert.deepEqual([result.summary.aborted, shop.stockWrites().length], ['orders_failed', 0]);
+});
+
+test('orders older than the reserve window do not reserve; those older than 30 days that still reserve are counted', async () => {
+  const dated = (id, daysAgo) => ({ ...orderFor(100, 0, id), date_created_gmt: new Date(Date.parse('2026-11-15T10:00:00Z') - daysAgo * 86400000).toISOString().slice(0, 19) });
+  const shop = makeShop({ products: [simpleProduct(100, 24, { stock: 0 })], hd: [...FILLER, ...hdRows([24, 5])], orders: [dated(1, 2), dated(2, 45), dated(3, 50)] });
+  const result = await makeService(shop, { config: { reserveDays: 60 } }).run({ dryRun: true });
+  assert.match(shop.calls.lastOrderQuery.after, /^2026-09-16T10:00/u);
+  assert.deepEqual([result.plan[0].reserved, result.summary.oldOrdersReserving], [3, 2]);
 });
 
 test('product and variation reads ask for the backorders field', async () => {
@@ -327,4 +385,58 @@ test('a pause set between two product writes stops the rest of the run', async (
   assert.match(result.summary.abortDetail, /after 1 of 2 units were written/u);
   assert.deepEqual(shop.stockWrites().map((w) => w.id), [100]);
   assert.equal(result.summary.changed, 1);
+});
+
+// --- re-plan once when only orders that went to HighDelivery moved ---
+
+function secondOrderRead(shop, change) {
+  const original = shop.wooClient.listOpenOrdersLite;
+  let reads = 0;
+  shop.wooClient.listOpenOrdersLite = async (...args) => {
+    reads += 1;
+    if (reads === 2) { change(); }
+    return original(...args);
+  };
+}
+
+test('an order sent to HighDelivery between plan and write: the run plans once more and writes the fresh numbers', async () => {
+  const order = orderFor(100, 0, 41);
+  const hd = [...FILLER, ...hdRows([24, 5])];
+  const shop = makeShop({ products: [simpleProduct(100, 24, { stock: 0 })], hd, orders: [order] });
+  secondOrderRead(shop, () => {
+    shop.orders[0] = { ...order, meta_data: [{ key: 'rhymat_hd_api_state', value: 'sent' }] }; // the API answers with new objects
+    hd.find((row) => row.id === 24).quantity_available = 4; // the piece left the warehouse
+  });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, '');
+  assert.equal(result.summary.replanned, true);
+  assert.deepEqual([result.plan[0].hd, result.plan[0].reserved, result.plan[0].target], [4, 0, 4]);
+  assert.equal(shop.stockWrites()[0].fields.stock_quantity, 4);
+});
+
+test('a sent order that left the list is looked up on its own; a cancelled one still cancels the run', async () => {
+  for (const [state, aborted] of [['sent', ''], ['', 'orders_changed']]) {
+    const order = orderFor(100, 0, 42);
+    const shop = makeShop({ products: [simpleProduct(100, 24, { stock: 0 })], hd: [...FILLER, ...hdRows([24, 5])], orders: [order] });
+    shop.wooClient.getOrder = async () => ({ id: 42, status: 'completed', meta_data: state ? [{ key: 'rhymat_hd_api_state', value: state }] : [] });
+    secondOrderRead(shop, () => { order.status = 'completed'; });
+    const result = await makeService(shop).run();
+    assert.equal(result.summary.aborted, aborted, state);
+  }
+});
+
+test('the re-plan happens only once: a second change cancels the run', async () => {
+  const first = orderFor(100, 0, 43);
+  const second = orderFor(100, 0, 44);
+  const shop = makeShop({ products: [simpleProduct(100, 24, { stock: 0 })], hd: [...FILLER, ...hdRows([24, 5])], orders: [first, second] });
+  const original = shop.wooClient.listOpenOrdersLite;
+  let reads = 0;
+  shop.wooClient.listOpenOrdersLite = async (...args) => {
+    reads += 1;
+    if (reads === 2) { shop.orders[0] = { ...first, meta_data: [{ key: 'rhymat_hd_api_state', value: 'sent' }] }; }
+    if (reads === 4) { shop.orders[1] = { ...second, meta_data: [{ key: 'rhymat_hd_api_state', value: 'sent' }] }; }
+    return original(...args);
+  };
+  const result = await makeService(shop).run();
+  assert.deepEqual([result.summary.aborted, result.summary.replanned, shop.stockWrites().length], ['orders_changed', true, 0]);
 });

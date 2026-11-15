@@ -4,7 +4,9 @@ function buildAuthHeader(consumerKey, consumerSecret) {
 
 export const PRODUCT_FIELDS = 'id,name,type,status,sku,meta_data,stock_quantity,manage_stock,backorders';
 export const VARIATION_FIELDS = 'id,attributes,status,stock_quantity,manage_stock,backorders,meta_data';
-export const ORDER_LITE_FIELDS = 'id,status,line_items,meta_data';
+export const ORDER_LITE_FIELDS = 'id,status,date_created_gmt,line_items,meta_data';
+// The stock sync's open-order read stops here; other callers keep reading without a limit.
+export const MAX_OPEN_ORDER_PAGES = 50;
 
 const MAX_LIST_PAGES = 20;
 const MAX_BATCH_SIZE = 100;
@@ -24,7 +26,8 @@ export class WooCommerceClient {
   // `after` (ISO date) keeps only orders created since then. A status the shop does not know (for example the
   // "confirmed" status before the Rhymat Order Statuses plugin is active) is skipped instead of failing the whole list;
   // pass an array as `skipped` to learn which statuses were skipped.
-  async listOrdersByStatuses(statuses, { perPage = 100, after = '', fields = '', skipped = null } = {}) {
+  // `maxPages` (per status) turns a list that never ends into an error instead of an endless loop.
+  async listOrdersByStatuses(statuses, { perPage = 100, after = '', fields = '', skipped = null, maxPages = Infinity } = {}) {
     const allOrders = [];
     const seenOrderIds = new Set();
 
@@ -32,9 +35,8 @@ export class WooCommerceClient {
       let page = 1;
 
       while (true) {
-        // Same limit as collectPages: a list that never ends is an error, not an endless loop.
-        if (page > MAX_LIST_PAGES) {
-          throw new Error(`WooCommerce order list for status "${status}" is longer than ${MAX_LIST_PAGES} pages`);
+        if (page > maxPages) {
+          throw new Error(`WooCommerce order list for status "${status}" is longer than ${maxPages} pages`);
         }
         let orders;
         try {
@@ -130,7 +132,7 @@ export class WooCommerceClient {
   // -> { orders, skippedStatuses }: a status the shop rejected means its orders are missing from the list.
   async listOpenOrdersLite(statuses, { after = '' } = {}) {
     const skippedStatuses = [];
-    const orders = await this.listOrdersByStatuses(statuses, { after, fields: ORDER_LITE_FIELDS, skipped: skippedStatuses });
+    const orders = await this.listOrdersByStatuses(statuses, { after, fields: ORDER_LITE_FIELDS, skipped: skippedStatuses, maxPages: MAX_OPEN_ORDER_PAGES });
     return { orders, skippedStatuses };
   }
 

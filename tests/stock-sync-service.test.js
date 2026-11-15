@@ -73,7 +73,7 @@ test('open orders keep their units reserved; an order already sent does not', as
   const row = result.plan.find((r) => r.unit === '8978');
   assert.deepEqual([row.hd, row.reserved, row.target], [2, 2, 0]);
   assert.deepEqual(shop.calls.lastOrderQuery.statuses, ['processing', 'on-hold']);
-  assert.equal(shop.calls.lastOrderQuery.after, undefined); // however old, an open order stays reserved
+  assert.match(shop.calls.lastOrderQuery.after, /^2026-09-16/u); // 60 days back
 });
 
 test('an order for a product that is only in the CSV still reserves its HighDelivery item', async () => {
