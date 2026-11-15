@@ -165,6 +165,18 @@ test('an unreadable HighDelivery quantity is skipped, never planned as a NaN wri
   assert.equal(plan([product], { warehouse: [{ id: 512, name: 'x', quantity_available: '4' }] })[0].target, 4); // a numeric string is fine
 });
 
+test('an absent, null or empty HighDelivery quantity is skipped, but 0 and "0" are real zeros', () => {
+  const product = wooProduct(5, { stock: 3, manage: true, doc: linkDoc({ p: linkUnit() }) });
+  const rowFor = (item) => plan([product], { warehouse: [{ id: 512, name: 'x', ...item }] })[0];
+  for (const item of [{}, { quantity_available: null }, { quantity_available: '' }, { quantity_available: '  ' }, { quantity_available: true }]) {
+    assert.deepEqual([rowFor(item).action, rowFor(item).target], ['skip_hd_bad', null], JSON.stringify(item));
+  }
+  for (const quantity of [0, '0']) {
+    assert.deepEqual([rowFor({ quantity_available: quantity }).action, rowFor({ quantity_available: quantity }).target], ['write', 0]);
+  }
+  assert.equal(rowFor({ quantityAvailable: 4 }).target, 4);
+});
+
 test('guards: a write whose target is not a whole number of 0 or more is refused and cannot be approved', () => {
   const warehouse = [...FILLER, ...hdRows([512, 5])];
   for (const target of [NaN, null, undefined, -1, 1.5]) {

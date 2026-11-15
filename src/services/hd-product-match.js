@@ -87,9 +87,13 @@ function rawQuantity(product) {
   return Number(product?.quantity_available ?? product?.quantityAvailable ?? 0);
 }
 
-// An answer such as "abc" is not a quantity. Callers that write stock check this first.
+// "abc", nothing at all, null or an empty string are not quantities (0 and "0" are). Callers that write stock check this first.
 export function hasValidQuantity(product) {
-  return Number.isFinite(rawQuantity(product));
+  const value = product?.quantity_available ?? product?.quantityAvailable;
+  if (value === undefined || value === null || typeof value === 'boolean' || String(value).trim() === '') {
+    return false;
+  }
+  return Number.isFinite(Number(value));
 }
 
 // Unreadable counts as 0: an order is then held for a human instead of being sent against stock nobody can read.
