@@ -9,7 +9,7 @@ export const quietLogger = { log() {}, warn() {}, error() {} };
 
 export const STOCK_CONFIG = {
   mode: 'live', maxChangedUnits: 10, maxTotalDelta: 40, maxRestocks: 5, maxSingleIncrease: 20, minHdItems: 5,
-  reserveStatuses: ['processing', 'on-hold', 'confirmed'], reserveDays: 30, writeDelayMs: 0
+  reserveStatuses: ['processing', 'on-hold'], reserveDays: 30, writeDelayMs: 0
 };
 
 export const NOW = new Date('2026-11-15T10:00:00Z');

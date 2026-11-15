@@ -71,7 +71,7 @@ test('open orders keep their units reserved; an order already sent does not', as
   const result = await makeService(shop).run({ dryRun: true });
   const row = result.plan.find((r) => r.unit === '8978');
   assert.deepEqual([row.hd, row.reserved, row.target], [2, 2, 0]);
-  assert.deepEqual(shop.calls.lastOrderQuery.statuses, ['processing', 'on-hold', 'confirmed']);
+  assert.deepEqual(shop.calls.lastOrderQuery.statuses, ['processing', 'on-hold']);
   assert.match(shop.calls.lastOrderQuery.after, /^2026-10-16/u);
 });
 
@@ -318,16 +318,18 @@ test('a unit made of two HighDelivery pieces shows half the pool, and an open or
 });
 
 test('a reserve status the shop rejects stops the run (its orders would be missing) and is reported', async () => {
+  const withConfirmed = { config: { reserveStatuses: ['processing', 'on-hold', 'confirmed'] } };
   const shop = standardShop({ failOn: { rejectedStatuses: ['confirmed'] } });
-  const result = await makeService(shop).run();
+  const result = await makeService(shop, withConfirmed).run();
   assert.equal(result.summary.aborted, 'reserve_status_rejected');
   assert.deepEqual(result.summary.skippedStatuses, ['confirmed']);
   assert.match(result.summary.abortDetail, /order status confirmed/u);
   assert.equal(shop.stockWrites().length, 0);
-  const approved = await makeService(shop).run({ approveHash: result.summary.planHash });
+  const approved = await makeService(shop, withConfirmed).run({ approveHash: result.summary.planHash });
   assert.equal(approved.summary.aborted, 'reserve_status_rejected');
   assert.equal(shop.stockWrites().length, 0);
-  const fine = await makeService(standardShop({ failOn: { rejectedStatuses: ['confirmed'] } }), { config: { reserveStatuses: ['processing', 'on-hold'] } }).run({ dryRun: true });
+  // the default statuses do not include "confirmed", so a shop that rejects it does not stop the run
+  const fine = await makeService(standardShop({ failOn: { rejectedStatuses: ['confirmed'] } })).run({ dryRun: true });
   assert.deepEqual([fine.summary.aborted, fine.summary.skippedStatuses], ['', []]);
 });
 

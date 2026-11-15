@@ -19,7 +19,7 @@ test('with nothing set, everything new is off and the limits are the safe defaul
   withEnv({}, (config) => {
     assert.deepEqual(config.stockSync, {
       mode: 'off', maxChangedUnits: 10, maxTotalDelta: 40, maxRestocks: 5, maxSingleIncrease: 20, minHdItems: 5,
-      reserveStatuses: ['processing', 'on-hold', 'confirmed'], reserveDays: 30, writeDelayMs: 300
+      reserveStatuses: ['processing', 'on-hold'], reserveDays: 30, writeDelayMs: 300
     });
     assert.equal(config.highDelivery.linksMode, 'off');
     assert.equal(config.matchingAlertsEnabled, false);

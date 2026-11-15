@@ -108,7 +108,8 @@ export function loadConfig() {
       maxSingleIncrease: parseCountEnv(process.env.STOCK_SYNC_MAX_SINGLE_INCREASE, 20),
       minHdItems: parseCountEnv(process.env.STOCK_SYNC_MIN_HD_ITEMS, 5),
       // Open orders that already took WooCommerce stock but are not at HighDelivery yet: their units stay reserved.
-      reserveStatuses: parseList(process.env.STOCK_SYNC_RESERVE_STATUSES, ['processing', 'on-hold', 'confirmed']),
+      // Add "confirmed" only once the shop knows that status: while it rejects one, every run stops.
+      reserveStatuses: parseList(process.env.STOCK_SYNC_RESERVE_STATUSES, ['processing', 'on-hold']),
       reserveDays: parseCountEnv(process.env.STOCK_SYNC_RESERVE_DAYS, 30),
       writeDelayMs: parseCountEnv(process.env.STOCK_SYNC_WRITE_DELAY_MS, 300)
     },
