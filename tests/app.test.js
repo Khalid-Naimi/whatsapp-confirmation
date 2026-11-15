@@ -5300,6 +5300,11 @@ test('the stock sync task needs the secret, reads dryRun and approve, and report
 });
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+// Stands in for the HealthTracker: rows by time stamp, like the real one.
+const fakeTracker = (runs) => ({
+  recordRun(run) { const at = `run-${runs.length + 1}`; runs.push({ at, ...run }); return at; },
+  attachToRun(at, fields) { Object.assign(runs.find((run) => run.at === at), fields); }
+});
 
 test('the hourly task answers first; the stock sync runs after the answer and its summary reaches the health row', async () => {
   const order = [];
@@ -5310,7 +5315,7 @@ test('the hourly task answers first; the stock sync runs after the answer and it
     followupExtras: {
       hdStatusSyncService: { async run() { order.push('hd-status'); return { checked: 0 }; } },
       stockAlertService: { async processQueue() { order.push('stock-alerts'); } },
-      healthTracker: { recordRun: (run) => runs.push(run) }
+      healthTracker: fakeTracker(runs)
     }
   });
   const result = await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
@@ -5318,7 +5323,8 @@ test('the hourly task answers first; the stock sync runs after the answer and it
   assert.deepEqual(result.body, { ok: true, summary: { backfilled: 0 }, hdStatus: { checked: 0 } });
   await tick();
   assert.deepEqual(order, ['hd-status', 'stock-alerts', 'stock-sync started']); // the sync is still going, the answer is already out
-  assert.equal(runs.length, 0);
+  // the follow-ups are in the health rows already, without a stock sync summary yet
+  assert.deepEqual(runs.map((run) => [run.ok, run.stockSync]), [[true, null]]);
   finishSync();
   await tick();
   assert.deepEqual(order.at(-1), 'stock-sync done');
@@ -5330,7 +5336,7 @@ test('a stock sync that throws cannot break the hourly follow-ups, and the run i
   const runs = [];
   const app = createMatchingApp({
     stockSyncService: { async run() { throw new Error('boom'); } },
-    followupExtras: { logger: { log() {}, warn: (m) => warnings.push(m), error() {} }, healthTracker: { recordRun: (run) => runs.push(run) } }
+    followupExtras: { logger: { log() {}, warn: (m) => warnings.push(m), error() {} }, healthTracker: fakeTracker(runs) }
   });
   const result = await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
   assert.equal(result.statusCode, 200);
@@ -5341,7 +5347,7 @@ test('a stock sync that throws cannot break the hourly follow-ups, and the run i
 
 test('the hourly task with the stock sync switched off records a run without a stock sync summary', async () => {
   const runs = [];
-  const app = createMatchingApp({ stockSyncService: { async run() { return { skipped: 'off' }; } }, followupExtras: { healthTracker: { recordRun: (run) => runs.push(run) } } });
+  const app = createMatchingApp({ stockSyncService: { async run() { return { skipped: 'off' }; } }, followupExtras: { healthTracker: fakeTracker(runs) } });
   await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
   await tick();
   assert.deepEqual(runs.map((run) => run.stockSync), [null]);
@@ -5361,4 +5367,15 @@ test('the stock sync task is POST-only: a GET is a plain 404 and runs nothing', 
   const result = await dispatch(app, { method: 'GET', url: '/tasks/stock-sync?dryRun=1', headers: withSecret });
   assert.equal(result.statusCode, 404);
   assert.equal(ran, false);
+});
+
+test('the follow-ups row is in the health page even if the stock sync never ends', async () => {
+  const runs = [];
+  const app = createMatchingApp({
+    stockSyncService: { run: () => new Promise(() => {}) },
+    followupExtras: { healthTracker: fakeTracker(runs) }
+  });
+  await dispatch(app, { method: 'POST', url: '/tasks/order-followups', headers: withSecret });
+  await tick();
+  assert.deepEqual(runs.map((run) => [run.ok, run.stockSync]), [[true, null]]);
 });

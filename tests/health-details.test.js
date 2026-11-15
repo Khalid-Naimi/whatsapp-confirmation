@@ -26,6 +26,14 @@ test('tracker notes the last success and a short, clean failure reason', async (
   assert.equal(entry.lastError, 'boom');
 });
 
+test('a result that arrives later is attached to the run it belongs to', () => {
+  const tracker = new HealthTracker({ store: newStore(), now: () => NOW });
+  const first = tracker.recordRun({ ok: true, stockSync: null });
+  tracker.attachToRun(first, { stockSync: { changed: 3 } });
+  tracker.attachToRun('2000-01-01T00:00:00.000Z', { stockSync: { changed: 9 } }); // an unknown run is ignored
+  assert.deepEqual(tracker.runs().map((run) => run.stockSync), [{ changed: 3 }]);
+});
+
 test('runs are stored and trimmed', () => {
   const tracker = new HealthTracker({ store: newStore(), now: () => NOW });
   for (let i = 0; i < 60; i += 1) { tracker.recordRun({ ok: true, summary: { remindersSent: i } }); }

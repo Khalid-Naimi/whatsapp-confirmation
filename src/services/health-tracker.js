@@ -31,11 +31,24 @@ export class HealthTracker {
     entry.lastError = String(error?.message || error || 'error').replace(/https?:\/\/\S+/g, '').trim().slice(0, 120);
   }
 
+  // -> the time stamp of the new run, so a later result of that run can be attached to it.
   recordRun(run) {
+    const at = this.now().toISOString();
     this.store.transaction((db) => {
       db.health = db.health || { runs: [] };
-      db.health.runs.push({ at: this.now().toISOString(), ...run });
+      db.health.runs.push({ at, ...run });
       db.health.runs = db.health.runs.slice(-MAX_RUNS);
+    });
+    return at;
+  }
+
+  // Adds fields to a run that was recorded earlier (the stock sync ends after the follow-ups are recorded).
+  attachToRun(at, fields) {
+    this.store.transaction((db) => {
+      const run = (db.health?.runs || []).find((candidate) => candidate.at === at);
+      if (run) {
+        Object.assign(run, fields);
+      }
     });
   }
 

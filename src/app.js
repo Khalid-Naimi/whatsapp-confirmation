@@ -22,15 +22,16 @@ export function createApp({ config, confirmationService, store, stockAlertServic
     }
   }
 
-  function runStockSyncAfterResponse({ summary, hdStatus }) {
+  // `runAt` is the health row of this follow-ups run; the stock sync result is added to it when the sync ends.
+  function runStockSyncAfterResponse(runAt) {
     Promise.resolve()
       .then(() => stockSyncService.run())
       .then((stockSync) => stockSync?.summary || null, (error) => {
         logger.warn(`[task][order-followups] stock sync failed: ${error.message}`);
         return null;
       })
-      .then((stockSync) => healthTracker?.recordRun({ ok: true, summary, hdStatus, stockSync }))
-      .catch((error) => logger.warn(`[task][order-followups] could not record the run: ${error.message}`));
+      .then((stockSync) => healthTracker?.attachToRun(runAt, { stockSync }))
+      .catch((error) => logger.warn(`[task][order-followups] could not record the stock sync: ${error.message}`));
   }
 
   return async function handler(req, res) {
@@ -216,15 +217,16 @@ export function createApp({ config, confirmationService, store, stockAlertServic
             logger.warn(`[task][order-followups] stock alert queue failed: ${error.message}`);
           }
         }
+        // The follow-ups are recorded now, so they show in the health page even if the process dies mid-sync.
+        const runAt = healthTracker?.recordRun({ ok: true, summary: result, hdStatus, stockSync: null });
         const body = { ok: true, summary: result, hdStatus };
         if (!stockSyncService) {
-          healthTracker?.recordRun({ ok: true, summary: result, hdStatus, stockSync: null });
           return sendJson(res, 200, body);
         }
         // The stock sync can take a minute: the cron call gets its answer first and the sync runs after it
-        // (it has its own lock, and it can never break the follow-ups). The health row is written when it ends.
+        // (it has its own lock, and it can never break the follow-ups). Its summary is added to the row when it ends.
         sendJson(res, 200, body);
-        runStockSyncAfterResponse({ summary: result, hdStatus });
+        runStockSyncAfterResponse(runAt);
         return undefined;
         } catch (error) {
           healthTracker?.recordRun({ ok: false, error: String(error?.message || error).slice(0, 120) });
