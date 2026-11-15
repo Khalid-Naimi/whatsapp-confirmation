@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
 
-const KEYS = ['STOCK_SYNC_MODE', 'STOCK_SYNC_MAX_CHANGED_UNITS', 'STOCK_SYNC_MAX_TOTAL_DELTA', 'STOCK_SYNC_MAX_RESTOCKS', 'STOCK_SYNC_MAX_SINGLE_INCREASE', 'STOCK_SYNC_MIN_HD_ITEMS', 'STOCK_SYNC_RESERVE_STATUSES', 'STOCK_SYNC_RESERVE_DAYS', 'STOCK_SYNC_WRITE_DELAY_MS', 'HD_LINKS_FOR_ORDERS', 'MATCHING_ALERTS_ENABLED'];
+const KEYS = ['STOCK_SYNC_MODE', 'STOCK_SYNC_MAX_CHANGED_UNITS', 'STOCK_SYNC_MAX_TOTAL_DELTA', 'STOCK_SYNC_MAX_RESTOCKS', 'STOCK_SYNC_MAX_SINGLE_INCREASE', 'STOCK_SYNC_MIN_HD_ITEMS', 'STOCK_SYNC_RESERVE_STATUSES', 'STOCK_SYNC_RESERVE_DAYS', 'STOCK_SYNC_WRITE_DELAY_MS', 'WOO_STATUS_CONFIRMED', 'HD_LINKS_FOR_ORDERS', 'MATCHING_ALERTS_ENABLED'];
 
 function withEnv(values, check) {
   const saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
@@ -19,10 +19,22 @@ test('with nothing set, everything new is off and the limits are the safe defaul
   withEnv({}, (config) => {
     assert.deepEqual(config.stockSync, {
       mode: 'off', maxChangedUnits: 10, maxTotalDelta: 40, maxRestocks: 5, maxSingleIncrease: 20, minHdItems: 5,
-      reserveStatuses: ['processing', 'on-hold'], reserveDays: 30, writeDelayMs: 300
+      reserveStatuses: ['processing', 'on-hold'], writeDelayMs: 300
     });
     assert.equal(config.highDelivery.linksMode, 'off');
     assert.equal(config.matchingAlertsEnabled, false);
+  });
+});
+
+test('the status written on a confirmation is always reserved, whatever the reserve list says', () => {
+  withEnv({ WOO_STATUS_CONFIRMED: 'confirmed' }, (config) => {
+    assert.deepEqual(config.stockSync.reserveStatuses, ['processing', 'on-hold', 'confirmed']);
+  });
+  withEnv({ STOCK_SYNC_RESERVE_STATUSES: 'processing' }, (config) => {
+    assert.deepEqual(config.stockSync.reserveStatuses, ['processing', 'on-hold']);
+  });
+  withEnv({ STOCK_SYNC_RESERVE_STATUSES: 'processing,confirmed', WOO_STATUS_CONFIRMED: 'confirmed' }, (config) => {
+    assert.deepEqual(config.stockSync.reserveStatuses, ['processing', 'confirmed']);
   });
 });
 

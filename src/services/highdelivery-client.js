@@ -192,9 +192,10 @@ export class HighDeliveryClient {
     return alias ? cities.find((row) => foldText(row?.name_fr) === foldText(alias)) || null : null;
   }
 
-  // Warehouse products with the stock HighDelivery holds for us: [{ id, name, quantity_available, ... }]. Cached for a minute.
-  async listWarehouseProducts() {
-    if (!this.warehouseProducts || this.now() - this.warehouseProductsAt > 60 * 1000) {
+  // Warehouse products with the stock HighDelivery holds for us: [{ id, name, quantity_available, ... }]. Cached for a minute;
+  // `fresh: true` (the stock sync) always reads again.
+  async listWarehouseProducts({ fresh = false } = {}) {
+    if (fresh || !this.warehouseProducts || this.now() - this.warehouseProductsAt > 60 * 1000) {
       const all = [];
       let complete = false;
       for (let page = 1; page <= 20 && !complete; page += 1) {

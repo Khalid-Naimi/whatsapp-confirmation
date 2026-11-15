@@ -87,13 +87,14 @@ function rawQuantity(product) {
   return Number(product?.quantity_available ?? product?.quantityAvailable ?? 0);
 }
 
-// "abc", nothing at all, null or an empty string are not quantities (0 and "0" are). Callers that write stock check this first.
+// A quantity is a whole number: 0, "0", 7, "-2". "abc", nothing at all, null, an empty string, a fraction ("1.5"),
+// and number spellings such as "0x10" or "1e3" are not. Callers that write stock check this first.
 export function hasValidQuantity(product) {
   const value = product?.quantity_available ?? product?.quantityAvailable;
-  if (value === undefined || value === null || typeof value === 'boolean' || String(value).trim() === '') {
-    return false;
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value);
   }
-  return Number.isFinite(Number(value));
+  return typeof value === 'string' && /^-?\d{1,9}$/u.test(value.trim());
 }
 
 // Unreadable counts as 0: an order is then held for a human instead of being sent against stock nobody can read.

@@ -107,10 +107,14 @@ export function loadConfig() {
       maxRestocks: parseCountEnv(process.env.STOCK_SYNC_MAX_RESTOCKS, 5),
       maxSingleIncrease: parseCountEnv(process.env.STOCK_SYNC_MAX_SINGLE_INCREASE, 20),
       minHdItems: parseCountEnv(process.env.STOCK_SYNC_MIN_HD_ITEMS, 5),
-      // Open orders that already took WooCommerce stock but are not at HighDelivery yet: their units stay reserved.
+      // Open orders that already took WooCommerce stock but are not at HighDelivery yet: their units stay reserved,
+      // however old the order is. The status written on a customer's confirmation (WOO_STATUS_CONFIRMED, same
+      // default as wooStatuses.confirmed) is always added, so changing it can never drop confirmed orders.
       // Add "confirmed" only once the shop knows that status: while it rejects one, every run stops.
-      reserveStatuses: parseList(process.env.STOCK_SYNC_RESERVE_STATUSES, ['processing', 'on-hold']),
-      reserveDays: parseCountEnv(process.env.STOCK_SYNC_RESERVE_DAYS, 30),
+      reserveStatuses: withStatus(
+        parseList(process.env.STOCK_SYNC_RESERVE_STATUSES, ['processing', 'on-hold']),
+        (process.env.WOO_STATUS_CONFIRMED || 'on-hold').trim()
+      ),
       writeDelayMs: parseCountEnv(process.env.STOCK_SYNC_WRITE_DELAY_MS, 300)
     },
     // A WhatsApp digest to the team phones when a new product has no HighDelivery link yet.
@@ -180,6 +184,10 @@ function parseCountEnv(value, defaultValue) {
 function parseList(value, defaultValue) {
   const items = String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);
   return items.length ? items : defaultValue;
+}
+
+function withStatus(statuses, status) {
+  return status && !statuses.includes(status) ? [...statuses, status] : statuses;
 }
 
 function parseBooleanEnv(value, defaultValue) {

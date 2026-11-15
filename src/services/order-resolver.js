@@ -27,6 +27,46 @@ export function resolveOrderLines(lineItems, { unitLookup, csvMap, warehouse }) 
   return { wanted, problems, via };
 }
 
+// For the stock sync's reservations: which HighDelivery items (by id) each open order line still takes.
+//   - a linked unit reserves its items by id, also when it is on hold or the item is missing from the warehouse
+//     list (reserving too much only under-sells); a hold unit without items takes no known item
+//   - a product marked "ignore" is skipped
+//   - a product without any link document goes through the CSV; what the CSV cannot place is skipped, because
+//     the sync never writes a product without a link
+//   - a line the sync cannot place although its product has a link document (an unreadable document, or a size
+//     missing from a linked document that the CSV does not place either) is returned in `blocking`
+//   linkKind(productId) -> 'none' | 'linked' | 'ignore' | 'bad'
+// -> { wanted: Map hdId -> quantity, blocking: [text] }
+export function resolveReserveLines(lineItems, { unitLookup, linkKind, csvMap, warehouse }) {
+  const byName = indexByName(warehouse);
+  const wanted = new Map();
+  const blocking = [];
+  const add = (hdId, quantity) => wanted.set(hdId, (wanted.get(hdId) || 0) + quantity);
+
+  for (const line of orderLines(lineItems)) {
+    const found = unitLookup(line.productId, line.variationId);
+    if (found.kind === 'unit') {
+      for (const item of found.unit.items) {
+        add(Number(item.hd_id), line.quantity * item.qty);
+      }
+    } else if (found.kind === 'bad_doc') {
+      blocking.push(`the link document of "${line.wooName}" cannot be read (${found.error})`);
+    } else if (found.kind === 'none') {
+      const csvWanted = new Map();
+      const csvProblems = [];
+      addCsvLine(line, { productMap: csvMap, byName, wanted: csvWanted, problems: csvProblems });
+      for (const { product, quantity } of csvWanted.values()) {
+        add(Number(product.id), quantity);
+      }
+      if (csvProblems.length > 0 && linkKind(line.productId) === 'linked') {
+        blocking.push(`"${line.wooName}" is not in its product's link document and the CSV does not place it`);
+      }
+    }
+    // kind "ignore": not a HighDelivery product, nothing to reserve
+  }
+  return { wanted, blocking };
+}
+
 function addLinkedLine(line, unit, { byId, wanted, problems }) {
   if (unit.hold) {
     problems.push(`"${line.wooName}" is on hold and cannot be sent automatically`);

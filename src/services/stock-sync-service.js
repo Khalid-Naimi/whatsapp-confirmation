@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { HD_META } from './hd-auto-send-service.js';
 import { hasValidQuantity, warehouseQuantity } from './hd-product-match.js';
 import { findUnlinked } from './matching-watch.js';
-import { resolveOrderLines } from './order-resolver.js';
+import { resolveReserveLines } from './order-resolver.js';
 import { LINK_META, canonicalJson, readMeta } from './product-links.js';
 
 const MAX_VARIATION_ERRORS = 3;
@@ -34,31 +34,43 @@ export function computeTarget(hdQty, reserved, unit) {
 // An order that is already at HighDelivery (state "sent") has been taken out of the HighDelivery stock; every
 // other open order counts, including "sending" and "unknown" (counting an order twice only under-sells).
 //   resolveLines(lineItems) -> [{ hdId, quantity }]
+//   resolveLines(lineItems, order) -> [{ hdId, quantity }]
 export function computeReservations(orders, resolveLines) {
   const reserved = new Map();
   for (const order of orders) {
     if (readMeta(order, HD_META.state) === 'sent') {
       continue;
     }
-    for (const { hdId, quantity } of resolveLines(order.line_items)) {
+    for (const { hdId, quantity } of resolveLines(order.line_items, order)) {
       reserved.set(hdId, (reserved.get(hdId) || 0) + quantity);
     }
   }
   return reserved;
 }
 
-function stockOf(entity) {
+// Backorders let customers buy more than the stock shows; a unit this sync writes must not allow them.
+// A product or variation read without the field counts as not allowing them (every write still sends "no").
+export function stockOf(entity) {
   const managed = entity.manage_stock === true;
-  return { managed, parentManaged: entity.manage_stock === 'parent', current: managed && Number.isInteger(entity.stock_quantity) ? entity.stock_quantity : null };
+  return {
+    managed,
+    parentManaged: entity.manage_stock === 'parent',
+    current: managed && Number.isInteger(entity.stock_quantity) ? entity.stock_quantity : null,
+    backordersOff: entity.backorders === undefined || entity.backorders === null || entity.backorders === 'no'
+  };
 }
 
 // The stock now in the shop for a unit, or null when the unit does not exist (or its variations were not read).
+// A grouped, external or other product type has no stock of its own: { unsupported: true }.
 function currentStock(product, key, variations) {
   if (product.type === 'variable') {
     const variation = key === 'p' ? null : (variations || []).find((candidate) => String(candidate.id) === key);
     return variation ? stockOf(variation) : null;
   }
-  return key === 'p' ? stockOf(product) : null;
+  if (key !== 'p') {
+    return null;
+  }
+  return product.type === 'simple' ? stockOf(product) : { unsupported: true };
 }
 
 function explain({ hd, reserved, unit, target }) {
@@ -86,7 +98,19 @@ function rowFor(product, key, unit) {
 //   reservations         Map hdId -> quantity
 //   preview              true on a run that cannot write: units the desktop app writes also get a number, as
 //                        "preview_write" / "preview_same" rows, which no write path ever picks up
-function planUnit(product, key, unit, { variationsByProduct, hdById, reservations, preview }) {
+// write / same, or preview_write / preview_same. Stock that is not managed, or that allows backorders, always
+// needs a write (the write sets manage_stock true and backorders "no").
+function actionFor(target, info) {
+  const same = info.managed && info.current === target && info.backordersOff;
+  const action = same ? 'same' : 'write';
+  return info.previewOnly ? `preview_${action}` : action;
+}
+
+function backordersNote(row, info) {
+  return !info.backordersOff && row.action.endsWith('write') ? ', backorders turned off' : '';
+}
+
+function planUnit(product, key, unit, { variationsByProduct, hdById, reservations, preview, sharers }) {
   const row = rowFor(product, key, unit);
   const skip = (action, why) => ({ ...row, action, why });
   const previewOnly = unit.writer !== 'server';
@@ -103,15 +127,17 @@ function planUnit(product, key, unit, { variationsByProduct, hdById, reservation
   if (!stock) {
     return null; // a missing variation is reported as a broken link, not planned
   }
+  if (stock.unsupported) {
+    return skip('skip_product_type', `a ${product.type || 'product'} of this type has no stock of its own`);
+  }
   if (stock.parentManaged) {
     return skip('skip_parent_stock', 'the stock of this variation is managed on the parent product');
   }
   const base = { ...row, current: stock.current };
+  const info = { ...stock, previewOnly };
   const finish = (target, hd, reserved) => {
-    const same = stock.managed && stock.current === target;
-    const filled = { ...base, hd, reserved, target };
-    const action = same ? 'same' : 'write';
-    return { ...filled, action: previewOnly ? `preview_${action}` : action, why: explain({ hd, reserved, unit, target }) };
+    const filled = { ...base, hd, reserved, target, action: actionFor(target, info) };
+    return { ...filled, why: explain({ hd, reserved, unit, target }) + backordersNote(filled, info) };
   };
   if (unit.hold) {
     return finish(0, null, 0);
@@ -125,12 +151,103 @@ function planUnit(product, key, unit, { variationsByProduct, hdById, reservation
   }
   const hd = warehouseQuantity(hdRow);
   const reserved = reservations.get(unit.items[0].hd_id) || 0;
-  return finish(computeTarget(hd, reserved, unit), hd, reserved);
+  const planned = finish(computeTarget(hd, reserved, unit), hd, reserved);
+  if (!previewOnly) {
+    sharers.push({ row: planned, info, qty: unit.items[0].qty, offset: unit.offset });
+  }
+  return planned;
+}
+
+const unitOrder = (a, b) => (a.productId - b.productId) || (a.unit === b.unit ? 0 : a.unit === 'p' ? -1 : b.unit === 'p' ? 1 : Number(a.unit) - Number(b.unit));
+
+// HighDelivery pieces the shop already shows through units this run does not write (written by the desktop app,
+// sync off, bundles, held or parent-managed units that are not written here): Map hdId -> pieces.
+// Only stock that is known counts: a managed whole number above 0 (for a parent-managed variation, the parent's
+// stock, once per product and item).
+function shownElsewhere(products, variationsByProduct, writtenHere) {
+  const shown = new Map();
+  const parentCounted = new Set();
+  for (const { product, link } of products) {
+    if (!link.ok || link.doc.kind !== 'linked') {
+      continue;
+    }
+    for (const [key, unit] of Object.entries(link.doc.units)) {
+      if (writtenHere.has(`${product.id}|${key}`) || unit.items.length === 0) {
+        continue;
+      }
+      const stock = currentStock(product, key, variationsByProduct.get(product.id));
+      if (!stock || stock.unsupported) {
+        continue;
+      }
+      for (const item of unit.items) {
+        let pieces = 0;
+        if (stock.parentManaged) {
+          const parent = stockOf(product);
+          const mark = `${product.id}|${item.hd_id}`;
+          if (!parentCounted.has(mark) && parent.current > 0) {
+            parentCounted.add(mark);
+            pieces = parent.current;
+          }
+        } else if (stock.current > 0) {
+          pieces = stock.current;
+        }
+        if (pieces > 0) {
+          shown.set(item.hd_id, (shown.get(item.hd_id) || 0) + pieces * item.qty);
+        }
+      }
+    }
+  }
+  return shown;
+}
+
+// Several units this run writes may read the same HighDelivery item (two sizes on one item, or one item on two
+// products). Each unit's own target is worked out from the whole item, so together they could show more than
+// HighDelivery has. Here the units of one item share what is really free:
+//   free = HD - reserved - the largest offset of those units - what other units already show of the item
+// handed out one piece at a time, in a fixed order (product id, then "p", then variation id), never above a
+// unit's own target. A unit alone on its item with nothing shown elsewhere keeps exactly its own target.
+function shareHdPools(sharers, shown) {
+  const byItem = new Map();
+  for (const sharer of sharers) {
+    byItem.set(sharer.row.hdId, [...(byItem.get(sharer.row.hdId) || []), sharer]);
+  }
+  for (const [hdId, group] of byItem) {
+    const others = shown.get(hdId) || 0;
+    if (group.length === 1 && others === 0) {
+      continue;
+    }
+    const { hd, reserved } = group[0].row;
+    const offset = Math.max(...group.map((sharer) => sharer.offset));
+    const free = Math.max(0, hd - reserved - offset - others);
+    const ordered = [...group].sort((a, b) => unitOrder(a.row, b.row));
+    const given = new Map(ordered.map((sharer) => [sharer, 0]));
+    let left = free;
+    for (let progress = true; progress;) {
+      progress = false;
+      for (const sharer of ordered) {
+        if (given.get(sharer) < sharer.row.target && sharer.qty <= left) {
+          given.set(sharer, given.get(sharer) + 1);
+          left -= sharer.qty;
+          progress = true;
+        }
+      }
+    }
+    for (const sharer of ordered) {
+      const { row, info } = sharer;
+      const own = row.target;
+      row.target = given.get(sharer);
+      row.action = actionFor(row.target, info);
+      const base = row.why.replace(/, backorders turned off$/u, '');
+      const elsewhere = others > 0 ? ` after ${others} shown by other units` : '';
+      row.why = `${base}; item ${hdId} is shared: ${free} free for ${group.length} unit${group.length > 1 ? 's' : ''} written here${elsewhere}, this unit gets ${row.target}${row.target < own ? ` (alone it would get ${own})` : ''}${backordersNote(row, info)}`;
+    }
+  }
 }
 
 export function computeStockPlan({ products, variationsByProduct, warehouse, reservations, preview = false }) {
   const hdById = new Map(warehouse.map((row) => [Number(row.id), row]));
-  const context = { variationsByProduct, hdById, reservations, preview };
+  const sharers = [];
+  const context = { variationsByProduct, hdById, reservations, preview, sharers };
   const rows = [];
   for (const { product, link } of products) {
     if (!link.ok) {
@@ -149,6 +266,9 @@ export function computeStockPlan({ products, variationsByProduct, warehouse, res
       }
     }
   }
+  // Units written here: they share the item's pool. Held units written here go to 0 and take nothing.
+  const writtenHere = new Set(rows.filter((row) => ['write', 'same'].includes(row.action)).map((row) => `${row.productId}|${row.unit}`));
+  shareHdPools(sharers, shownElsewhere(products, variationsByProduct, writtenHere));
   return rows;
 }
 
@@ -283,7 +403,7 @@ export class StockSyncService {
     const mode = describeMode(this.config.mode, controlRead);
     this.lastMode = mode;
     const writesAllowed = !dryRun && mode.effective === 'live';
-    const outcome = { at, mode, runMode: writesAllowed ? 'live' : 'dry_run', controlRead, plan: [], unlinked: null, errors: 0, skippedStatuses: [], written: [], aborted: '', abortDetail: '', approvable: false, approval: '' };
+    const outcome = { at, mode, runMode: writesAllowed ? 'live' : 'dry_run', controlRead, plan: [], unlinked: null, errors: 0, skippedStatuses: [], written: [], skippedChanged: [], aborted: '', abortDetail: '', approvable: false, approval: '' };
 
     try {
       await this.compute(outcome);
@@ -293,11 +413,12 @@ export class StockSyncService {
         await this.applyWrites(outcome);
       }
     } catch (error) {
+      // An unexpected error is an abort like any other: the run is recorded and the team is told.
+      outcome.aborted = error instanceof SyncAbort ? error.reason : 'internal_error';
+      outcome.abortDetail = shortReason(error instanceof SyncAbort ? error.message : error);
       if (!(error instanceof SyncAbort)) {
-        throw error;
+        this.logger.warn(`[stock-sync] internal error: ${outcome.abortDetail}`);
       }
-      outcome.aborted = error.reason;
-      outcome.abortDetail = shortReason(error.message);
     }
     return this.finish(outcome);
   }
@@ -315,9 +436,12 @@ export class StockSyncService {
     await this.step('woo_products_failed', () => this.linkIndex.load());
     const products = this.linkIndex.products();
     outcome.productsById = new Map(products.map(({ product }) => [product.id, product]));
-    const warehouse = await this.step('hd_unavailable', () => this.hdClient.listWarehouseProducts());
+    // Open orders first, then HighDelivery (never from its cache): an order sent to HighDelivery in between is then
+    // both still reserved and already gone from the warehouse, which only under-sells.
+    const orders = await this.readOpenOrders(outcome);
+    const warehouse = await this.step('hd_unavailable', () => this.hdClient.listWarehouseProducts({ fresh: true }));
     outcome.warehouse = warehouse;
-    const reservations = await this.readReservations(warehouse, outcome);
+    const reservations = this.reserve(orders, warehouse);
     const variationsByProduct = await this.readVariations(products, outcome);
     outcome.plan = computeStockPlan({ products, variationsByProduct, warehouse, reservations, preview: outcome.runMode !== 'live' });
     outcome.hash = planHash(outcome.plan);
@@ -325,21 +449,39 @@ export class StockSyncService {
     outcome.unlinked = findUnlinked({ products, variationsByProduct, warehouse, control: outcome.controlRead.control });
   }
 
-  // Units of each HighDelivery item that open orders still need. If the shop rejected one of the configured
-  // statuses, its orders are missing from the list and the numbers would be too high: the run stops.
-  async readReservations(warehouse, outcome) {
-    const { reserveStatuses, reserveDays } = this.config;
-    const after = new Date(this.now().getTime() - reserveDays * 24 * 60 * 60 * 1000).toISOString();
-    const { orders, skippedStatuses } = await this.step('orders_failed', () => this.wooClient.listOpenOrdersLite(reserveStatuses, { after }));
+  // Every open order in the reserve statuses, however old. If the shop rejected one of the configured statuses,
+  // its orders are missing from the list and the numbers would be too high: the run stops.
+  async readOpenOrders(outcome) {
+    const { orders, skippedStatuses } = await this.step('orders_failed', () => this.wooClient.listOpenOrdersLite(this.config.reserveStatuses));
     outcome.skippedStatuses = skippedStatuses;
     if (skippedStatuses.length > 0) {
       throw new SyncAbort('reserve_status_rejected', `the shop does not know the order status ${skippedStatuses.join(', ')}, so those orders cannot be reserved`);
     }
-    const resolveLines = (lineItems) => {
-      const { wanted } = resolveOrderLines(lineItems, { unitLookup: (productId, variationId) => this.linkIndex.lookup(productId, variationId), csvMap: this.productMap, warehouse });
-      return [...wanted.values()].map(({ product, quantity }) => ({ hdId: Number(product.id), quantity }));
+    return orders;
+  }
+
+  // Units of each HighDelivery item that open orders still need. A line the sync cannot place although its
+  // product is linked (see resolveReserveLines) would leave its item under-reserved: the run stops.
+  reserve(orders, warehouse) {
+    const links = new Map(this.linkIndex.products().map(({ product, link }) => [String(product.id), link]));
+    const linkKind = (productId) => {
+      const link = links.get(String(productId));
+      if (!link || link.error === 'missing') {
+        return 'none';
+      }
+      return link.ok ? link.doc.kind : 'bad';
     };
-    return computeReservations(orders, resolveLines);
+    const context = { unitLookup: (productId, variationId) => this.linkIndex.lookup(productId, variationId), linkKind, csvMap: this.productMap, warehouse };
+    const blocking = [];
+    const reservations = computeReservations(orders, (lineItems, order) => {
+      const result = resolveReserveLines(lineItems, context);
+      blocking.push(...result.blocking.map((text) => `order ${order.id}: ${text}`));
+      return [...result.wanted].map(([hdId, quantity]) => ({ hdId, quantity }));
+    });
+    if (blocking.length > 0) {
+      throw new SyncAbort('orders_unresolved', `${blocking[0]}${blocking.length > 1 ? ` (+${blocking.length - 1} more open order lines)` : ''}`);
+    }
+    return reservations;
   }
 
   // The variation lists of the variable products that matter. One failing product is skipped; more than three stop the run.
@@ -398,48 +540,86 @@ export class StockSyncService {
   }
 
   // The run can take a while: just before the first write, look again at the pause switch and at the open orders.
-  // Someone pausing the sync, or a new order taking a planned item, cancels this run (the next one starts fresh).
+  // Someone pausing the sync, or an open order changing on a planned item (a new order, or one leaving the list),
+  // cancels this run (the next one starts fresh).
   async recheckBeforeWriting(outcome) {
+    await this.checkStillLive(outcome, 'while the run was going');
+    const reservations = this.reserve(await this.readOpenOrders(outcome), outcome.warehouse);
+    const changed = writesOf(outcome.plan).find((row) => !row.hold && (reservations.get(row.hdId) || 0) !== row.reserved);
+    if (changed) {
+      const now = reservations.get(changed.hdId) || 0;
+      throw new SyncAbort('orders_changed', `open orders on HighDelivery item ${changed.hdId} went from ${changed.reserved} to ${now} reserved while the run was going`);
+    }
+  }
+
+  async checkStillLive(outcome, when) {
     const mode = describeMode(this.config.mode, await this.syncControl.read());
     this.lastMode = mode;
     outcome.mode = mode;
     if (mode.effective !== 'live') {
-      throw new SyncAbort('mode_changed', 'the sync was paused, or its control record became unreadable, while the run was going');
-    }
-    const reservations = await this.readReservations(outcome.warehouse, outcome);
-    const grown = writesOf(outcome.plan).find((row) => !row.hold && (reservations.get(row.hdId) || 0) > row.reserved);
-    if (grown) {
-      throw new SyncAbort('orders_changed', `new open orders took HighDelivery item ${grown.hdId} while the run was going`);
+      throw new SyncAbort('mode_changed', `the sync was paused, or its control record became unreadable, ${when}`);
     }
   }
 
-  // Writes the planned changes, one product at a time. The first failure stops everything after it.
+  // Writes the planned changes, one product at a time. The first failure stops everything after it; a pause set
+  // between two products stops the rest.
   async applyWrites(outcome) {
     const byProduct = new Map();
     for (const row of writesOf(outcome.plan)) {
       byProduct.set(row.productId, [...(byProduct.get(row.productId) || []), row]);
     }
+    const total = writesOf(outcome.plan).length;
     const at = outcome.at.toISOString();
     let first = true;
     for (const [productId, rows] of byProduct) {
       if (!first) {
         await this.sleep(this.config.writeDelayMs);
+        await this.checkStillLive(outcome, `after ${outcome.written.length} of ${total} units were written`);
       }
       first = false;
-      const failure = await this.writeProduct(productId, rows, { at, hash: outcome.hash, productsById: outcome.productsById }, outcome.written);
+      const failure = await this.writeProduct(productId, rows, { at, hash: outcome.hash, productsById: outcome.productsById }, outcome);
       if (failure) {
         outcome.errors += 1;
         outcome.aborted = 'write_failed';
-        outcome.abortDetail = `stopped after ${outcome.written.length} of ${writesOf(outcome.plan).length} units: ${failure}`;
+        outcome.abortDetail = `stopped after ${outcome.written.length} of ${total} units: ${failure}`;
         return;
       }
     }
   }
 
-  // -> '' when every row was written, otherwise why it stopped. Written rows are added to `written`.
-  async writeProduct(productId, rows, { at, hash, productsById }, written) {
+  // Just before writing, the units' stock is read again: a unit whose stock moved since the plan (a sale, someone
+  // editing it) is not written but marked "skipped_changed"; the next run plans it again. -> the rows still to write.
+  async stillAsPlanned(product, rows, outcome) {
+    let fresh;
+    if (product.type === 'variable') {
+      const variations = await this.wooClient.listVariations(product.id);
+      fresh = (row) => variations.find((variation) => String(variation.id) === row.unit);
+    } else {
+      const now = await this.wooClient.getProduct(product.id);
+      fresh = () => now;
+    }
+    return rows.filter((row) => {
+      const entity = fresh(row);
+      const stock = entity ? stockOf(entity) : null;
+      if (stock && !stock.parentManaged && stock.current === row.current) {
+        return true;
+      }
+      row.action = 'skipped_changed';
+      row.why = `the stock changed from ${row.current ?? 'unmanaged'} to ${stock ? (stock.parentManaged ? 'parent-managed' : stock.current ?? 'unmanaged') : 'missing'} while the run was going; not written`;
+      outcome.skippedChanged.push(row);
+      return false;
+    });
+  }
+
+  // -> '' when every row was written or skipped as changed, otherwise why it stopped. Written rows go to outcome.written.
+  async writeProduct(productId, planned, { at, hash, productsById }, outcome) {
+    const { written } = outcome;
     const product = productsById.get(productId);
     try {
+      const rows = await this.stillAsPlanned(product, planned, outcome);
+      if (rows.length === 0) {
+        return '';
+      }
       if (product.type !== 'variable') {
         await this.wooClient.updateProduct(productId, stockFields(rows[0], { at, hash }));
         written.push(rows[0]);
@@ -447,11 +627,20 @@ export class StockSyncService {
       }
       for (const part of chunk(rows, MAX_BATCH_SIZE)) {
         const answer = await this.wooClient.batchUpdateVariations(productId, part.map((row) => ({ id: Number(row.unit), ...stockFields(row, { at, hash }) })));
-        const refused = new Map((answer?.update || []).filter((item) => item?.error).map((item) => [String(item.id), item.error]));
-        written.push(...part.filter((row) => !refused.has(row.unit)));
-        if (refused.size > 0) {
-          const [unit, error] = [...refused][0];
-          return `variation ${unit} of product ${productId}: ${shortReason(error.message || error.code)}`;
+        // Only a variation the shop answered for without an error counts as written.
+        const replies = new Map((Array.isArray(answer?.update) ? answer.update : []).filter((item) => item && item.id !== undefined).map((item) => [String(item.id), item]));
+        const problems = [];
+        for (const row of part) {
+          const reply = replies.get(row.unit);
+          if (reply && !reply.error) {
+            written.push(row);
+          } else {
+            problems.push([row.unit, reply ? shortReason(reply.error.message || reply.error.code) : 'the shop did not confirm it']);
+          }
+        }
+        if (problems.length > 0) {
+          const [unit, why] = problems[0];
+          return `variation ${unit} of product ${productId}: ${why}`;
         }
       }
       return '';
@@ -469,7 +658,8 @@ export class StockSyncService {
       mode: outcome.runMode,
       checked: plan.length,
       changed: outcome.runMode === 'live' ? outcome.written.length : planned.length,
-      skipped: plan.filter((row) => row.action.startsWith('skip_')).length,
+      skipped: plan.filter((row) => row.action.startsWith('skip_') || row.action === 'skipped_changed').length,
+      skippedChanged: outcome.skippedChanged.length,
       errors: outcome.errors,
       skippedStatuses: outcome.skippedStatuses,
       aborted: outcome.aborted,
@@ -512,7 +702,12 @@ export class StockSyncService {
     if (recent) {
       return previous;
     }
-    const sent = await this.notify(`Rhymat: synchro du stock arretee (${outcome.abortDetail || outcome.aborted}). ${outcome.written.length ? `${outcome.written.length} produits deja ecrits. ` : 'Rien n\'a ete ecrit. '}Voir Backend health dans l'app.`);
+    let sent = 0;
+    try {
+      sent = await this.notify(`Rhymat: synchro du stock arretee (${outcome.abortDetail || outcome.aborted}). ${outcome.written.length ? `${outcome.written.length} produits deja ecrits. ` : 'Rien n\'a ete ecrit. '}Voir Backend health dans l'app.`);
+    } catch (error) {
+      this.logger.warn(`[stock-sync] abort alert failed: ${shortReason(error)}`);
+    }
     return sent ? { reason: outcome.aborted, at: outcome.at.toISOString() } : previous;
   }
 
@@ -572,6 +767,7 @@ function stockFields(row, { at, hash }) {
   const audit = { at, run: hash.slice(0, 8), from: row.current, to: row.target, hd: row.hd, reserved: row.reserved, offset: row.offset, cap: row.cap, hold: row.hold };
   return {
     manage_stock: true,
+    backorders: 'no',
     stock_quantity: row.target,
     stock_status: row.target > 0 ? 'instock' : 'outofstock',
     meta_data: [{ key: LINK_META.last, value: canonicalJson(audit) }]

@@ -51,8 +51,9 @@ test('live: one batch per variable product with the audit meta, one update for a
   const audit = JSON.parse(xs.meta_data[0].value);
   assert.equal(xs.meta_data[0].key, LINK_META.last);
   assert.deepEqual(audit, { at: '2026-11-15T10:00:00.000Z', cap: null, from: 5, hd: 2, hold: false, offset: 0, reserved: 0, run: result.summary.planHash.slice(0, 8), to: 2 });
+  // the second cap shares item 24 (20 pieces) with the first cap, which already shows 6
   const single = shop.writes.find((w) => w.kind === 'product' && w.id === 8990);
-  assert.deepEqual([single.fields.stock_quantity, single.fields.manage_stock], [20, true]);
+  assert.deepEqual([single.fields.stock_quantity, single.fields.manage_stock, single.fields.backorders], [14, true, 'no']);
 });
 
 test('a second identical live run writes nothing', async () => {
@@ -72,7 +73,7 @@ test('open orders keep their units reserved; an order already sent does not', as
   const row = result.plan.find((r) => r.unit === '8978');
   assert.deepEqual([row.hd, row.reserved, row.target], [2, 2, 0]);
   assert.deepEqual(shop.calls.lastOrderQuery.statuses, ['processing', 'on-hold']);
-  assert.match(shop.calls.lastOrderQuery.after, /^2026-10-16/u);
+  assert.equal(shop.calls.lastOrderQuery.after, undefined); // however old, an open order stays reserved
 });
 
 test('an order for a product that is only in the CSV still reserves its HighDelivery item', async () => {
@@ -83,8 +84,8 @@ test('an order for a product that is only in the CSV still reserves its HighDeli
 });
 
 test('too many changes stops the whole run; a wrong approval hash is refused, the right one applies once', async () => {
-  const products = Array.from({ length: 12 }, (_, i) => simpleProduct(100 + i, 24, { stock: 1 }));
-  const shop = makeShop({ products, hd: [...FILLER, ...hdRows([24, 3])] });
+  const products = Array.from({ length: 12 }, (_, i) => simpleProduct(100 + i, 30 + i, { stock: 1 }));
+  const shop = makeShop({ products, hd: [...FILLER, ...products.map((_, i) => hdRows([30 + i, 3])[0])] });
   const first = await makeService(shop).run();
   assert.equal(first.summary.aborted, 'too_many_changes');
   assert.equal(shop.stockWrites().length, 0);
@@ -104,8 +105,8 @@ test('too many changes stops the whole run; a wrong approval hash is refused, th
 });
 
 test('an approval never applies in a dry run', async () => {
-  const products = Array.from({ length: 12 }, (_, i) => simpleProduct(100 + i, 24, { stock: 1 }));
-  const shop = makeShop({ products, hd: [...FILLER, ...hdRows([24, 3])] });
+  const products = Array.from({ length: 12 }, (_, i) => simpleProduct(100 + i, 30 + i, { stock: 1 }));
+  const shop = makeShop({ products, hd: [...FILLER, ...products.map((_, i) => hdRows([30 + i, 3])[0])] });
   const first = await makeService(shop).run({ dryRun: true });
   const result = await makeService(shop).run({ dryRun: true, approveHash: first.summary.planHash });
   assert.equal(result.approval, 'not_live');
@@ -158,8 +159,8 @@ test('when the control record cannot be read at all the history is not overwritt
 });
 
 test('a write that fails stops the run, nothing after it is attempted, and the report says what was written', async () => {
-  const products = [simpleProduct(100, 24, { stock: 1 }), simpleProduct(101, 24, { stock: 1 }), simpleProduct(102, 24, { stock: 1 })];
-  const shop = makeShop({ products, hd: [...FILLER, ...hdRows([24, 3])], failOn: { product: [101] } });
+  const products = [simpleProduct(100, 24, { stock: 1 }), simpleProduct(101, 25, { stock: 1 }), simpleProduct(102, 26, { stock: 1 })];
+  const shop = makeShop({ products, hd: [...FILLER, ...hdRows([24, 3], [25, 3], [26, 3])], failOn: { product: [101] } });
   const result = await makeService(shop).run();
   assert.equal(result.summary.aborted, 'write_failed');
   assert.equal(result.summary.errors, 1);
@@ -177,10 +178,10 @@ test('a variation the shop refuses inside a batch also stops the run and is name
 });
 
 test('one product whose variations cannot be read is skipped; more than three stop the run', async () => {
-  const variable = (id) => wooProduct(id, { type: 'variable', doc: linkDoc({ [id + 1]: linkUnit() }) });
+  const variable = (id) => wooProduct(id, { type: 'variable', doc: linkDoc({ [id + 1]: linkUnit({ items: [{ hd_id: id, hd_name: `HD item ${id}`, qty: 1 }] }) }) });
   const make = (failing) => {
     const products = [200, 300, 400, 500, 600].map(variable);
-    return makeShop({ products, variations: Object.fromEntries(products.map((p) => [p.id, [wooVariation(p.id + 1, 'M', { stock: 0 })]])), hd: [...FILLER, ...hdRows([512, 1])], failOn: { variations: failing } });
+    return makeShop({ products, variations: Object.fromEntries(products.map((p) => [p.id, [wooVariation(p.id + 1, 'M', { stock: 0 })]])), hd: [...FILLER, ...products.map((p) => hdRows([p.id, 1])[0])], failOn: { variations: failing } });
   };
   const one = make([200]);
   const result = await makeService(one).run();

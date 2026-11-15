@@ -2,8 +2,8 @@ function buildAuthHeader(consumerKey, consumerSecret) {
   return `Basic ${Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64')}`;
 }
 
-export const PRODUCT_FIELDS = 'id,name,type,status,sku,meta_data,stock_quantity,manage_stock';
-export const VARIATION_FIELDS = 'id,attributes,status,stock_quantity,manage_stock,meta_data';
+export const PRODUCT_FIELDS = 'id,name,type,status,sku,meta_data,stock_quantity,manage_stock,backorders';
+export const VARIATION_FIELDS = 'id,attributes,status,stock_quantity,manage_stock,backorders,meta_data';
 export const ORDER_LITE_FIELDS = 'id,status,line_items,meta_data';
 
 const MAX_LIST_PAGES = 20;
@@ -32,6 +32,10 @@ export class WooCommerceClient {
       let page = 1;
 
       while (true) {
+        // Same limit as collectPages: a list that never ends is an error, not an endless loop.
+        if (page > MAX_LIST_PAGES) {
+          throw new Error(`WooCommerce order list for status "${status}" is longer than ${MAX_LIST_PAGES} pages`);
+        }
         let orders;
         try {
           orders = await this.listOrders({

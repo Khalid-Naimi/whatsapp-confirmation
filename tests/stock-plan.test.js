@@ -44,18 +44,20 @@ test('offset, cap 6 and hold: the Black Cap, the Burgundy and the Saumon example
 
 test('a unit already at its target with managed stock is "same"; unmanaged stock always needs a write', () => {
   const managed = wooProduct(1, { stock: 2, manage: true, doc: linkDoc({ p: linkUnit() }) });
-  const unmanaged = wooProduct(2, { stock: 2, manage: false, doc: linkDoc({ p: linkUnit() }) });
-  const rows = plan([managed, unmanaged]);
+  const unmanaged = wooProduct(2, { stock: 2, manage: false, doc: linkDoc({ p: linkUnit({ items: [{ hd_id: 513, hd_name: 'b', qty: 1 }] }) }) });
+  const rows = plan([managed, unmanaged], { warehouse: hdRows([512, 2], [513, 2]) });
   assert.deepEqual(rows.map((row) => [row.action, row.current]), [['same', 2], ['write', null]]);
 });
 
-test('a shared HighDelivery item loses the reserved units on every variation that uses it', () => {
+test('a shared HighDelivery item: the variations that use it together never show more than is free', () => {
+  // HD 2, reserved 1: one piece is free, so only one of the two sizes may show it (the lower variation id).
   const lmkhoukha = wooProduct(7, { type: 'variable', doc: linkDoc({ 71: linkUnit(), 72: linkUnit() }) });
   const rows = plan([lmkhoukha], {
     variations: { 7: [wooVariation(71, '190cm >', { stock: 9 }), wooVariation(72, '182cm - 190cm', { stock: 9 })] },
     reservations: new Map([[512, 1]])
   });
-  assert.deepEqual(rows.map((row) => row.target), [1, 1]);
+  assert.deepEqual(rows.map((row) => row.target), [1, 0]);
+  assert.match(rows[1].why, /item 512 is shared: 1 free for 2 units written here, this unit gets 0 \(alone it would get 1\)/u);
 });
 
 test('units the server must not write get a skip row and no target', () => {
@@ -77,10 +79,14 @@ test('a preview run gives desktop-written units a number that no write path can 
   const product = wooProduct(9, { type: 'variable', doc });
   const variations = { 9: [wooVariation(1, 'a', { stock: 0 }), wooVariation(2, 'b', { stock: 2 }), wooVariation(3, 'c', { stock: 0 })] };
   const rows = plan([product], { variations, preview: true });
-  assert.deepEqual(rows.map((row) => [row.unit, row.action, row.target]), [['1', 'preview_write', 2], ['2', 'preview_same', 2], ['3', 'write', 2]]);
+  // the desktop unit 2 already shows the 2 pieces of item 512, so the server unit 3 gets 0 in both kinds of run
+  assert.deepEqual(rows.map((row) => [row.unit, row.action, row.target]), [['1', 'preview_write', 2], ['2', 'preview_same', 2], ['3', 'same', 0]]);
   assert.equal(planHash(rows), planHash(rows.filter((row) => row.unit === '3')));
   const live = plan([product], { variations });
-  assert.deepEqual(live.map((row) => row.action), ['skip_writer_desktop', 'skip_writer_desktop', 'write']);
+  assert.deepEqual(live.map((row) => [row.action, row.target]), [['skip_writer_desktop', null], ['skip_writer_desktop', null], ['same', 0]]);
+  assert.equal(planHash(live), planHash(rows));
+  const apart = plan([product], { variations: { 9: [wooVariation(1, 'a', { stock: 0 }), wooVariation(2, 'b', { stock: 0 }), wooVariation(3, 'c', { stock: 0 })] }, preview: true });
+  assert.deepEqual(apart.map((row) => [row.unit, row.action, row.target]), [['1', 'preview_write', 2], ['2', 'preview_write', 2], ['3', 'write', 2]]);
 });
 
 test('a missing variation, an unreadable document and a product without a document are not planned as writes', () => {
