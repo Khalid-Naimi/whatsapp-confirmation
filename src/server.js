@@ -10,6 +10,7 @@ import { HighDeliveryClient } from './services/highdelivery-client.js';
 import { loadProductMapFile } from './services/hd-product-match.js';
 import { MailService } from './services/mail-service.js';
 import { StockAlertService } from './services/stock-alert-service.js';
+import { HealthTracker, trackCalls } from './services/health-tracker.js';
 import { WasenderClient } from './services/wasender-client.js';
 import { WooCommerceClient } from './services/woocommerce-client.js';
 import { WordPressClient } from './services/wordpress-client.js';
@@ -47,6 +48,10 @@ const wooClient = new WooCommerceClient({
   logger
 });
 
+const healthTracker = new HealthTracker({ store });
+trackCalls(wooClient, 'woocommerce', ['request'], healthTracker);
+trackCalls(wasenderClient, 'wasender', ['sendMessageWithRetries'], healthTracker);
+
 const mailService = new MailService(config.mail);
 
 const hdCityAliases = JSON.parse(fs.readFileSync(new URL('./data/hd-city-aliases.json', import.meta.url), 'utf8')).aliases || {};
@@ -72,6 +77,7 @@ const hdAutoSend = new HdAutoSendService({
   minTrustScore: config.highDelivery.minTrustScore,
   logger
 });
+trackCalls(hdAutoSend.hdClient, 'highdelivery', ['request'], healthTracker);
 if (config.highDelivery.autoSendEnabled) {
   logger.log(`HighDelivery auto-send is ON (${hdAutoSend.hdClient.isConfigured() ? 'credentials set' : 'WARNING: HD_API_PHONE / HD_API_PASSWORD missing, orders will stay on-hold'}).`);
 }
@@ -120,6 +126,7 @@ const app = createApp({
   store,
   stockAlertService,
   hdStatusSyncService,
+  healthTracker,
   logger
 });
 

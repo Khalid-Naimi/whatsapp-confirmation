@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
+import { buildHealthDetails } from './services/health-tracker.js';
 
-export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, logger = console }) {
+export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, logger = console }) {
   // The hourly task must never run twice at once (two runs could message the same customer twice).
   let followupsRunning = false;
   return async function handler(req, res) {
@@ -21,6 +22,13 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         const providedSecret = req.headers['x-task-secret'];
         if (!config.tasks.secret || providedSecret !== config.tasks.secret) {
           return sendCorsJson(res, 401, { ok: false, error: 'Invalid task secret' });
+        }
+
+        if (pathname === '/api/health/details') {
+          if (!healthTracker) {
+            return sendCorsJson(res, 503, { ok: false, error: 'Health details are not enabled' });
+          }
+          return sendCorsJson(res, 200, { ok: true, ...buildHealthDetails({ store, tracker: healthTracker, config }) });
         }
 
         if (pathname === '/api/orders/summary') {
@@ -169,7 +177,11 @@ export function createApp({ config, confirmationService, store, stockAlertServic
             logger.warn(`[task][order-followups] stock alert queue failed: ${error.message}`);
           }
         }
+        healthTracker?.recordRun({ ok: true, summary: result, hdStatus });
         return sendJson(res, 200, { ok: true, summary: result, hdStatus });
+        } catch (error) {
+          healthTracker?.recordRun({ ok: false, error: String(error?.message || error).slice(0, 120) });
+          throw error;
         } finally {
           followupsRunning = false;
         }

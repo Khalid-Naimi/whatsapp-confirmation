@@ -126,15 +126,34 @@ export class HdAutoSendService {
     try {
       const context = {};
       const outcome = await this.run(orderId, order, context);
+      this.rememberOutcome(orderId, outcome);
       await this.notifyProblem(orderId, context.raw || order, outcome);
       return outcome;
     } catch (error) {
       this.logger.warn(`[hd-auto-send] unexpected error orderId=${orderId}: ${error.message}`);
       const outcome = { status: 'error', error: error.message };
+      this.rememberOutcome(orderId, outcome);
       await this.notifyProblem(orderId, order, outcome);
       return outcome;
     } finally {
       this.inFlight.delete(orderId);
+    }
+  }
+
+  // Keeps the last result on the stored order so the health page can list what needs a human. Never throws.
+  rememberOutcome(orderId, outcome) {
+    try {
+      if (!this.store?.getOrder?.(orderId)) {
+        return;
+      }
+      this.store.upsertOrder({
+        orderId,
+        hdOutcome: String(outcome?.status || ''),
+        hdOutcomeReason: String(outcome?.reason || ''),
+        hdOutcomeAt: new Date().toISOString()
+      });
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] could not remember the outcome for order ${orderId}: ${error.message}`);
     }
   }
 
