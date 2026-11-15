@@ -1,3 +1,5 @@
+import { maskPhone, redactPhones } from '../utils/format.js';
+
 export class WasenderClient {
   constructor({
     baseUrl,
@@ -6,6 +8,7 @@ export class WasenderClient {
     logger = console,
     minIntervalMs = 5000,
     maxRetries = 3,
+    timeoutMs = 20000,
     nowImpl = () => Date.now(),
     sleepImpl = sleep
   }) {
@@ -15,6 +18,7 @@ export class WasenderClient {
     this.logger = logger;
     this.minIntervalMs = minIntervalMs;
     this.maxRetries = maxRetries;
+    this.timeoutMs = timeoutMs;
     this.now = nowImpl;
     this.sleep = sleepImpl;
     this.sendChain = Promise.resolve();
@@ -38,14 +42,22 @@ export class WasenderClient {
       await this.waitForAvailability();
       this.logger.log(`[wasender] send attempt=${attempt + 1} to=${maskPhone(to)}`);
 
-      const response = await this.fetch(`${this.baseUrl}/send-message`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiToken}`
-        },
-        body: JSON.stringify(poll ? { to, poll } : { to, text: message })
-      });
+      let response;
+      try {
+        response = await this.fetch(`${this.baseUrl}/send-message`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.apiToken}`
+          },
+          body: JSON.stringify(poll ? { to, poll } : { to, text: message }),
+          signal: AbortSignal.timeout(this.timeoutMs)
+        });
+      } catch (error) {
+        // No answer in time: the message may or may not have gone out. It is NOT safe to treat it as "not sent".
+        this.logger.warn(`[wasender] send gave no answer to=${maskPhone(to)} reason=${error?.name || 'error'}`);
+        throw new WasenderSendError({ status: 0, data: { timeout: true }, message: 'Wasender did not answer in time; the message may have been sent', ambiguous: true });
+      }
 
       const data = await parseJsonSafe(response);
       if (response.ok && data?.success === false) {
@@ -116,28 +128,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function maskPhone(value) {
-  const input = String(value || '');
-  if (input.length <= 4) {
-    return input;
-  }
-
-  return `${input.slice(0, 4)}***${input.slice(-2)}`;
-}
-
 function safeJson(value) {
   try {
-    return JSON.stringify(value);
+    return redactPhones(JSON.stringify(value));
   } catch {
     return '"[unserializable]"';
   }
 }
 
 export class WasenderSendError extends Error {
-  constructor({ status, data, message }) {
+  constructor({ status, data, message, ambiguous = false }) {
     super(message);
     this.name = 'WasenderSendError';
     this.status = status;
     this.data = data;
+    this.ambiguous = Boolean(ambiguous);
   }
 }

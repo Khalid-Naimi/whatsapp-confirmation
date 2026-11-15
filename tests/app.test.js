@@ -4594,7 +4594,7 @@ test('API endpoints return 401 without valid task secret', async () => {
   assert.equal(result.statusCode, 401);
 });
 
-test('API endpoints return CORS headers', async () => {
+test('API endpoints do not allow cross-origin browser access', async () => {
   const { app, store } = createTestContext();
   store.upsertOrder({ orderId: '1', confirmationState: 'confirmed', phone: '+212600000001' });
 
@@ -4602,7 +4602,8 @@ test('API endpoints return CORS headers', async () => {
   const res = createMockRes();
   await app(req, res);
 
-  assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['Access-Control-Allow-Origin'], undefined, 'no wildcard CORS: only the desktop app and the cron call this API');
 });
 
 // ── WhatsApp opt-out integration tests ────────────────────────────────────────

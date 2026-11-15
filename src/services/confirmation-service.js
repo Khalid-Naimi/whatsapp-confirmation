@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { formatOrderTotal, interpolateTemplate, normalizePhone, summarizeOrderItems, validatePhone } from '../utils/format.js';
 import { isOptOutMessage } from '../utils/opt-out.js';
 import { DEFAULT_WOO_STATUSES, wooStatusMatchesTarget } from '../utils/hd-status.js';
+import { maskPhone } from '../utils/format.js';
 import { isQuietHours } from '../utils/quiet-hours.js';
 import { WasenderSendError } from './wasender-client.js';
 
@@ -532,7 +533,7 @@ export class ConfirmationService {
 
     if (!this.wordpressClient?.isConfigured) {
       this.logger.warn(
-        `[opt-out] Opt-out saved only locally; durable WordPress storage is not configured. phone=${phone} messageKey=${message.messageKey}`
+        `[opt-out] Opt-out saved only locally; durable WordPress storage is not configured. phone=${maskPhone(phone)} messageKey=${message.messageKey}`
       );
     } else {
       this.wordpressClient
@@ -543,12 +544,12 @@ export class ConfirmationService {
           messageKey: message.messageKey
         })
         .catch((err) => {
-          this.logger.warn(`[opt-out] wordpress_sync_failed phone=${phone} messageKey=${message.messageKey} error=${err.message}`);
+          this.logger.warn(`[opt-out] wordpress_sync_failed phone=${maskPhone(phone)} messageKey=${message.messageKey} error=${err.message}`);
         });
     }
 
     this.logger.log(
-      `[opt-out] phone=${phone} messageKey=${message.messageKey} source=inbound_whatsapp text=${JSON.stringify(lastMessageText)}`
+      `[opt-out] phone=${maskPhone(phone)} messageKey=${message.messageKey} source=inbound_whatsapp text=${JSON.stringify(lastMessageText)}`
     );
 
     return {
@@ -570,7 +571,7 @@ export class ConfirmationService {
 
       const latestOrder = matches[0];
       if (!latestOrder) {
-        this.logger.warn(`[opt-out] no_matching_woo_order phone=${phone} messageKey=${messageKey}`);
+        this.logger.warn(`[opt-out] no_matching_woo_order phone=${maskPhone(phone)} messageKey=${messageKey}`);
         return;
       }
 
@@ -581,7 +582,7 @@ export class ConfirmationService {
       await this.safeAddOrderNote(String(latestOrder.id), note);
       this.logger.log(`[opt-out] woo_marker_saved phone=${phone} orderId=${latestOrder.id} messageKey=${messageKey}`);
     } catch (error) {
-      this.logger.warn(`[opt-out] woo_marker_failed phone=${phone} messageKey=${messageKey} error=${error.message}`);
+      this.logger.warn(`[opt-out] woo_marker_failed phone=${maskPhone(phone)} messageKey=${messageKey} error=${error.message}`);
     }
   }
 
@@ -1613,6 +1614,12 @@ export class ConfirmationService {
         message
       });
     } catch (error) {
+      if (error?.ambiguous) {
+        // No answer from the WhatsApp provider: the message may have gone out, so the reservation stays ("reserved")
+        // and the order is flagged ambiguous for a human instead of being sent a second time.
+        this.logger.warn(`[outbound] ambiguous_send_timeout orderId=${orderId} logicalKey=${logicalKey}`);
+        return { ok: false, duplicate: true, ambiguous: true, orderPayload };
+      }
       try {
         await this.wooClient.updateOrderMeta(
           orderId,
@@ -1727,7 +1734,7 @@ export class ConfirmationService {
     if (!template || !normalizedOrder.phone) {
       return { sent: false, reason: 'no_template_or_phone' };
     }
-    if (this.store?.isOptedOut?.(normalizedOrder.phone)) {
+    if (this.store?.isPhoneOptedOut?.(normalizedOrder.phone)) {
       return { sent: false, reason: 'opted_out' };
     }
     const logicalKey = shipped ? OUTBOUND_LOGICAL_KEYS.hdShipped : OUTBOUND_LOGICAL_KEYS.hdArriving;
@@ -2185,7 +2192,7 @@ export class ConfirmationService {
         return { status: 202, body: { ok: true, reason: 'ambiguous_send_state' } };
       }
 
-      this.logger.log(`[confirmation] initial send accepted orderId=${normalizedOrder.orderId} phone=${normalizedOrder.phone}`);
+      this.logger.log(`[confirmation] initial send accepted orderId=${normalizedOrder.orderId} phone=${maskPhone(normalizedOrder.phone)}`);
       await this.sendConfirmationPoll(normalizedOrder);
 
       return { status: 202, body: { ok: true } };
@@ -2484,7 +2491,7 @@ export class ConfirmationService {
           text: message
         });
       } catch (error) {
-        this.logger.warn(`Unable to send internal ${decision} notification for order ${order.orderId} to ${phone}: ${error.message}`);
+        this.logger.warn(`Unable to send internal ${decision} notification for order ${order.orderId} to ${maskPhone(phone)}: ${error.message}`);
         failedPhones.push(phone);
       }
     }

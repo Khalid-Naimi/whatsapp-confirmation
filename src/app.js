@@ -251,11 +251,8 @@ function hashEvent(input) {
   return createHash('sha256').update(input).digest('hex');
 }
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, x-task-secret'
-};
+// No cross-origin access: the only callers are the desktop app, the cron job and server-side scripts, not browsers.
+const CORS_HEADERS = {};
 
 function sendCors(res, statusCode) {
   res.writeHead(statusCode, CORS_HEADERS);

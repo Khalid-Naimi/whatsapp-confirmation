@@ -68,3 +68,17 @@ export function summarizeOrderItems(lineItems = []) {
 
   return summary || 'Talab ma baynch';
 }
+
+// First four and last two characters only, for logs. Never log a full customer phone number.
+export function maskPhone(value) {
+  const input = String(value || '');
+  if (input.length <= 4) {
+    return input ? '***' : '';
+  }
+  return `${input.slice(0, 4)}***${input.slice(-2)}`;
+}
+
+// Masks every phone-like number inside a text (provider answers can echo the recipient).
+export function redactPhones(text) {
+  return String(text ?? '').replace(/\+?\d{9,15}/gu, (match) => maskPhone(match));
+}

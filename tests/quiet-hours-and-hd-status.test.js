@@ -109,9 +109,9 @@ test('stage message is held in quiet hours, then sent once after', async () => {
 test('stage message skips an opted-out customer and an order without phone', async () => {
   const now = at('2026-11-15T09:30:00Z');
   const { service, sent } = makeService({ quietHours: QUIET, clock: () => now });
-  service.store.isOptedOut = () => true;
+  service.store.upsertContact({ phone: '+212600000041', marketingStatus: 'opted_out' }); // the REAL store method, not a mock
   assert.equal((await service.sendHdStageMessage(WOO_ORDER, 'arriving', 'T', now)).reason, 'opted_out');
-  service.store.isOptedOut = () => false;
+  service.store.upsertContact({ phone: '+212600000041', marketingStatus: 'subscribed' });
   assert.equal((await service.sendHdStageMessage({ ...WOO_ORDER, billing: {}, shipping: {} }, 'arriving', 'T', now)).reason, 'no_template_or_phone');
   assert.equal(sent.length, 0);
 });
@@ -432,4 +432,38 @@ test('review cost: the hourly task reads open orders in full and only recent clo
   assert.ok(!open.statuses.includes('completed') && !open.statuses.includes('cancelled'));
   assert.deepEqual(closed.statuses, ['cancelled', 'completed', 'delivered', 'refunded']);
   assert.equal(closed.after, '2026-10-01T12:00:00.000Z', '45 days back');
+});
+
+
+// ---- fixes from the data-protection review -------------------------------------------------------------------------
+
+test('review: logs never carry a full phone number', async () => {
+  const { maskPhone, redactPhones } = await import('../src/utils/format.js');
+  assert.equal(maskPhone('+212600000041'), '+212***41');
+  assert.equal(maskPhone(''), '');
+  assert.equal(redactPhones('{"jid":"+212600000041","msgId":7}'), '{"jid":"+212***41","msgId":7}');
+  assert.equal(redactPhones('no numbers here 12345'), 'no numbers here 12345');
+});
+
+test('review: a WaSender request with no answer is ambiguous, and the reservation is kept', async () => {
+  const { WasenderClient, WasenderSendError } = await import('../src/services/wasender-client.js');
+  const logs = [];
+  const client = new WasenderClient({
+    baseUrl: 'https://wasender.example/api', apiToken: 't', minIntervalMs: 0, timeoutMs: 20,
+    fetchImpl: (_url, init) => new Promise((_resolve, reject) => { init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'TimeoutError' }))); }),
+    logger: { log() {}, warn: (m) => logs.push(m), error() {} }
+  });
+  await assert.rejects(client.sendMessage({ to: '+212600000041', message: 'x' }), (error) => error instanceof WasenderSendError && error.ambiguous === true);
+  assert.ok(logs.some((line) => line.includes('no answer')) && !logs.join(' ').includes('+212600000041'), 'the number is masked in the log');
+
+  // the confirmation flow must not release the reservation after an ambiguous failure (it may have been sent)
+  const now = at('2026-11-15T09:30:00Z');
+  const { service, metaWrites } = makeService({ quietHours: QUIET, clock: () => now });
+  service.wasenderClient.sendMessage = async () => { throw new WasenderSendError({ status: 0, data: {}, message: 'timeout', ambiguous: true }); };
+  const outcome = await service.sendLogicalMessageWithWooReservation({
+    orderPayload: WOO_ORDER, orderId: '501', phone: '+212600000041', logicalKey: 'customer:hd_shipped', kind: 'hd_shipped', message: 'x', now
+  });
+  assert.equal(outcome.ambiguous, true);
+  const cleared = metaWrites.flat().some((row) => String(row.key).endsWith('hd_shipped_state') && row.value === '');
+  assert.equal(cleared, false, 'the reservation is not cleared after an ambiguous failure');
 });

@@ -1,6 +1,6 @@
 import { HighDeliveryError } from './highdelivery-client.js';
 import { isConfirmedWooStatus } from '../utils/hd-status.js';
-import { formatOrderTotal, interpolateTemplate, summarizeOrderItems } from '../utils/format.js';
+import { formatOrderTotal, interpolateTemplate, maskPhone, summarizeOrderItems } from '../utils/format.js';
 import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
 
 // Woo order meta written by the auto-send. The state doubles as the "never send twice" guard.
@@ -360,7 +360,7 @@ export class HdAutoSendService {
           text: message
         });
       } catch (error) {
-        this.logger.warn(`[hd-auto-send] could not notify ${phone} about order ${orderId}: ${error.message}`);
+        this.logger.warn(`[hd-auto-send] could not notify ${maskPhone(phone)} about order ${orderId}: ${error.message}`);
       }
     }
     return sentTo;
