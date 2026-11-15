@@ -279,6 +279,7 @@ export class StockSyncService {
       await this.compute(outcome);
       this.decide(outcome, { writesAllowed, approveHash });
       if (outcome.apply) {
+        await this.recheckBeforeWriting(outcome);
         await this.applyWrites(outcome);
       }
     } catch (error) {
@@ -305,6 +306,7 @@ export class StockSyncService {
     const products = this.linkIndex.products();
     outcome.productsById = new Map(products.map(({ product }) => [product.id, product]));
     const warehouse = await this.step('hd_unavailable', () => this.hdClient.listWarehouseProducts());
+    outcome.warehouse = warehouse;
     const reservations = await this.readReservations(warehouse, outcome);
     const variationsByProduct = await this.readVariations(products, outcome);
     outcome.plan = computeStockPlan({ products, variationsByProduct, warehouse, reservations });
@@ -382,6 +384,22 @@ export class StockSyncService {
       outcome.apply = true;
       outcome.aborted = '';
       outcome.abortDetail = '';
+    }
+  }
+
+  // The run can take a while: just before the first write, look again at the pause switch and at the open orders.
+  // Someone pausing the sync, or a new order taking a planned item, cancels this run (the next one starts fresh).
+  async recheckBeforeWriting(outcome) {
+    const mode = describeMode(this.config.mode, await this.syncControl.read());
+    this.lastMode = mode;
+    outcome.mode = mode;
+    if (mode.effective !== 'live') {
+      throw new SyncAbort('mode_changed', 'the sync was paused, or its control record became unreadable, while the run was going');
+    }
+    const reservations = await this.readReservations(outcome.warehouse, outcome);
+    const grown = writesOf(outcome.plan).find((row) => !row.hold && (reservations.get(row.hdId) || 0) > row.reserved);
+    if (grown) {
+      throw new SyncAbort('orders_changed', `new open orders took HighDelivery item ${grown.hdId} while the run was going`);
     }
   }
 

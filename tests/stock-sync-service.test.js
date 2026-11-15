@@ -314,3 +314,68 @@ test('a reserve status the shop rejects stops the run (its orders would be missi
   const fine = await makeService(standardShop({ failOn: { rejectedStatuses: ['confirmed'] } }), { config: { reserveStatuses: ['processing', 'on-hold'] } }).run({ dryRun: true });
   assert.deepEqual([fine.summary.aborted, fine.summary.skippedStatuses], ['', []]);
 });
+
+// Lets a test change the shop after the run has started reading it.
+function afterFirstProductRead(shop, change) {
+  const original = shop.wooClient.listAllProducts;
+  shop.wooClient.listAllProducts = async () => {
+    const products = await original();
+    change();
+    return products;
+  };
+}
+
+test('a pause set while the run is going cancels it before the first write', async () => {
+  const shop = standardShop();
+  afterFirstProductRead(shop, () => {
+    shop.products[0].meta_data.find((meta) => meta.key === LINK_META.control).value = JSON.stringify({ schema: 1, rev: 2, paused: true, ignored_hd_ids: [] });
+  });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, 'mode_changed');
+  assert.equal(result.mode.paused, true);
+  assert.equal(shop.stockWrites().length, 0);
+});
+
+test('a control record that becomes unreadable while the run is going also cancels it', async () => {
+  const shop = standardShop();
+  afterFirstProductRead(shop, () => { shop.products[0].meta_data.find((meta) => meta.key === LINK_META.control).value = '{broken'; });
+  const result = await makeService(shop).run();
+  assert.equal(result.summary.aborted, 'mode_changed');
+  assert.equal(shop.stockWrites().length, 0);
+});
+
+test('a new order that takes a planned item while the run is going cancels it; an unrelated one does not', async () => {
+  const lateOrder = (productId, variationId) => ({ id: 9, status: 'processing', line_items: [{ name: 'x', quantity: 1, product_id: productId, variation_id: variationId }], meta_data: [] });
+  for (const [late, aborted, writes] of [[lateOrder(8974, 8978), 'orders_changed', 0], [lateOrder(8980, 0), 'orders_changed', 0], [lateOrder(4242, 0), '', 2]]) {
+    const shop = standardShop();
+    shop.products.push(simpleProduct(8990, 24, { stock: 0, name: 'Second cap' }));
+    const original = shop.wooClient.listOpenOrdersLite;
+    let reads = 0;
+    shop.wooClient.listOpenOrdersLite = async (...args) => {
+      const answer = await original(...args);
+      reads += 1;
+      return reads === 1 ? answer : { ...answer, orders: [...answer.orders, late] };
+    };
+    const result = await makeService(shop).run();
+    assert.equal(result.summary.aborted, aborted, JSON.stringify(late.line_items));
+    assert.equal(shop.stockWrites().length, writes);
+  }
+});
+
+test('an order that is held (hold unit) and sent after the plan does not cancel the run', async () => {
+  const shop = standardShop();
+  const original = shop.wooClient.listOpenOrdersLite;
+  let reads = 0;
+  shop.wooClient.listOpenOrdersLite = async (...args) => {
+    const answer = await original(...args);
+    reads += 1;
+    return reads === 1 ? answer : { ...answer, orders: [{ id: 9, status: 'processing', line_items: [{ name: 'x', quantity: 1, product_id: 8974, variation_id: 8975 }], meta_data: [] }] };
+  };
+  assert.equal((await makeService(shop).run()).summary.aborted, '');
+});
+
+test('a dry run does not look again: it writes nothing anyway', async () => {
+  const shop = standardShop();
+  await makeService(shop).run({ dryRun: true });
+  assert.equal(shop.calls.orders, 1);
+});
