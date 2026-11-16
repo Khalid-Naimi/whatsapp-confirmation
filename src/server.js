@@ -140,7 +140,7 @@ const hdStatusSyncService = new HdStatusSyncService({
   wooStatuses: config.wooStatuses,
   logger
 });
-logger.log(`HighDelivery status sync is ${config.highDelivery.statusSyncEnabled ? 'ON' : 'OFF'}; quiet hours ${config.messages.quietHours.enabled ? `${config.messages.quietHours.startHour}:00-${config.messages.quietHours.endHour}:00 ${config.messages.quietHours.timeZone}` : 'OFF'}.`);
+logger.log(`HighDelivery status sync is ${config.highDelivery.statusSyncEnabled ? 'ON' : 'OFF'}; quiet hours ${config.messages.quietHours.enabled ? `${config.messages.quietHours.startHour}:00-${config.messages.quietHours.endHour}:00 (weekends ${config.messages.quietHours.weekendEndHour}:00) ${config.messages.quietHours.timeZone}` : 'OFF'}.`);
 
 const stockAlertService = new StockAlertService({
   store,

@@ -26,12 +26,30 @@ test('quiet hours: 22:00 to 10:00 shop time, edges included/excluded', () => {
 test('quiet hours: off when disabled or unset, and env parsing', () => {
   assert.equal(isQuietHours(at('2026-11-14T23:00:00Z'), null), false);
   assert.equal(isQuietHours(at('2026-11-14T23:00:00Z'), { ...QUIET, enabled: false }), false);
-  assert.deepEqual(parseQuietHoursEnv({}), QUIET);
-  assert.deepEqual(parseQuietHoursEnv({ QUIET_HOURS_START: '23', QUIET_HOURS_END: '9', QUIET_HOURS_TIMEZONE: 'UTC' }), {
-    enabled: true, startHour: 23, endHour: 9, timeZone: 'UTC'
+  assert.deepEqual(parseQuietHoursEnv({}), { enabled: true, startHour: 23, endHour: 9, weekendEndHour: 10, timeZone: 'Africa/Casablanca' });
+  assert.deepEqual(parseQuietHoursEnv({ QUIET_HOURS_START: '22', QUIET_HOURS_END: '10', QUIET_HOURS_WEEKEND_END: '11', QUIET_HOURS_TIMEZONE: 'UTC' }), {
+    enabled: true, startHour: 22, endHour: 10, weekendEndHour: 11, timeZone: 'UTC'
   });
   assert.equal(parseQuietHoursEnv({ QUIET_HOURS_ENABLED: 'no' }).enabled, false);
-  assert.equal(parseQuietHoursEnv({ QUIET_HOURS_START: 'abc' }).startHour, 22);
+  assert.equal(parseQuietHoursEnv({ QUIET_HOURS_START: 'abc' }).startHour, 23);
+});
+
+// Default window: 23:00 to 09:00, and to 10:00 on Saturday and Sunday mornings (shop time, UTC+1 in November).
+const DEFAULT_QUIET = parseQuietHoursEnv({});
+test('quiet hours: 23:00 to 09:00 on weekdays, to 10:00 on Saturday and Sunday mornings', () => {
+  // Mon 16 Nov 2026
+  assert.equal(isQuietHours(at('2026-11-16T21:59:00Z'), DEFAULT_QUIET), false, 'Mon 22:59 local');
+  assert.equal(isQuietHours(at('2026-11-16T22:00:00Z'), DEFAULT_QUIET), true, 'Mon 23:00 local');
+  assert.equal(isQuietHours(at('2026-11-17T07:59:00Z'), DEFAULT_QUIET), true, 'Tue 08:59 local');
+  assert.equal(isQuietHours(at('2026-11-17T08:00:00Z'), DEFAULT_QUIET), false, 'Tue 09:00 local');
+  // Sat 14 Nov and Sun 15 Nov 2026: the morning lasts until 10:00
+  assert.equal(isQuietHours(at('2026-11-14T08:30:00Z'), DEFAULT_QUIET), true, 'Sat 09:30 local');
+  assert.equal(isQuietHours(at('2026-11-14T09:00:00Z'), DEFAULT_QUIET), false, 'Sat 10:00 local');
+  assert.equal(isQuietHours(at('2026-11-15T08:30:00Z'), DEFAULT_QUIET), true, 'Sun 09:30 local');
+  assert.equal(isQuietHours(at('2026-11-15T09:00:00Z'), DEFAULT_QUIET), false, 'Sun 10:00 local');
+  // Monday morning after the weekend is back to 09:00
+  assert.equal(isQuietHours(at('2026-11-16T08:00:00Z'), DEFAULT_QUIET), false, 'Mon 09:00 local');
+  assert.equal(isQuietHours(at('2026-11-15T22:30:00Z'), DEFAULT_QUIET), true, 'Sun 23:30 local');
 });
 
 test('HighDelivery status to Woo status: only end states, only forward', () => {

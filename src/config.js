@@ -85,6 +85,7 @@ export const ENV_TABLE = Object.freeze([
   { name: 'QUIET_HOURS_ENABLED', type: 'bool' },
   { name: 'QUIET_HOURS_START', type: 'hour' },
   { name: 'QUIET_HOURS_END', type: 'hour' },
+  { name: 'QUIET_HOURS_WEEKEND_END', type: 'hour' },
   { name: 'QUIET_HOURS_TIMEZONE', type: 'timezone' },
   { name: 'CONFIG_STRICT', type: 'bool' }
 ]);
@@ -303,7 +304,7 @@ export function loadConfig(env = process.env) {
         'ERREUR High Delivery.\nNumero: {{orderId}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nProbleme: {{problem}}',
       stockAlertTemplate: env.STOCK_ALERT_MESSAGE_TEMPLATE || '',
       dropAlertTemplate: env.DROP_ALERT_MESSAGE_TEMPLATE || '',
-      // No customer message between startHour and endHour in the shop's time zone (default 22:00 to 10:00, Morocco).
+      // No customer message between startHour and endHour in the shop's time zone (default 23:00 to 09:00, Morocco; 10:00 on Saturday and Sunday mornings).
       quietHours: parseQuietHoursEnv(env),
       shippedMessage: env.HD_SHIPPED_MESSAGE ||
         'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) tkhrjat mn 3endna. Ghadi twsl lik f {{deliveryEta}}. Chokran.',

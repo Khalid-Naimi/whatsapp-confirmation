@@ -243,7 +243,7 @@ export function buildHealthDetails({ store, tracker, config, stockSyncService = 
     server: {
       startedAt: tracker.startedAt,
       version: String(process.env.RENDER_GIT_COMMIT || '').slice(0, 7),
-      quietHours: { enabled: quiet.enabled !== false, startHour: quiet.startHour, endHour: quiet.endHour, timeZone },
+      quietHours: { enabled: quiet.enabled !== false, startHour: quiet.startHour, endHour: quiet.endHour, weekendEndHour: quiet.weekendEndHour, timeZone },
       quietNow: isQuietHours(now, quiet),
       statusSyncEnabled: Boolean(config.highDelivery?.statusSyncEnabled),
       autoSendEnabled: Boolean(config.highDelivery?.autoSendEnabled),
