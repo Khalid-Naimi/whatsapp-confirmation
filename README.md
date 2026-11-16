@@ -111,7 +111,7 @@ When `HD_AUTO_SEND_ENABLED=true`, an order the customer confirms (reply `1` or t
 
 The desktop Matching page writes one JSON document per WooCommerce product into the product meta `rhymat_hd_link` (links to HighDelivery items by id, plus `offset`, `max_online`, `hold`, `sync` and `writer` per size). The server only reads it. Rules and fixture: `src/services/product-links.js`, `tests/fixtures/link-doc.json`.
 
-**Order routing** (`HD_LINKS_FOR_ORDERS`): `off` (default) matches order lines to HighDelivery items by name through the CSV, exactly as before. `shadow` still routes by name but also computes the link result and logs `[hd-links] shadow orderId=<id> same=<bool> csv=<ids> link=<ids>` (ids only). `on` routes by the links; a product without a link still goes through the CSV; a hold unit, a missing item or an unreadable document holds the order. Compare on real orders without sending anything: `npm run compare:links [count]`.
+**Order routing** (`HD_LINKS_FOR_ORDERS`): `on` (the default since 16 November 2026: Military Cargo, Sweat and Cap have no CSV rows and failed with HTTP 400 on `off`) routes by the links; a product without a link still goes through the CSV; a hold unit, a missing item or an unreadable document holds the order. `off` matches order lines to HighDelivery items by name through the CSV only. `shadow` still routes by name but also computes the link result and logs `[hd-links] shadow orderId=<id> same=<bool> csv=<ids> link=<ids>` (ids only). Compare on real orders without sending anything: `npm run compare:links [count]`.
 
 **Stock sync** (runs inside `POST /tasks/order-followups`, after the HighDelivery status sync): for every unit with `writer: "server"` and `sync: true` it writes `max(0, HD quantity - reserved - offset)`, capped by `max_online`, 0 on `hold`. Reserved = units in open orders (`STOCK_SYNC_RESERVE_STATUSES`, made in the last `STOCK_SYNC_RESERVE_DAYS`) not yet at HighDelivery (state `sent`); `sending` and `unknown` count as reserved. Writes are absolute values and only for units that differ. Every write also sets `manage_stock: true` and `backorders: "no"`. The run summary shows `oldOrdersReserving`: open orders older than 30 days that still reserve stock (worth a look; past `STOCK_SYNC_RESERVE_DAYS` they stop reserving).
 
@@ -144,7 +144,7 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
 | `STOCK_SYNC_RESERVE_STATUSES` | `processing,on-hold` | open-order statuses that reserve stock (the `WOO_STATUS_CONFIRMED` status is always added); add `confirmed` only once the shop knows that status |
 | `STOCK_SYNC_RESERVE_DAYS` | `60` | open orders made longer ago than this no longer reserve stock |
 | `STOCK_SYNC_WRITE_DELAY_MS` | `300` | pause between product writes |
-| `HD_LINKS_FOR_ORDERS` | `off` | `off`, `shadow` or `on` (see above) |
+| `HD_LINKS_FOR_ORDERS` | `on` | `off`, `shadow` or `on` (see above) |
 | `MATCHING_ALERTS_ENABLED` | `false` | one WhatsApp digest to the team when a new product or HighDelivery item has no link (product names only; again after 7 days if still unlinked) |
 
 ## Notes

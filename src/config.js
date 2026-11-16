@@ -244,9 +244,9 @@ export function loadConfig(env = process.env) {
       // Off unless HD_STATUS_SYNC_ENABLED is set: parcel statuses are copied to the Woo orders and customers get
       // the "shipped" / "arriving" messages.
       statusSyncEnabled: parseBooleanEnv(env.HD_STATUS_SYNC_ENABLED, false),
-      // How order lines are matched to warehouse items: off = by name through the CSV (today), shadow = still by name
+      // How order lines are matched to warehouse items: off = by name through the CSV, shadow = still by name
       // but also by the product links, differences are logged, on = by the product links (the CSV stays the fallback).
-      linksMode: parseChoiceEnv(env.HD_LINKS_FOR_ORDERS, ['off', 'shadow', 'on'], 'off')
+      linksMode: parseChoiceEnv(env.HD_LINKS_FOR_ORDERS, ['off', 'shadow', 'on'], 'on')
     },
     // The hourly stock sync (see services/stock-sync-service.js). off = nothing runs, dry_run = it computes and reports
     // but never writes, live = it also writes the online stock. Live additionally needs the pause switch in WooCommerce off.

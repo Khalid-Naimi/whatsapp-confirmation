@@ -21,7 +21,7 @@ test('with nothing set, everything new is off and the limits are the safe defaul
       mode: 'off', maxChangedUnits: 10, maxTotalDelta: 40, maxRestocks: 5, maxSingleIncrease: 20, minHdItems: 5,
       reserveStatuses: ['processing', 'on-hold'], reserveDays: 60, writeDelayMs: 300
     });
-    assert.equal(config.highDelivery.linksMode, 'off');
+    assert.equal(config.highDelivery.linksMode, 'on');
     assert.equal(config.matchingAlertsEnabled, false);
   });
 });
@@ -50,6 +50,6 @@ test('values are read, and an unknown mode or a bad number falls back to the saf
     assert.equal(config.stockSync.mode, 'off');
     assert.equal(config.stockSync.maxTotalDelta, 40);
     assert.equal(config.stockSync.minHdItems, 5);
-    assert.equal(config.highDelivery.linksMode, 'off');
+    assert.equal(config.highDelivery.linksMode, 'on');
   });
 });
