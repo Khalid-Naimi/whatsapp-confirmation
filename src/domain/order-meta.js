@@ -197,7 +197,7 @@ function outboundRows() {
   return result;
 }
 
-const DESKTOP_ALSO_WRITES = [HD_META.claim, HD_META.state, HD_META.sentAt];
+const DESKTOP_ALSO_WRITES = [HD_META.claim, HD_META.state, HD_META.sentAt, HD_META.sendingAt];
 
 function buildRegistry() {
   const all = [

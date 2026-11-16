@@ -282,3 +282,58 @@ test('an order the desktop app sent (state sent or unknown, desktop claim) is ne
     assert.ok(!writes.some((row) => [HD_META.state, HD_META.claim, HD_META.retryAt].includes(row.key)), state);
   }
 });
+
+// The desktop app writes state='sending', sendingAt and its own claim right before it creates a parcel itself.
+function desktopSending(id, minutesAgo) {
+  const at = new Date(Date.now() - minutesAgo * 60 * 1000).toISOString();
+  return order(id, {
+    status: 'on-hold',
+    meta_data: [
+      { key: HD_META.state, value: 'sending' },
+      { key: HD_META.sendingAt, value: at },
+      { key: HD_META.claim, value: JSON.stringify({ state: 'sending', claimId: 'desktop-def456', at }) }
+    ]
+  });
+}
+
+function hdWithAlerts(woo, created) {
+  const alerts = [];
+  const notes = [];
+  const hd = hdInstance(woo, created, 'srv');
+  hd.notifyPhones = ['+212700000001'];
+  hd.errorTemplate = 'ERR {{orderId}} {{problem}}';
+  hd.manualTemplate = 'MAN {{orderId}}';
+  hd.wasenderClient = { async sendMessage(payload) { alerts.push(payload); return {}; } };
+  const addNote = woo.addOrderNote;
+  woo.addOrderNote = async (id, note) => { notes.push(note); return addNote(id, note); };
+  return { hd, alerts, notes };
+}
+
+test('a desktop "sending" older than 10 minutes becomes "unknown" with a note and one alert, like the server\'s own', async () => {
+  const { woo, metaOf } = sharedWoo([desktopSending(620, 15)]);
+  const { hd, alerts, notes } = hdWithAlerts(woo, []);
+  assert.equal(await hd.reviewStuckSend(await woo.getOrder(620)), true);
+  assert.equal(metaOf(620, HD_META.state), 'unknown');
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], /stopped half way/u);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].message, /ERR 620/u);
+  // The next hour sees "unknown": nothing again.
+  assert.equal(await hd.reviewStuckSend(await woo.getOrder(620)), false);
+  assert.equal(alerts.length, 1);
+});
+
+test('a fresh desktop "sending" (under 10 minutes) is left alone, and the server\'s auto-send skips it without an alert', async () => {
+  const { woo, metaOf, writes } = sharedWoo([desktopSending(621, 2)]);
+  const created = [];
+  const { hd, alerts, notes } = hdWithAlerts(woo, created);
+  assert.equal(await hd.reviewStuckSend(await woo.getOrder(621)), false);
+  const outcome = await hd.autoSend({ orderId: '621' });
+  assert.equal(outcome.status, 'skipped');
+  assert.ok(['already_sending', 'claimed_elsewhere'].includes(outcome.reason), outcome.reason);
+  assert.equal(created.length, 0);
+  assert.equal(alerts.length, 0);
+  assert.equal(notes.length, 0);
+  assert.equal(metaOf(621, HD_META.state), 'sending');
+  assert.equal(writes.length, 0);
+});

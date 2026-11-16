@@ -536,7 +536,10 @@
       "key": "rhymat_hd_api_sending_at",
       "entity": "order",
       "owner": "server",
-      "group": "highdelivery auto-send"
+      "group": "highdelivery auto-send",
+      "alsoWrittenBy": [
+        "desktop"
+      ]
     },
     {
       "key": "rhymat_hd_api_retry_at",
