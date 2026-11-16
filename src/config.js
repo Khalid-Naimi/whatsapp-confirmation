@@ -271,19 +271,20 @@ export function loadConfig(env = process.env) {
     // A WhatsApp digest to the team phones when a new product has no HighDelivery link yet.
     matchingAlertsEnabled: parseBooleanEnv(env.MATCHING_ALERTS_ENABLED, false),
     alertEmailTo: (env.ALERT_EMAIL_TO || '').trim(),
-    messages: {
+    messages: withAutomaticNotices({
       // The number customers are told to write to with a question (SHOP_CONTACT_PHONE, shown as written).
       shopContactPhone,
       internalNotifyPhones: parsePhoneList(env.INTERNAL_NOTIFY_PHONES || ''),
       confirmationDelayMs: Number(env.CONFIRMATION_DELAY_SECONDS ?? 30) * 1000,
       confirmationPollEnabled: parseBooleanEnv(env.CONFIRMATION_POLL_ENABLED, false),
       confirmationPollQuestion: env.CONFIRMATION_POLL_QUESTION || 'Confirmer votre commande ?',
-      confirmationTemplate: env.CONFIRMATION_MESSAGE_TEMPLATE || withShopContact(
-        'Salam {{customerName}}, twsselna b la commande dyalk.\nNumero dyal La commande: {{orderId}}\nLa commande dyalk: {{orderItemsSummary}}\nPrix total: {{orderTotal}}\nLadresse: {{deliveryAddress}}\nLmdina: {{deliveryCity}}\nTawsil: {{deliveryEta}}\nFach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la command, Lkhlas 3nd l-istilam.\n\n-Ila mtaf9 m3a had chi kaml, wbghiti tconfirmer la commande jawb b "1". \n-Ila ma bqitich bghiti la commande, jawb b "2".', '\n-', shopContactPhone),
-      invalidReply: env.INVALID_REPLY_MESSAGE || withShopContact(
-        '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.', '\n\n', shopContactPhone),
-      reminderMessage: env.REMINDER_MESSAGE || withShopContact(
-        'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.', '\n\n', shopContactPhone),
+      // Every customer WhatsApp message ends with the "this is automatic, write to this number" line (applied once at
+      // the end of this block, also to templates set in the environment, never twice).
+      confirmationTemplate: env.CONFIRMATION_MESSAGE_TEMPLATE || CONFIRMATION_TEMPLATE,
+      invalidReply: env.INVALID_REPLY_MESSAGE ||
+        '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.',
+      reminderMessage: env.REMINDER_MESSAGE ||
+        'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.',
       confirmedReply: env.CONFIRMED_REPLY_MESSAGE ||
         'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
       cancelledReply: env.CANCELLED_REPLY_MESSAGE ||
@@ -307,13 +308,13 @@ export function loadConfig(env = process.env) {
       // No customer message between startHour and endHour in the shop's time zone (default 23:00 to 09:00, Morocco; 10:00 on Saturday and Sunday mornings).
       quietHours: parseQuietHoursEnv(env),
       shippedMessage: env.HD_SHIPPED_MESSAGE ||
-        'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) tkhrjat mn 3endna. Ghadi twsl lik f {{deliveryEta}}. Chokran.',
+        'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) khrjat mn 3endna. Ghadi twsl lik f {{deliveryEta}}. Chokran.',
       outForDeliveryMessage: env.HD_ARRIVING_MESSAGE ||
-        'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) lyoum m3a livreur. Ghadi ytsel bik, 3afak khelli telephone dyalk m7loul.',
+        'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) wesslat lyoum {{deliveryCity}}, livreur ghadi ytassel bik, 3afak dir balek m3a telephone, itoub.',
       deliveryEtaCasablanca: env.DELIVERY_ETA_CASABLANCA || '24h',
       deliveryEtaOtherCities: env.DELIVERY_ETA_OTHER_CITIES || '2 a 3 jours ouvrables',
       defaultCityLabel: env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'
-    }
+    }, shopContactPhone)
   };
 }
 
@@ -353,8 +354,42 @@ function parsePhoneList(value) {
 
 // The "write to this number with a question" sentence of the default customer texts. Without SHOP_CONTACT_PHONE
 // (possible only with CONFIG_STRICT=0) the sentence is left out instead of ending on an empty number.
-function withShopContact(text, separator, shopContactPhone) {
-  return shopContactPhone ? `${text}${separator}Ila 3endek chi question, seft la question dyalk l had numero: ${shopContactPhone}` : text;
+const AUTOMATIC_NOTICE = 'Hada message automatique, ila 3endek chi question, seft la question dyalk l had numero:';
+
+const CONFIRMATION_TEMPLATE = [
+  'Salam {{customerName}}, twsselna b la commande dyalk.',
+  'Numero dyal La commande: {{orderId}}',
+  'La commande dyalk: {{orderItemsSummary}}',
+  'Prix total: {{orderTotal}}',
+  'Lmdina: {{deliveryCity}}',
+  "L'adresse: {{deliveryAddress}}",
+  'Livraison: {{deliveryEta}}',
+  'Fach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la commande, Lkhlas 3nd l-istilam.',
+  '- Bach t confirmer la commande dyalk, jawb b "1".\n- Bach t annuler la commande dyalk, jawb b "2".'
+].join('\n\n');
+
+// The "automatic message, write to this number" line, added once at the end of a customer message. A text that
+// already has it (for example one set in the environment) is left as it is. Without a shop phone nothing is added.
+export function withAutomaticNotice(text, shopContactPhone) {
+  const message = String(text ?? '');
+  if (!message.trim() || !shopContactPhone || /hada message automatique/iu.test(message)) {
+    return message;
+  }
+  return `${message.replace(/\s+$/u, '')}\n\n${AUTOMATIC_NOTICE} ${shopContactPhone}`;
+}
+
+// Every customer WhatsApp text of the confirmation service ends with that line (the stock and drop alerts too, once set).
+const CUSTOMER_MESSAGE_KEYS = [
+  'confirmationTemplate', 'invalidReply', 'reminderMessage', 'confirmedReply', 'cancelledReply',
+  'shippedMessage', 'outForDeliveryMessage', 'stockAlertTemplate', 'dropAlertTemplate'
+];
+
+function withAutomaticNotices(messages, shopContactPhone) {
+  const result = { ...messages };
+  for (const key of CUSTOMER_MESSAGE_KEYS) {
+    result[key] = withAutomaticNotice(result[key], shopContactPhone);
+  }
+  return result;
 }
 
 // An unknown value falls back to the safe default instead of switching something on by accident.

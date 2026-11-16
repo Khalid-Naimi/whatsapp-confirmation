@@ -77,10 +77,29 @@ test('loadConfig carries the problems, has no built-in personal numbers and puts
   const config = loadConfig(GOOD);
   assert.deepEqual(config.errors, []);
   assert.deepEqual(config.messages.internalNotifyPhones, ['+212600000001', '+212600000002']);
-  for (const key of ['confirmationTemplate', 'invalidReply', 'reminderMessage']) {
+  for (const key of ['confirmationTemplate', 'invalidReply', 'reminderMessage', 'confirmedReply', 'cancelledReply', 'shippedMessage', 'outForDeliveryMessage']) {
     assert.ok(config.messages[key].endsWith('numero: +212 600-000003'), key);
+    assert.equal(config.messages[key].match(/Hada message automatique/giu).length, 1, key);   // once, never twice
   }
-  assert.equal(loadConfig({ ...GOOD, REMINDER_MESSAGE: 'own text' }).messages.reminderMessage, 'own text');
+});
+
+test('every customer message says it is automatic, also texts set in the environment, but never twice', () => {
+  const own = loadConfig({ ...GOOD, REMINDER_MESSAGE: 'own text' }).messages.reminderMessage;
+  assert.equal(own, 'own text\n\nHada message automatique, ila 3endek chi question, seft la question dyalk l had numero: +212 600-000003');
+  const already = 'text\n- Hada message automatique, ila 3endek chi question, seft la question dyalk l had numero: +212 600-000003';
+  assert.equal(loadConfig({ ...GOOD, CONFIRMATION_MESSAGE_TEMPLATE: already }).messages.confirmationTemplate, already);
+  const alert = loadConfig({ ...GOOD, STOCK_ALERT_MESSAGE_TEMPLATE: 'back in stock' }).messages.stockAlertTemplate;
+  assert.ok(alert.startsWith('back in stock') && alert.endsWith('numero: +212 600-000003'));
+  assert.equal(loadConfig(GOOD).messages.stockAlertTemplate, '');            // an empty alert stays off
+});
+
+test('the delivery messages use the agreed wording', () => {
+  const { messages } = loadConfig(GOOD);
+  assert.match(messages.shippedMessage, /khrjat mn 3endna/u);
+  assert.doesNotMatch(messages.shippedMessage, /tkhrjat/u);
+  assert.match(messages.outForDeliveryMessage, /wesslat lyoum \{\{deliveryCity\}\}, livreur ghadi ytassel bik, 3afak dir balek m3a telephone, itoub\./u);
+  assert.match(messages.confirmationTemplate, /Livraison: \{\{deliveryEta\}\}/u);
+  assert.doesNotMatch(messages.confirmationTemplate, /Tawsil/u);
 });
 
 test('boot stops on errors unless CONFIG_STRICT=0, and logs every problem', () => {
