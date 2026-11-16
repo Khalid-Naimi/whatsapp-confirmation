@@ -334,6 +334,35 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         return sendJson(res, 200, { ok: true, ...result });
       }
 
+      // The website calls this when someone sends a video on rhymat.ma/video: the team gets one WhatsApp with a link to
+      // review it (the video plays there, one button approves or refuses). Same task secret as the other /tasks/*.
+      if (pathname === '/tasks/video-submitted') {
+        if (!checkTaskSecret(req, res, 'task][video-submitted')) {
+          return undefined;
+        }
+        const body = parseJsonBody(rawBody);
+        const id = Number(body?.id);
+        const username = String(body?.username || '');
+        const reviewUrl = String(body?.reviewUrl || '');
+        if (body === null || !Number.isInteger(id) || id <= 0 || !/^[A-Za-z0-9._]{2,24}$/u.test(username) || !/^https:\/\/(www\.)?rhymat\.ma\/\S+$/u.test(reviewUrl)) {
+          return sendJson(res, 400, { ok: false, error: 'Body must be {"id", "username", "reviewUrl" (https://rhymat.ma/...)}' });
+        }
+        if (!alerts) {
+          return sendJson(res, 503, { ok: false, error: 'Team alerts are not enabled' });
+        }
+        const isFile = String(body.type || '') === 'up';
+        const sizeMb = Number(body.sizeMb);
+        const what = isFile ? `Fichier${Number.isFinite(sizeMb) && sizeMb > 0 ? ` ${sizeMb < 10 ? sizeMb.toFixed(1) : Math.round(sizeMb)} MB` : ''}` : 'Lien TikTok';
+        const outcome = await alerts.alert({
+          key: `video-submitted:${id}`,
+          level: 'info',
+          windowMs: 24 * 60 * 60 * 1000,
+          text: `Rhymat: nouvelle video de @${username}\n${what}\nVoir et decider: ${reviewUrl}`
+        });
+        logger.log(`[task][video-submitted] id=${id} delivered=${String(outcome?.delivered)} via=${String(outcome?.via)}`);
+        return sendJson(res, 200, { ok: true, delivered: Boolean(outcome?.delivered), via: outcome?.via || 'none' });
+      }
+
       if (pathname === '/tasks/stock-alerts') {
         if (!checkTaskSecret(req, res, 'task][stock-alerts')) {
           return undefined;
