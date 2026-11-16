@@ -16,32 +16,10 @@ import {
 
 export const OUTBOUND_RESERVATION_STALE_MS = 2 * 60 * 60 * 1000;
 
-// An order placed within this time is still being placed by an awake customer, so its first confirmation is sent
-// even in the quiet hours.
-export const FRESH_ORDER_MAX_AGE_MS = 3 * 60 * 60 * 1000;
-
-function orderCreatedAtMs(orderPayload) {
-  const raw = orderPayload?.date_created_gmt || orderPayload?.dateCreatedGmt || '';
-  if (!raw) {
-    return NaN;
-  }
-  // WooCommerce writes GMT dates without a zone ("2026-11-15T23:48:09"); read them as UTC.
-  const text = String(raw);
-  return Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(text) ? text : `${text}Z`);
-}
-
-// True only for the confirmation request of an order created in the last FRESH_ORDER_MAX_AGE_MS. An order with no
-// readable date counts as fresh (the webhook path always has one; a missing date should not block a new customer).
-export function isFreshConfirmationRequest(logicalKey, orderPayload, now) {
-  if (logicalKey !== OUTBOUND_LOGICAL_KEYS.confirmationRequest) {
-    return false;
-  }
-  const createdMs = orderCreatedAtMs(orderPayload);
-  if (Number.isNaN(createdMs)) {
-    return true;
-  }
-  const age = now.getTime() - createdMs;
-  return age >= -5 * 60 * 1000 && age <= FRESH_ORDER_MAX_AGE_MS;
+// The first confirmation request of an order is never held for the quiet hours: the customer has just ordered, so they
+// are awake, and it is sent once per order. Reminders, stage messages and everything else still wait for the window.
+export function isFreshConfirmationRequest(logicalKey) {
+  return logicalKey === OUTBOUND_LOGICAL_KEYS.confirmationRequest;
 }
 
 export const AMBIGUOUS_CHECK_KEYS = [
@@ -168,9 +146,8 @@ export const reservedSendMethods = {
     }
 
     // Quiet hours: nothing is reserved and nothing is sent. The hourly task tries again after the window.
-    // Exception: the first confirmation of an order that was just placed. The customer is awake (they are ordering),
-    // so waiting until morning would only lose the confirmation. Older orders still wait for the window.
-    if (this.isQuietNow() && !isFreshConfirmationRequest(logicalKey, orderPayload, now)) {
+    // Exception: the first confirmation request is always sent at once (see isFreshConfirmationRequest).
+    if (this.isQuietNow() && !isFreshConfirmationRequest(logicalKey)) {
       this.logger.log(`[quiet-hours] deferred orderId=${orderId} logicalKey=${logicalKey}`);
       return { ok: true, duplicate: true, deferred: true, orderPayload };
     }
