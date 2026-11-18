@@ -53,6 +53,7 @@ export const ENV_TABLE = Object.freeze([
   { name: 'WOOCOMMERCE_CONSUMER_KEY', type: 'string', required: true },
   { name: 'WOOCOMMERCE_CONSUMER_SECRET', type: 'string', required: true },
   { name: 'WOOCOMMERCE_WEBHOOK_SECRET', type: 'string', required: true },
+  { name: 'WOOCOMMERCE_MAX_CONCURRENT', type: 'int' },
   { name: 'WOO_STATUS_CONFIRMED', type: 'slug' },
   { name: 'WOO_STATUS_DELIVERED', type: 'slug' },
   { name: 'WASENDER_BASE_URL', type: 'url' },
@@ -204,7 +205,9 @@ export function loadConfig(env = process.env) {
       baseUrl: env.WOOCOMMERCE_BASE_URL || '',
       consumerKey: env.WOOCOMMERCE_CONSUMER_KEY || '',
       consumerSecret: env.WOOCOMMERCE_CONSUMER_SECRET || '',
-      webhookSecret: env.WOOCOMMERCE_WEBHOOK_SECRET || ''
+      webhookSecret: env.WOOCOMMERCE_WEBHOOK_SECRET || '',
+      // At most this many WooCommerce calls at the same time (the rest wait their turn).
+      maxConcurrent: parseCountEnv(env.WOOCOMMERCE_MAX_CONCURRENT, 4) || 4
     },
     // The Woo status written on a customer's confirmation and on delivery. Keep the defaults until the
     // "Rhymat Order Statuses" plugin is active, then set WOO_STATUS_CONFIRMED=confirmed and WOO_STATUS_DELIVERED=delivered.

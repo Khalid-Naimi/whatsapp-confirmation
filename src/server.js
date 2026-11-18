@@ -51,6 +51,7 @@ const wooClient = new WooCommerceClient({
   baseUrl: config.woo.baseUrl,
   consumerKey: config.woo.consumerKey,
   consumerSecret: config.woo.consumerSecret,
+  maxConcurrent: config.woo.maxConcurrent,
   logger
 });
 

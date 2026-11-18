@@ -1,4 +1,5 @@
 import { HttpError, request as httpRequest } from '../http/request.js';
+import { Semaphore } from '../utils/semaphore.js';
 import { redact } from '../log.js';
 
 function buildAuthHeader(consumerKey, consumerSecret) {
@@ -15,7 +16,7 @@ const MAX_LIST_PAGES = 20;
 const MAX_BATCH_SIZE = 100;
 
 export class WooCommerceClient {
-  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, timeoutMs = 30000, logger = console, sleepImpl = sleep, randomImpl = Math.random }) {
+  constructor({ baseUrl, consumerKey, consumerSecret, fetchImpl = fetch, timeoutMs = 30000, logger = console, sleepImpl = sleep, randomImpl = Math.random, maxConcurrent = 4, maxQueueWaitMs = 60000 }) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
     this.consumerKey = consumerKey;
     this.consumerSecret = consumerSecret;
@@ -25,6 +26,9 @@ export class WooCommerceClient {
     this.logger = logger;
     this.sleep = sleepImpl;
     this.random = randomImpl;
+    // A drop can start hundreds of order handlers at once: only a few calls run at the same time, the rest wait (never
+    // more than a minute) so the shop's website stays fast for customers.
+    this.gate = new Semaphore({ limit: maxConcurrent, maxWaitMs: maxQueueWaitMs });
   }
 
   // `after` (ISO date) keeps only orders created since then. A status the shop does not know (for example the
@@ -204,7 +208,7 @@ export class WooCommerceClient {
     for (const authMode of authModes) {
       let reply;
       try {
-        reply = await httpRequest({
+        reply = await this.gate.run(() => httpRequest({
           method,
           url: buildRequestUrl({ baseUrl: this.baseUrl, path, consumerKey: this.consumerKey, consumerSecret: this.consumerSecret, authMode }),
           headers: buildHeaders({ authHeader: this.authHeader, authMode, hasBody: body !== undefined }),
@@ -218,7 +222,7 @@ export class WooCommerceClient {
           secrets: this.secrets(),
           label: 'WooCommerce request',
           onRetry: ({ nextAttempt, of, error }) => this.logger.warn(redact(`[woo] ${error.kind === 'http' ? `transient failure status=${error.status}` : `no answer (${error.kind})`} method=${method} path=${path} auth=${authMode}, retry ${nextAttempt} of ${of}`, { secrets: this.secrets() }))
-        });
+        }), `WooCommerce ${method} call`);
       } catch (error) {
         if (!(error instanceof HttpError) || error.kind !== 'http') {
           throw error;
