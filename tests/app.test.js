@@ -26,6 +26,7 @@ function createTestContext({ optOutKeywords = null, pollEnabled = false, failPol
   const wooOrderUpdates = [];
   const listedOrders = [];
   const logCalls = [];
+  const teamNotices = [];
 
   const logger = {
     log(message) {
@@ -136,6 +137,10 @@ function createTestContext({ optOutKeywords = null, pollEnabled = false, failPol
     wooClient,
     mailService,
     optOutKeywords,
+    notifyTeam: async (text) => {
+      teamNotices.push(text);
+      return 1;
+    },
     messages: {
       confirmationDelayMs,
       confirmationPollEnabled: pollEnabled,
@@ -182,6 +187,7 @@ function createTestContext({ optOutKeywords = null, pollEnabled = false, failPol
   return {
     app,
     store,
+    teamNotices,
     wasenderCalls,
     pollCalls,
     mailCalls,
@@ -1751,8 +1757,8 @@ test('reply recovers pending order from Woo after local cache loss and blocks fo
   assert.equal(restartedContext.wasenderCalls.length, 3);
 });
 
-test('Woo fallback requires manual follow-up when multiple pending orders share the same phone', async () => {
-  const { app, store, listedOrders, wooOrderUpdates } = createTestContext();
+test('with two open orders, the answer goes to the newest and the team is told about the older one', async () => {
+  const { app, store, listedOrders, wooOrderUpdates, teamNotices } = createTestContext();
 
   listedOrders.push(
     {
@@ -1815,11 +1821,12 @@ test('Woo fallback requires manual follow-up when multiple pending orders share 
   });
 
   assert.equal(replyResult.statusCode, 200);
-  assert.equal(replyResult.body.ignored, 1);
-  assert.equal(store.read().events.at(-1).status, 'manual_followup_required');
-  assert.equal(wooOrderUpdates.find((u) => u.fields.status), undefined);
-  assert.equal(store.getOrder('502')?.confirmationState, 'pending_confirmation');
+  assert.equal(store.getOrder('502')?.confirmationState, 'cancelled');
+  assert.equal(wooOrderUpdates.find((u) => u.fields.status)?.orderId, '502');
   assert.equal(store.getOrder('501')?.confirmationState, 'pending_confirmation');
+  assert.equal(teamNotices.length, 1);
+  assert.match(teamNotices[0], /#502/);
+  assert.match(teamNotices[0], /Still waiting: #501/);
 });
 
 test('audio reply with pending order is treated like invalid input', async () => {

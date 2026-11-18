@@ -33,6 +33,7 @@ import {
   buildWorkflowMetaUpdate,
   compareOrdersByRecency,
   getDecisionMeta,
+  getOrderDateValue,
   getFeedbackMeta,
   getOutboundReservationMeta,
   getWorkflowMeta,
@@ -551,23 +552,26 @@ export class ConfirmationService {
       { allowWooRecovery: options.allowWooRecovery !== false }
     );
     if (resolvedReplyContext.pendingOrders.length > 1) {
-      this.logger.warn(
-        `[confirmation] multiple pending orders require manual follow-up senderPhone=${maskPhone(message.senderPhone)} candidateOrderIds=${resolvedReplyContext.pendingOrders.map((order) => order.orderId).join(',')} messageKey=${message.messageKey}`
+      // The customer has several open orders and the answer does not say which: it applies to the newest one, and the team
+      // is told once about the older ones (a double order is the usual cause) so nobody is left unanswered or surprised.
+      const newestFirst = [...resolvedReplyContext.pendingOrders].sort(
+        (left, right) => getOrderDateValue(right.rawOrder || right) - getOrderDateValue(left.rawOrder || left)
+          || Number(right.orderId) - Number(left.orderId)
       );
-      this.appendInboundMessage({
-        message,
-        orderId: resolvedReplyContext.latestOrder?.orderId || null,
-        storedKind: message.kind === 'audio' ? 'customer_audio_reply' : 'customer_reply'
+      const newest = newestFirst[0];
+      const older = newestFirst.slice(1);
+      this.logger.log(
+        `[confirmation] several pending orders, reply goes to the newest senderPhone=${maskPhone(message.senderPhone)} orderId=${newest.orderId} olderOrderIds=${older.map((order) => order.orderId).join(',')} messageKey=${message.messageKey}`
+      );
+      const result = await this.processConfirmationInboundMessage(message, {
+        ...resolvedReplyContext,
+        pendingOrders: [newest],
+        pendingOrder: newest
       });
-      return {
-        ok: false,
-        ignored: true,
-        duplicate: false,
-        failed: false,
-        route: 'confirmation',
-        eventStatus: 'manual_followup_required',
-        reason: 'multiple_pending_orders'
-      };
+      if (result?.ok && !result.duplicate && !result.ignored) {
+        await this.tellTeamAboutOlderOpenOrders({ newest, older, message });
+      }
+      return result;
     }
 
     if (!resolvedReplyContext.pendingOrder) {
@@ -1134,6 +1138,22 @@ export class ConfirmationService {
         lastConfirmationMessageKey
       }
     });
+  }
+
+  async tellTeamAboutOlderOpenOrders({ newest, older, message }) {
+    if (typeof this.notifyTeam !== 'function' || !older.length) {
+      return;
+    }
+    const answer = parseDecisionReply(message.textBody) === '2' ? 'cancelled' : 'confirmed';
+    const list = older.map((order) => `#${order.orderId}`).join(', ');
+    try {
+      await this.notifyTeam(
+        `Same customer, ${older.length + 1} open orders. Their answer was applied to the newest, #${newest.orderId} (${answer}). `
+        + `Still waiting: ${list}. Check if ${older.length > 1 ? 'they are duplicates' : 'it is a duplicate'} and cancel by hand if so.`
+      );
+    } catch (error) {
+      this.logger.warn(`[confirmation] could not tell the team about older open orders orderId=${newest.orderId}: ${error.message}`);
+    }
   }
 
   async resolveReplyContext(phone, { allowWooRecovery = true } = {}) {
