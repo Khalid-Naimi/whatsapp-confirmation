@@ -103,7 +103,8 @@ export function isConfirmationAlreadyStarted(workflow, cachedOrder) {
 }
 
 export function resolveDeliveryEta(city, messages) {
-  return city === 'Casablanca'
+  // The checkout stores the city key 'casablanca' (lower case, it keys the Casablanca shipping zone): compare without case.
+  return String(city || '').trim().toLowerCase() === 'casablanca'
     ? messages.deliveryEtaCasablanca
     : messages.deliveryEtaOtherCities;
 }
