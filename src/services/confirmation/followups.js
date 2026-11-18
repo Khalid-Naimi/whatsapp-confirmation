@@ -35,6 +35,12 @@ import { hasAmbiguousCustomerOutboundState } from './outbound/reserved-send.js';
 
 export const BACKFILL_MAX_ORDER_AGE_MS = 72 * 60 * 60 * 1000;
 
+// Reminder 2 never goes out less than this after reminder 1, even when reminder 1 itself was late.
+export const MIN_GAP_BETWEEN_REMINDERS_MS = 20 * 60 * 60 * 1000;
+
+// A second order from the same phone placed within this time of an older still-open one is a double order.
+export const DOUBLE_ORDER_WINDOW_MS = 6 * 60 * 60 * 1000;
+
 export const FIRST_REMINDER_MS = 24 * 60 * 60 * 1000;
 
 export const SECOND_REMINDER_MS = 48 * 60 * 60 * 1000;
@@ -92,6 +98,66 @@ export function isOrderOlderThan(order, now, maxAgeMs) {
   return !Number.isNaN(createdAtMs) && (now.getTime() - createdAtMs) > maxAgeMs;
 }
 
+function orderCreatedMs(order) {
+  const raw = String(order?.date_created_gmt || '').trim();
+  if (!raw) {
+    return NaN;
+  }
+  return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/u.test(raw) ? raw : `${raw}Z`);
+}
+
+// The older orders of a double order: still waiting for an answer while the same phone placed a newer, not cancelled order
+// within a few hours. The customer's answer goes to the newest order, so the older one gets no reminder and no
+// auto-cancel message (they would contradict the answer); the team was told when the customer answered. If the newer
+// order is cancelled, the older one is no longer in this set and its reminders carry on as usual.
+export function findSupersededOrderIds(orders, messages) {
+  const byPhone = new Map();
+  for (const order of orders) {
+    const phone = normalizeWooOrder(order, messages).phone;
+    if (!phone) {
+      continue;
+    }
+    const list = byPhone.get(phone) || [];
+    list.push(order);
+    byPhone.set(phone, list);
+  }
+  const superseded = new Set();
+  for (const list of byPhone.values()) {
+    if (list.length < 2) {
+      continue;
+    }
+    for (const older of list) {
+      const olderDecision = getDecisionMeta(older);
+      if (getWorkflowMeta(older).state !== WORKFLOW_STATE.pending
+        || !ACTIVE_CONFIRMATION_STATUSES.includes(String(older.status || ''))
+        || olderDecision.decision
+        || olderDecision.manualOverride === 'yes') {
+        continue;
+      }
+      const olderMs = orderCreatedMs(older);
+      const hasNewer = list.some((newer) => {
+        if (newer === older || String(newer.status || '') === 'cancelled' || getWorkflowMeta(newer).state === WORKFLOW_STATE.cancelled) {
+          return false;
+        }
+        // The newer order must still be waiting, or be one the customer decided: an order the team handled by hand
+        // says nothing about the older one, which then goes on with its own reminders.
+        if (getWorkflowMeta(newer).state !== WORKFLOW_STATE.pending && !getDecisionMeta(newer).decision) {
+          return false;
+        }
+        const newerMs = orderCreatedMs(newer);
+        if (!Number.isNaN(olderMs) && !Number.isNaN(newerMs)) {
+          return newerMs > olderMs && (newerMs - olderMs) <= DOUBLE_ORDER_WINDOW_MS;
+        }
+        return Number(newer.id) > Number(older.id);
+      });
+      if (hasNewer) {
+        superseded.add(String(older.id));
+      }
+    }
+  }
+  return superseded;
+}
+
 export const followupMethods = {
   async runOrderFollowups({ now = new Date(), backfillOnly = false } = {}) {
     const summary = {
@@ -145,6 +211,8 @@ export const followupMethods = {
         this.logger.warn(`[task][order-followups] could not close a stale send orderId=${normalizedOrder.orderId}: ${error.message}`);
       }
     }
+
+    const supersededOrderIds = findSupersededOrderIds(orders, this.messages);
 
     for (const listedOrder of orders) {
       const orderId = String(listedOrder.id);
@@ -372,6 +440,18 @@ export const followupMethods = {
             return 'skipped';
           }
 
+          if (supersededOrderIds.has(orderId)) {
+            this.logFollowupDecision({
+              orderId,
+              orderStatus: order.status,
+              workflowState: workflow.state,
+              confirmationSentAt: workflow.confirmationSentAt,
+              reminderCount: workflow.reminderCount,
+              action: 'skip_superseded_by_newer_order'
+            });
+            return 'skipped';
+          }
+
           const confirmationSentAt = new Date(workflow.confirmationSentAt);
           if (Number.isNaN(confirmationSentAt.getTime())) {
             this.logFollowupDecision({
@@ -387,7 +467,10 @@ export const followupMethods = {
 
           const ageMs = now.getTime() - confirmationSentAt.getTime();
 
-          if (ageMs >= SECOND_REMINDER_MS && workflow.reminderCount === 1) {
+          const lastReminderMs = Date.parse(workflow.reminder1SentAt || workflow.lastReminderAt || '');
+          const reminderGapOk = Number.isNaN(lastReminderMs) || (now.getTime() - lastReminderMs) >= MIN_GAP_BETWEEN_REMINDERS_MS;
+
+          if (ageMs >= SECOND_REMINDER_MS && workflow.reminderCount === 1 && reminderGapOk) {
             this.logFollowupDecision({
               orderId,
               orderStatus: order.status,
@@ -444,10 +527,16 @@ export const followupMethods = {
                 ageMs: afterSecondReminderMs,
                 action: 'auto_cancel'
               });
+              if (this.isQuietNow()) {
+                // The cancel message cannot go out at night, so the order is not cancelled now either: the next run after the window does both.
+                this.logger.log(`[quiet-hours] auto-cancel waits for the morning orderId=${orderId}`);
+                return 'skipped';
+              }
               if (!await stillSame()) {
                 return 'skipped';
               }
               await this.autoCancelPendingOrder(order, now);
+              await this.cancelSupersededSiblings(order, orders, supersededOrderIds, now);
               return 'autoCancelled';
             }
           }
@@ -671,6 +760,65 @@ export const followupMethods = {
     }
 
     return sendOutcome.persisted === true;
+  },
+
+  // The customer never answered any of a double order: when the newest is auto-cancelled, its older twins (which got no
+  // reminders of their own) are cancelled with it, silently: one "cancelled" message was already sent for the newest.
+  async cancelSupersededSiblings(cancelledOrder, orders, supersededOrderIds, now, visited = new Set()) {
+    visited.add(String(cancelledOrder.id));
+    const phone = normalizeWooOrder(cancelledOrder, this.messages).phone;
+    const cancelledMs = orderCreatedMs(cancelledOrder);
+    for (const sibling of orders) {
+      const siblingId = String(sibling.id);
+      if (visited.has(siblingId) || !supersededOrderIds.has(siblingId)) {
+        continue;
+      }
+      const siblingMs = orderCreatedMs(sibling);
+      const isOlderTwin = !Number.isNaN(siblingMs) && !Number.isNaN(cancelledMs)
+        ? siblingMs < cancelledMs && (cancelledMs - siblingMs) <= DOUBLE_ORDER_WINDOW_MS
+        : Number(sibling.id) < Number(cancelledOrder.id);
+      if (!isOlderTwin || normalizeWooOrder(sibling, this.messages).phone !== phone) {
+        continue;
+      }
+      let cancelledNow = false;
+      try {
+        await this.withOrderLock(siblingId, async () => {
+          const fresh = typeof this.wooClient.getOrder === 'function' ? await this.wooClient.getOrder(siblingId) : sibling;
+          const freshDecision = getDecisionMeta(fresh);
+          if (getWorkflowMeta(fresh).state !== WORKFLOW_STATE.pending
+            || !ACTIVE_CONFIRMATION_STATUSES.includes(String(fresh?.status || ''))
+            || freshDecision.decision
+            || freshDecision.manualOverride === 'yes') {
+            return;
+          }
+          cancelledNow = true;
+          const nowIso = now.toISOString();
+          const statusUpdated = await this.wooClient.updateOrderStatus(siblingId, WOO_STATUS.cancelled);
+          await this.wooClient.updateOrderMeta(
+            siblingId,
+            mergeMetaUpdates(
+              buildWorkflowMetaUpdate(statusUpdated || fresh, { state: WORKFLOW_STATE.cancelled, cancelledAt: nowIso }),
+              buildDecisionMetaUpdate(statusUpdated || fresh, {
+                decision: DECISION.cancelled,
+                decisionAt: nowIso,
+                wooSyncStatus: WOO_SYNC_STATUS.synced,
+                wooSyncAttempts: 0,
+                lastSyncError: '',
+                customerReplySent: 'no'
+              })
+            )
+          );
+          await this.safeAddOrderNote(siblingId, `Cancelled with its newer double order #${cancelledOrder.id}, which the customer never answered (no message sent for this one).`);
+          this.logger.log(`[task][order-followups] older double order cancelled with its twin orderId=${siblingId} twin=${cancelledOrder.id}`);
+        });
+      } catch (error) {
+        this.logger.warn(`[task][order-followups] could not cancel older double order orderId=${siblingId}: ${error.message}`);
+      }
+      if (cancelledNow) {
+        // A chain of three double orders: the one just cancelled takes its own older twin with it.
+        await this.cancelSupersededSiblings(sibling, orders, supersededOrderIds, now, visited);
+      }
+    }
   },
 
   async autoCancelPendingOrder(orderPayload, now) {

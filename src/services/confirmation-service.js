@@ -50,6 +50,10 @@ import { WasenderSendError } from './wasender-client.js';
 
 const REPLY_RECOVERY_STATUSES = [...ACTIVE_CONFIRMATION_STATUSES];
 const MAX_WOO_SYNC_ATTEMPTS = 6;
+const REPLY_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+const REPLY_LOOKUP_MAX_PAGES = 10;
+// A second "1" typed right after the first one is the same answer, not an answer for the customer's other open order.
+const REPEAT_ANSWER_WINDOW_MS = 5 * 60 * 1000;
 const INBOUND_MESSAGE_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 // The Wasender webhook is answered after at most this long; the work goes on in the background.
 const DEFAULT_INBOUND_ACK_BUDGET_MS = 1000;
@@ -551,27 +555,40 @@ export class ConfirmationService {
       message.senderPhone,
       { allowWooRecovery: options.allowWooRecovery !== false }
     );
+    const typedAnswer = message.kind === 'audio' ? '' : parseDecisionReply(message.textBody);
+    const repeated = typedAnswer && resolvedReplyContext.pendingOrders.length > 0 && this.findRecentlyDecidedOrder(message.senderPhone, typedAnswer);
+    if (repeated) {
+      this.logger.log(`[confirmation] repeated answer ignored, the customer's other order was just decided orderId=${repeated.orderId} messageKey=${message.messageKey}`);
+      this.appendInboundMessage({ message, orderId: repeated.orderId, storedKind: 'customer_reply' });
+      return { ok: true, ignored: false, duplicate: true, failed: false, route: 'confirmation', eventStatus: 'duplicate_final_reply' };
+    }
     if (resolvedReplyContext.pendingOrders.length > 1) {
       // The customer has several open orders and the answer does not say which: it applies to the newest one, and the team
       // is told once about the older ones (a double order is the usual cause) so nobody is left unanswered or surprised.
-      const newestFirst = [...resolvedReplyContext.pendingOrders].sort(
-        (left, right) => getOrderDateValue(right.rawOrder || right) - getOrderDateValue(left.rawOrder || left)
-          || Number(right.orderId) - Number(left.orderId)
-      );
-      const newest = newestFirst[0];
-      const older = newestFirst.slice(1);
+      const newestFirst = [...resolvedReplyContext.pendingOrders].sort(compareNewestFirst);
       this.logger.log(
-        `[confirmation] several pending orders, reply goes to the newest senderPhone=${maskPhone(message.senderPhone)} orderId=${newest.orderId} olderOrderIds=${older.map((order) => order.orderId).join(',')} messageKey=${message.messageKey}`
+        `[confirmation] several pending orders, reply goes to the newest senderPhone=${maskPhone(message.senderPhone)} orderId=${newestFirst[0].orderId} olderOrderIds=${newestFirst.slice(1).map((order) => order.orderId).join(',')} messageKey=${message.messageKey}`
       );
-      const result = await this.processConfirmationInboundMessage(message, {
-        ...resolvedReplyContext,
-        pendingOrders: [newest],
-        pendingOrder: newest
-      });
-      if (result?.ok && !result.duplicate && !result.ignored) {
-        await this.tellTeamAboutOlderOpenOrders({ newest, older, message });
+      // The newest order first; one that turns out to be closed (a stale cache entry) is skipped and the next one gets the answer.
+      for (let index = 0; index < newestFirst.length; index += 1) {
+        const target = newestFirst[index];
+        const result = await this.processConfirmationInboundMessage(message, {
+          ...resolvedReplyContext,
+          pendingOrders: [target],
+          pendingOrder: target
+        });
+        if (result?.reason === 'order_not_open' && index < newestFirst.length - 1) {
+          continue;
+        }
+        if (result?.ok && !result.duplicate && !result.ignored) {
+          await this.tellTeamAboutOlderOpenOrders({
+            newest: target,
+            older: newestFirst.filter((order) => order !== target && compareNewestFirst(order, target) > 0),
+            message
+          });
+        }
+        return result;
       }
-      return result;
     }
 
     if (!resolvedReplyContext.pendingOrder) {
@@ -658,6 +675,30 @@ export class ConfirmationService {
           route: 'confirmation',
           eventStatus: 'duplicate_confirmation_message'
         };
+      }
+
+      // The record may have changed since the webhook arrived (the team confirmed, cancelled or shipped it by hand, or the
+      // desktop app did): a late reply must not flip it back or answer a closed order.
+      if (pendingOrder.rawOrder?.id) {
+        const closedStatus = ['completed', 'cancelled', 'refunded', 'failed', 'trash'].includes(String(pendingOrder.rawOrder.status || ''));
+        const freshWorkflow = getWorkflowMeta(pendingOrder.rawOrder);
+        const sameDecisionAgain = (reply === '1' && decisionMeta.decision === DECISION.confirmed)
+          || (reply === '2' && decisionMeta.decision === DECISION.cancelled);
+        // An empty workflow state is still open: the confirmation went out but its meta write failed, and the customer's answer must count.
+        const settledState = [WORKFLOW_STATE.confirmed, WORKFLOW_STATE.cancelled, WORKFLOW_STATE.manual].includes(freshWorkflow.state);
+        const changedByHand = decisionMeta.manualOverride === 'yes' || (settledState && !sameDecisionAgain);
+        if ((closedStatus && !sameDecisionAgain) || changedByHand) {
+          this.logger.log(`[confirmation] reply ignored, the order is no longer open orderId=${pendingOrder.orderId} status=${pendingOrder.rawOrder.status}`);
+          return {
+            ok: false,
+            ignored: true,
+            duplicate: false,
+            failed: false,
+            route: 'confirmation',
+            eventStatus: 'order_not_open',
+            reason: 'order_not_open'
+          };
+        }
       }
 
       if (reply !== '1' && reply !== '2') {
@@ -1140,6 +1181,15 @@ export class ConfirmationService {
     });
   }
 
+  // An order of this phone that the customer decided in the last few minutes with the same answer, or null.
+  findRecentlyDecidedOrder(phone, answer) {
+    const decision = answer === '1' ? DECISION.confirmed : DECISION.cancelled;
+    const now = Date.now();
+    return this.store.listOrders().find((order) => order.phone === phone
+      && order.decision === decision
+      && now - Date.parse(order.decisionAt || '') < REPEAT_ANSWER_WINDOW_MS) || null;
+  }
+
   async tellTeamAboutOlderOpenOrders({ newest, older, message }) {
     if (typeof this.notifyTeam !== 'function' || !older.length) {
       return;
@@ -1158,18 +1208,35 @@ export class ConfirmationService {
 
   async resolveReplyContext(phone, { allowWooRecovery = true } = {}) {
     const localPendingOrders = this.store.listPendingOrdersByPhone(phone).sort(compareOrdersByRecency);
-    const localPendingOrder = localPendingOrders[0] || null;
-    const localLatestOrder = localPendingOrder || this.store.findLatestOrderByPhone(phone);
-    if (localPendingOrders.length) {
-      return {
-        pendingOrders: localPendingOrders,
-        pendingOrder: localPendingOrder,
-        latestOrder: localLatestOrder,
-        matchedViaWooFallback: false
-      };
-    }
+    const localLatestOrder = localPendingOrders[0] || this.store.findLatestOrderByPhone(phone);
 
-    if (!allowWooRecovery) {
+    // The local cache is a file that starts empty after every restart, so it can know only the newest order of a customer
+    // while an older one is still waiting in WooCommerce. WooCommerce is the record: both lists are merged, so the answer
+    // is never given to the wrong order and a double order is always seen as two.
+    let wooPendingOrders = [];
+    // With nothing in the cache the first routing pass skips WooCommerce (allowWooRecovery false) and the feedback matching runs
+    // before the recovering pass; with a cached order WooCommerce is always checked for older ones.
+    if (allowWooRecovery || localPendingOrders.length > 0) {
+      try {
+        wooPendingOrders = await this.findPendingWooOrdersByPhone(phone);
+      } catch (error) {
+        this.logger.warn(`[confirmation] could not read the open orders of a customer from WooCommerce: ${error.message}`);
+      }
+    }
+    const knownIds = new Set(localPendingOrders.map((order) => String(order.orderId)));
+    const addedFromWoo = wooPendingOrders
+      .filter((wooOrder) => !knownIds.has(String(wooOrder.id)))
+      .map((wooOrder) => this.store.upsertOrder({
+        ...normalizeWooOrder(wooOrder, this.messages),
+        rawOrder: wooOrder,
+        confirmationState: 'pending_confirmation',
+        invalidReplyCount: getDecisionMeta(wooOrder).invalidReplyCount,
+        manualFollowupRequired: getDecisionMeta(wooOrder).manualFollowupRequired === 'yes',
+        lastConfirmationMessageKey: getDecisionMeta(wooOrder).lastConfirmationMessageKey || ''
+      }));
+    const pendingOrders = [...localPendingOrders, ...addedFromWoo].sort(compareNewestFirst);
+
+    if (!pendingOrders.length) {
       return {
         pendingOrders: [],
         pendingOrder: null,
@@ -1177,32 +1244,11 @@ export class ConfirmationService {
         matchedViaWooFallback: false
       };
     }
-
-    const recoveredOrders = await this.findPendingWooOrdersByPhone(phone);
-    if (!recoveredOrders.length) {
-      return {
-        pendingOrders: [],
-        pendingOrder: null,
-        latestOrder: localLatestOrder,
-        matchedViaWooFallback: false
-      };
-    }
-
-    const storedRecoveredOrders = recoveredOrders.map((recoveredOrder) => this.store.upsertOrder({
-      ...normalizeWooOrder(recoveredOrder, this.messages),
-      rawOrder: recoveredOrder,
-      confirmationState: 'pending_confirmation',
-      invalidReplyCount: getDecisionMeta(recoveredOrder).invalidReplyCount,
-      manualFollowupRequired: getDecisionMeta(recoveredOrder).manualFollowupRequired === 'yes',
-      lastConfirmationMessageKey: getDecisionMeta(recoveredOrder).lastConfirmationMessageKey || ''
-    }));
-    const storedRecoveredOrder = storedRecoveredOrders[0];
-
     return {
-      pendingOrders: storedRecoveredOrders,
-      pendingOrder: storedRecoveredOrder,
-      latestOrder: storedRecoveredOrder,
-      matchedViaWooFallback: true
+      pendingOrders,
+      pendingOrder: pendingOrders[0],
+      latestOrder: localPendingOrders[0] || pendingOrders[0],
+      matchedViaWooFallback: localPendingOrders.length === 0
     };
   }
 
@@ -1629,7 +1675,12 @@ export class ConfirmationService {
   }
 
   async findPendingWooOrdersByPhone(phone) {
-    const candidateOrders = await this.listOrdersForStatuses(REPLY_RECOVERY_STATUSES);
+    // Only recent orders can still wait for an answer (the last reminder is about 4 days after the order), and the read is
+    // capped: a reply never scans the whole shop.
+    const candidateOrders = await this.listOrdersForStatuses(REPLY_RECOVERY_STATUSES, {
+      after: new Date(Date.now() - REPLY_LOOKBACK_MS).toISOString(),
+      maxPages: REPLY_LOOKUP_MAX_PAGES
+    });
 
     return candidateOrders
       .filter((order) => {
@@ -1837,6 +1888,22 @@ function safeErrorData(error) {
   } catch {
     return '"[unserializable]"';
   }
+}
+
+// Newest order first. A cached order may have lost its dates (it was re-saved from a partial answer), so when either date
+// is missing the order number decides: WooCommerce numbers grow with time.
+function compareNewestFirst(left, right) {
+  const createdMs = (order) => {
+    const source = order.rawOrder || order;
+    const parsed = Date.parse(String(source?.date_created_gmt || source?.date_created || ''));
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+  const leftMs = createdMs(left);
+  const rightMs = createdMs(right);
+  if (leftMs > 0 && rightMs > 0 && leftMs !== rightMs) {
+    return rightMs - leftMs;
+  }
+  return Number(right.orderId) - Number(left.orderId);
 }
 
 function isSameFinalDecision(order, inbound) {

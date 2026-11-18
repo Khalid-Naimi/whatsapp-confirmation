@@ -5422,3 +5422,195 @@ test('the follow-ups row is in the health page even if the stock sync never ends
   await tick();
   assert.deepEqual(runs.map((run) => [run.ok, run.stockSync]), [[true, null]]);
 });
+
+// ---- reminder gap, quiet-hours auto-cancel, double orders, late replies ----
+
+function pendingOrder({ id, phone, created, sentAt, reminderCount = 0, extraMeta = [], status = 'processing' }) {
+  return {
+    id,
+    status,
+    total: '139.00',
+    currency: 'MAD',
+    date_created_gmt: created,
+    billing: { first_name: 'Test', last_name: 'Customer', phone, state: 'Casablanca', address_1: '1 Rue Test' },
+    line_items: [{ name: 'Produit', quantity: 1 }],
+    meta_data: [
+      { key: 'rhymat_whatsapp_state', value: 'pending' },
+      { key: 'rhymat_whatsapp_confirmation_sent_at', value: sentAt },
+      { key: 'rhymat_whatsapp_reminder_count', value: reminderCount },
+      ...extraMeta
+    ]
+  };
+}
+
+test('reminder 2 waits 20 hours after reminder 1 even when reminder 1 was late', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  // Confirmation 50 h ago, reminder 1 only 2 h ago (it was held back): reminder 2 must not follow an hour later.
+  listedOrders.push(pendingOrder({
+    id: 801, phone: '+212611000801', created: '2026-03-16T08:00:00', sentAt: '2026-03-16T08:00:00.000Z', reminderCount: 1,
+    extraMeta: [{ key: 'rhymat_whatsapp_reminder_1_sent_at', value: '2026-03-18T08:00:00.000Z' }]
+  }));
+  listedOrders.push(pendingOrder({
+    id: 802, phone: '+212611000802', created: '2026-03-16T08:00:00', sentAt: '2026-03-16T08:00:00.000Z', reminderCount: 1,
+    extraMeta: [{ key: 'rhymat_whatsapp_reminder_1_sent_at', value: '2026-03-17T08:00:00.000Z' }]
+  }));
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
+  assert.equal(summary.remindersSent, 1);
+  assert.match(wasenderCalls[0].message, /numero 802/);
+});
+
+test('an auto-cancel falling in quiet hours waits for the morning, with its message', async () => {
+  const { confirmationService, listedOrders, wasenderCalls, wooStatusCalls } = createTestContext();
+  confirmationService.quietHours = { enabled: true, startHour: 23, endHour: 9, timeZone: 'Africa/Casablanca' };
+  listedOrders.push(pendingOrder({
+    id: 811, phone: '+212611000811', created: '2026-03-14T08:00:00', sentAt: '2026-03-14T08:00:00.000Z', reminderCount: 2,
+    extraMeta: [{ key: 'rhymat_whatsapp_reminder_2_sent_at', value: '2026-03-16T08:00:00.000Z' }]
+  }));
+  confirmationService.clock = () => new Date('2026-03-18T23:30:00.000Z'); // 00:30 in Morocco
+  let summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T23:30:00.000Z') });
+  assert.equal(summary.autoCancelled, 0);
+  assert.equal(wooStatusCalls.length, 0, 'the order is not cancelled while its message cannot go out');
+  assert.equal(wasenderCalls.length, 0);
+
+  confirmationService.clock = () => new Date('2026-03-19T10:00:00.000Z'); // 11:00 in Morocco
+  summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-19T10:00:00.000Z') });
+  assert.equal(summary.autoCancelled, 1);
+  assert.deepEqual(wooStatusCalls[0], { orderId: '811', status: 'cancelled' });
+  assert.equal(wasenderCalls.length, 1);
+});
+
+test('a double order: only the newest gets reminders', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  listedOrders.push(pendingOrder({ id: 821, phone: '+212611000821', created: '2026-03-17T10:00:00', sentAt: '2026-03-17T10:00:10.000Z' }));
+  listedOrders.push(pendingOrder({ id: 822, phone: '+212611000821', created: '2026-03-17T10:02:00', sentAt: '2026-03-17T10:02:10.000Z' }));
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T11:00:00.000Z') });
+  assert.equal(summary.remindersSent, 1);
+  assert.match(wasenderCalls[0].message, /numero 822/);
+});
+
+test('a double order nobody answers: the newest is auto-cancelled and its older twin is cancelled silently', async () => {
+  const { confirmationService, listedOrders, wasenderCalls, wooStatusCalls, wooNoteCalls } = createTestContext();
+  const reminded = [{ key: 'rhymat_whatsapp_reminder_2_sent_at', value: '2026-03-17T08:00:00.000Z' }];
+  listedOrders.push(pendingOrder({ id: 831, phone: '+212611000831', created: '2026-03-14T10:00:00', sentAt: '2026-03-14T10:00:10.000Z', reminderCount: 2, extraMeta: reminded }));
+  listedOrders.push(pendingOrder({ id: 832, phone: '+212611000831', created: '2026-03-14T10:02:00', sentAt: '2026-03-14T10:02:10.000Z', reminderCount: 2, extraMeta: reminded }));
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
+  assert.equal(summary.autoCancelled, 1);
+  assert.deepEqual(wooStatusCalls.map((call) => call.orderId).sort(), ['831', '832']);
+  assert.equal(wasenderCalls.length, 1, 'one cancel message for the customer, none for the older twin');
+  assert.ok(wooNoteCalls.some((item) => item.orderId === '831' && /double order #832/.test(item.note)));
+});
+
+test('an older order that only WooCommerce knows is seen after a restart: the answer goes to the newest, the team is told', async () => {
+  const { app, listedOrders, store, teamNotices } = createTestContext();
+  listedOrders.push(pendingOrder({ id: 841, phone: '+212611000841', created: '2026-03-17T10:00:00', sentAt: '2026-03-17T10:00:10.000Z' }));
+  const newer = { ...pendingOrder({ id: 842, phone: '+212611000841', created: '2026-03-17T10:03:00', sentAt: '2026-03-17T10:03:10.000Z' }), status: 'pending' };
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: { 'x-wc-webhook-signature': signWoo({ ...newer, meta_data: [] }), 'x-wc-webhook-delivery-id': 'delivery-841' },
+    payload: { ...newer, meta_data: [] }
+  });
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: { data: { messages: { key: { cleanedSenderPn: '212611000841', fromMe: false }, messageBody: '1' } } }
+  });
+  assert.equal(result.statusCode, 200);
+  assert.equal(store.getOrder('842')?.decision, 'confirmed');
+  assert.notEqual(store.getOrder('841')?.decision, 'confirmed');
+  assert.equal(teamNotices.length, 1);
+  assert.match(teamNotices[0], /Still waiting: #841/);
+});
+
+test('a late reply does not flip an order the team already closed', async () => {
+  const { app, listedOrders, store, wooOrderUpdates } = createTestContext();
+  const order = pendingOrder({ id: 851, phone: '+212611000851', created: '2026-03-17T10:00:00', sentAt: '2026-03-17T10:00:10.000Z' });
+  listedOrders.push(order);
+  // The local cache still thinks it is pending (the webhook for the manual change never arrived), WooCommerce says completed.
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: { 'x-wc-webhook-signature': signWoo({ ...order, status: 'pending', meta_data: [] }), 'x-wc-webhook-delivery-id': 'delivery-851' },
+    payload: { ...order, status: 'pending', meta_data: [] }
+  });
+  listedOrders[0] = { ...listedOrders[0], status: 'completed' };
+  const before = wooOrderUpdates.length;
+  const result = await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: { data: { messages: { key: { cleanedSenderPn: '212611000851', fromMe: false }, messageBody: '2' } } }
+  });
+  assert.equal(result.statusCode, 200);
+  assert.equal(wooOrderUpdates.slice(before).find((item) => item.fields.status), undefined, 'the status is not changed');
+  assert.notEqual(store.getOrder('851')?.decision, 'cancelled');
+});
+
+test('a chain of three double orders nobody answers: the newest is auto-cancelled and the two older ones with it', async () => {
+  const { confirmationService, listedOrders, wasenderCalls, wooStatusCalls } = createTestContext();
+  const reminded = [{ key: 'rhymat_whatsapp_reminder_2_sent_at', value: '2026-03-17T08:00:00.000Z' }];
+  for (const [id, hour] of [[881, '08'], [882, '11'], [883, '14']]) {
+    listedOrders.push(pendingOrder({ id, phone: '+212611000881', created: `2026-03-14T${hour}:00:00`, sentAt: `2026-03-14T${hour}:00:10.000Z`, reminderCount: 2, extraMeta: reminded }));
+  }
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
+  assert.equal(summary.autoCancelled, 1);
+  assert.deepEqual(wooStatusCalls.map((call) => call.orderId).sort(), ['881', '882', '883']);
+  assert.equal(wasenderCalls.length, 1, 'one cancel message in all');
+});
+
+test('an older order the team already handled is never cancelled as a twin', async () => {
+  const { confirmationService, listedOrders, wooStatusCalls } = createTestContext();
+  const reminded = [{ key: 'rhymat_whatsapp_reminder_2_sent_at', value: '2026-03-17T08:00:00.000Z' }];
+  listedOrders.push(pendingOrder({
+    id: 891, phone: '+212611000891', created: '2026-03-14T10:00:00', sentAt: '2026-03-14T10:00:10.000Z', reminderCount: 2,
+    extraMeta: [...reminded, { key: 'rhymat_whatsapp_manual_override', value: 'yes' }]
+  }));
+  listedOrders.push(pendingOrder({ id: 892, phone: '+212611000891', created: '2026-03-14T10:02:00', sentAt: '2026-03-14T10:02:10.000Z', reminderCount: 2, extraMeta: reminded }));
+  await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T10:00:00.000Z') });
+  assert.ok(wooStatusCalls.some((call) => call.orderId === '892'));
+  assert.equal(wooStatusCalls.some((call) => call.orderId === '891' && call.status === 'cancelled'), false);
+});
+
+test('an answer still counts when the confirmation went out but its workflow meta was never saved', async () => {
+  const { app, listedOrders, store } = createTestContext();
+  const order = { ...pendingOrder({ id: 861, phone: '+212611000861', created: '2026-03-17T10:00:00', sentAt: '2026-03-17T10:00:10.000Z' }), status: 'pending' };
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/woocommerce',
+    headers: { 'x-wc-webhook-signature': signWoo({ ...order, meta_data: [] }), 'x-wc-webhook-delivery-id': 'delivery-861' },
+    payload: { ...order, meta_data: [] }
+  });
+  const index = listedOrders.findIndex((item) => String(item.id) === '861');
+  listedOrders[index] = { ...listedOrders[index], meta_data: listedOrders[index].meta_data.filter((meta) => !/_state$|confirmation_sent_at/.test(meta.key)) };
+  await dispatch(app, {
+    method: 'POST',
+    url: '/webhooks/wasender',
+    headers: { 'x-wasender-signature': signWasenderPlain() },
+    payload: { data: { messages: { key: { cleanedSenderPn: '212611000861', fromMe: false }, messageBody: '1' } } }
+  });
+  assert.equal(store.getOrder('861')?.decision, 'confirmed');
+});
+
+test('a second typed 1 right after the first does not confirm the customer other open order', async () => {
+  const { app, store } = createTestContext();
+  for (const id of [871, 872]) {
+    const order = { ...pendingOrder({ id, phone: '+212611000871', created: `2026-03-17T10:0${id - 871}:00`, sentAt: '2026-03-17T10:05:00.000Z' }), status: 'pending', meta_data: [] };
+    await dispatch(app, {
+      method: 'POST',
+      url: '/webhooks/woocommerce',
+      headers: { 'x-wc-webhook-signature': signWoo(order), 'x-wc-webhook-delivery-id': `delivery-${id}` },
+      payload: order
+    });
+  }
+  for (const messageId of ['MSG-A', 'MSG-B']) {
+    await dispatch(app, {
+      method: 'POST',
+      url: '/webhooks/wasender',
+      headers: { 'x-wasender-signature': signWasenderPlain() },
+      payload: { data: { messages: { key: { id: messageId, cleanedSenderPn: '212611000871', fromMe: false }, messageBody: '1' } } }
+    });
+  }
+  assert.equal(store.getOrder('872')?.decision, 'confirmed');
+  assert.notEqual(store.getOrder('871')?.decision, 'confirmed', 'the repeat is the same answer, not a second confirmation');
+});
