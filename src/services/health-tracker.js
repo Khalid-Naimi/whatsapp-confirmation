@@ -114,7 +114,7 @@ function isOutageStatus(status) {
 // or WhatsApp or WooCommerce is down (2 outage failures in a row, or one older than 2 minutes; see isDown).
 // A missing control product (the desktop app has not created it yet) is not ready too: opt-outs would be kept only
 // until the next restart. The team also gets one critical alert when it is first seen (services/durable-state.js).
-export function buildReadiness({ config = {}, tracker = null, durableState = null, now = new Date(), lateMs = HOURLY_LATE_MS }) {
+export function buildReadiness({ config = {}, tracker = null, durableState = null, now = new Date(), lateMs = HOURLY_LATE_MS, queueStats = null }) {
   const nowMs = now.getTime();
   const startedMs = Date.parse(tracker?.startedAt || '') || nowMs;
   const lastRunMs = Date.parse(tracker?.runs(1)?.[0]?.at || '') || 0;
@@ -127,7 +127,14 @@ export function buildReadiness({ config = {}, tracker = null, durableState = nul
     woocommerce: tracker ? !tracker.isDown('woocommerce', now) : true
   };
   const ok = Object.values(checks).every(Boolean);
-  return { ok, status: ok ? 'ready' : 'not_ready', checks };
+  const result = { ok, status: ok ? 'ready' : 'not_ready', checks };
+  // Numbers only: how many WhatsApp messages wait in the send queue and how long the oldest has waited. A long queue is
+  // slow, not broken, so it does not make the service not ready (the team gets an alert instead).
+  if (queueStats) {
+    const stats = queueStats() || {};
+    result.queue = { waiting: Number(stats.waiting) || 0, oldestWaitSeconds: Math.round((Number(stats.oldestWaitMs) || 0) / 1000) };
+  }
+  return result;
 }
 
 // Wraps the listed async methods of a client so each success or failure is noted. The client itself is unchanged.

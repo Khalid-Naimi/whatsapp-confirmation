@@ -130,6 +130,12 @@ export function outboundFailureKey(keys) {
   return keys.state.replace(/_state$/u, '_failed_for');
 }
 
+// When the message was handed to WhatsApp, or 'queued' while it only waits in the server's send queue (a message
+// that never left the queue is safe to send again after a restart; one that did leave is never repeated).
+export function outboundDispatchedKey(keys) {
+  return keys.state.replace(/_state$/u, '_dispatched_at');
+}
+
 // The cross-instance claim of one logical send (services/claim.js).
 export function outboundClaimKey(keys) {
   return keys.state.replace(/_state$/u, '_claim');
@@ -188,7 +194,7 @@ function outboundRows() {
   const result = [];
   for (const [logicalKey, keys] of Object.entries(OUTBOUND_META_KEYS)) {
     const group = `outbound ${logicalKey}`;
-    for (const key of [keys.state, keys.reservedAt, keys.sentAt, keys.messageId, outboundFailureKey(keys), outboundClaimKey(keys)]) {
+    for (const key of [keys.state, keys.reservedAt, keys.sentAt, keys.messageId, outboundFailureKey(keys), outboundClaimKey(keys), outboundDispatchedKey(keys)]) {
       if (key) {
         result.push({ key, entity: 'order', owner: 'server', group });
       }

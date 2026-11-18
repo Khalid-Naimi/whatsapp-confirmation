@@ -116,6 +116,15 @@ const alerts = createAlerts({
 });
 // The durable state is built before the alert path exists; it alerts once if the control product is missing.
 durableState.alerts = alerts;
+// A customer WhatsApp message that waits more than 10 minutes in the send queue: one alert (then at most every 30 minutes).
+wasenderClient.onBacklog = ({ waiting, waitMs }) => {
+  alerts.alert({
+    key: 'wasender-queue-backlog',
+    level: 'warn',
+    text: `Rhymat: ${waiting} messages WhatsApp attendent dans la file d'envoi, le plus ancien depuis ${Math.round(waitMs / 60000)} min. Ne pas redemarrer le service pendant ce temps.`
+  });
+};
+setInterval(() => wasenderClient.checkQueueAge(), 60 * 1000).unref();
 const notifyTeam = createTeamNotifier({ wasenderClient, phones: config.messages.internalNotifyPhones, alerts, logger });
 
 const confirmationService = new ConfirmationService({
@@ -178,6 +187,7 @@ const app = createApp({
   stockSyncService,
   durableState,
   alerts,
+  queueStats: () => wasenderClient.queueStats(),
   logger
 });
 

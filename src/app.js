@@ -6,7 +6,7 @@ import { log, redact } from './log.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 
-export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, hdClient = null, stockSyncService = null, durableState = null, alerts = null, logger = console, maxBodyBytes = MAX_BODY_BYTES }) {
+export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, hdClient = null, stockSyncService = null, durableState = null, alerts = null, queueStats = null, logger = console, maxBodyBytes = MAX_BODY_BYTES }) {
   // The hourly task must never run twice at once (two runs could message the same customer twice).
   let followupsRunning = false;
 
@@ -108,7 +108,7 @@ export function createApp({ config, confirmationService, store, stockAlertServic
 
       // Public, for an outside monitor: booleans only (see buildReadiness). /health stays the plain liveness answer.
       if (req.method === 'GET' && pathname === '/health/ready') {
-        const readiness = buildReadiness({ config, tracker: healthTracker, durableState, now: new Date() });
+        const readiness = buildReadiness({ config, tracker: healthTracker, durableState, now: new Date(), queueStats });
         return sendJson(res, readiness.ok ? 200 : 503, readiness);
       }
 

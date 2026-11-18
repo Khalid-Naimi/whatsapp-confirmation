@@ -7,6 +7,7 @@ import {
   FEEDBACK_META_KEYS,
   FEEDBACK_TEST_META_KEYS,
   OUTBOUND_META_KEYS,
+  outboundDispatchedKey,
   outboundFailureKey,
   WORKFLOW_META_KEYS
 } from '../../domain/order-meta.js';
@@ -289,12 +290,19 @@ export function getOutboundReservationMeta(order, logicalKey) {
     reservedAt: String(metaValue(keys.reservedAt) || ''),
     sentAt: keys.sentAt ? String(metaValue(keys.sentAt) || '') : '',
     messageId: keys.messageId ? String(metaValue(keys.messageId) || '') : '',
-    failedFor: String(metaValue(failureKeyFor(keys)) || '')
+    failedFor: String(metaValue(failureKeyFor(keys)) || ''),
+    dispatchedAt: String(metaValue(outboundDispatchedKey(keys)) || '')
   };
 }
 
 // The reservation time of the last send that failed cleanly (nothing went out), kept apart from the state.
 export const failureKeyFor = outboundFailureKey;
+
+// A reservation written by this version that never left the send queue (nothing was sent: safe to send again).
+export const QUEUED_MARK = 'queued';
+export function isQueuedOnly(outboundMeta) {
+  return outboundMeta?.state === 'reserved' && outboundMeta?.dispatchedAt === QUEUED_MARK;
+}
 
 export function buildLogicalSendMetaUpdate(order, logicalKey, values) {
   const keys = OUTBOUND_META_KEYS[logicalKey];
@@ -311,7 +319,8 @@ export function buildLogicalSendMetaUpdate(order, logicalKey, values) {
     [keys.reservedAt]: values.reservedAt,
     [keys.sentAt]: values.sentAt,
     [keys.messageId]: values.messageId,
-    [failureKeyFor(keys)]: values.failedFor
+    [failureKeyFor(keys)]: values.failedFor,
+    [outboundDispatchedKey(keys)]: values.dispatchedAt
   })
     .filter(([key, value]) => key && value !== undefined)
     .map(([key, value]) => {

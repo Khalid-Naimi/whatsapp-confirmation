@@ -293,6 +293,12 @@
       "group": "outbound customer:confirmation_request"
     },
     {
+      "key": "rhymat_whatsapp_confirmation_request_dispatched_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_request"
+    },
+    {
       "key": "rhymat_whatsapp_reminder_1_state",
       "entity": "order",
       "owner": "server",
@@ -317,6 +323,12 @@
       "group": "outbound customer:reminder_1"
     },
     {
+      "key": "rhymat_whatsapp_reminder_1_dispatched_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_1"
+    },
+    {
       "key": "rhymat_whatsapp_reminder_2_state",
       "entity": "order",
       "owner": "server",
@@ -336,6 +348,12 @@
     },
     {
       "key": "rhymat_whatsapp_reminder_2_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:reminder_2"
+    },
+    {
+      "key": "rhymat_whatsapp_reminder_2_dispatched_at",
       "entity": "order",
       "owner": "server",
       "group": "outbound customer:reminder_2"
@@ -371,6 +389,12 @@
       "group": "outbound customer:confirmation_success"
     },
     {
+      "key": "rhymat_whatsapp_confirmation_success_dispatched_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:confirmation_success"
+    },
+    {
       "key": "rhymat_whatsapp_cancellation_success_state",
       "entity": "order",
       "owner": "server",
@@ -401,6 +425,12 @@
       "group": "outbound customer:cancellation_success"
     },
     {
+      "key": "rhymat_whatsapp_cancellation_success_dispatched_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:cancellation_success"
+    },
+    {
       "key": "rhymat_whatsapp_auto_cancellation_state",
       "entity": "order",
       "owner": "server",
@@ -426,6 +456,12 @@
     },
     {
       "key": "rhymat_whatsapp_auto_cancellation_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:auto_cancellation"
+    },
+    {
+      "key": "rhymat_whatsapp_auto_cancellation_dispatched_at",
       "entity": "order",
       "owner": "server",
       "group": "outbound customer:auto_cancellation"
@@ -467,6 +503,12 @@
       "group": "outbound customer:hd_shipped"
     },
     {
+      "key": "rhymat_whatsapp_hd_shipped_dispatched_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_shipped"
+    },
+    {
       "key": "rhymat_whatsapp_hd_arriving_state",
       "entity": "order",
       "owner": "server",
@@ -498,6 +540,12 @@
     },
     {
       "key": "rhymat_whatsapp_hd_arriving_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:hd_arriving"
+    },
+    {
+      "key": "rhymat_whatsapp_hd_arriving_dispatched_at",
       "entity": "order",
       "owner": "server",
       "group": "outbound customer:hd_arriving"

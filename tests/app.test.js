@@ -41,7 +41,11 @@ function createTestContext({ optOutKeywords = null, pollEnabled = false, failPol
   };
 
   const wasenderClient = {
-    async sendMessage(payload) {
+    async sendMessage({ beforeDispatch, ...payload }) {
+      // The real client runs this inside its queue slot, right before the request leaves.
+      if (beforeDispatch) {
+        await beforeDispatch();
+      }
       wasenderCalls.push(payload);
       return { id: `msg-${wasenderCalls.length}` };
     },
@@ -416,7 +420,7 @@ test('new WooCommerce order sends one confirmation message and writes workflow m
   assert.match(wasenderCalls[0].message, /Lmdina: Casablanca/);
   assert.match(wasenderCalls[0].message, /Tawsil: 24h/);
   assert.match(wasenderCalls[0].message, /Ila 3endek chi question, seft la question dyalk l had numero: \+212 708-357533/);
-  assert.equal(wooOrderUpdates.length, 2);
+  assert.equal(wooOrderUpdates.length, 3, 'reservation, handed to WhatsApp, sent time');
   const metaUpdate = wooOrderUpdates.at(-1).fields.meta_data;
   assert.equal(workflowMetaValue(metaUpdate, 'rhymat_whatsapp_state'), 'pending');
   assert.equal(workflowMetaValue(metaUpdate, 'rhymat_whatsapp_reminder_count'), 0);
@@ -450,7 +454,7 @@ test('a failed poll send does not break the confirmation', async () => {
 });
 
 async function flushAsync() {
-  for (let i = 0; i < 20; i += 1) {
+  for (let i = 0; i < 60; i += 1) {
     await Promise.resolve();
   }
 }
@@ -888,7 +892,8 @@ test('accepted confirmation send becomes ambiguous without resending when Woo me
   const originalUpdateOrderMeta = confirmationService.wooClient.updateOrderMeta.bind(confirmationService.wooClient);
   confirmationService.wooClient.updateOrderMeta = async (orderId, metaData) => {
     metaCallCount += 1;
-    if (metaCallCount === 2) {
+    // 1 = the reservation, 2 = marking it handed to WhatsApp, 3 = writing the sent time (the one that fails here)
+    if (metaCallCount === 3) {
       throw new Error('temporary meta failure');
     }
     return originalUpdateOrderMeta(orderId, metaData);
@@ -5613,4 +5618,182 @@ test('a second typed 1 right after the first does not confirm the customer other
   }
   assert.equal(store.getOrder('872')?.decision, 'confirmed');
   assert.notEqual(store.getOrder('871')?.decision, 'confirmed', 'the repeat is the same answer, not a second confirmation');
+});
+
+// ---- a restart loses the send queue: messages that never left it are sent again, never twice ----
+
+function reservedOrder({ id, reservedAt, dispatchedAt, claimAt }) {
+  return {
+    id,
+    status: 'processing',
+    total: '139.00',
+    currency: 'MAD',
+    billing: { first_name: 'Queue', last_name: 'Test', phone: '+212611000990', state: 'Casablanca', address_1: '1 Rue Queue' },
+    line_items: [{ name: 'Produit', quantity: 1 }],
+    meta_data: [
+      { key: 'rhymat_whatsapp_confirmation_request_state', value: 'reserved' },
+      { key: 'rhymat_whatsapp_confirmation_request_reserved_at', value: reservedAt },
+      ...(dispatchedAt ? [{ key: 'rhymat_whatsapp_confirmation_request_dispatched_at', value: dispatchedAt }] : []),
+      { key: 'rhymat_whatsapp_confirmation_request_claim', value: JSON.stringify({ state: 'reserved', claimId: 'srv-1-oldinstance:abc', at: claimAt || reservedAt }) }
+    ]
+  };
+}
+
+async function sendConfirmationAt(confirmationService, order, now) {
+  return confirmationService.sendLogicalMessageWithWooReservation({
+    orderPayload: order,
+    orderId: String(order.id),
+    phone: '+212611000990',
+    logicalKey: 'customer:confirmation_request',
+    kind: 'confirmation_request',
+    message: 'Salam test',
+    now
+  });
+}
+
+test('a reservation that never left the queue (restart) is sent again after 30 minutes', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const now = new Date('2026-03-18T12:00:00.000Z');
+  const order = reservedOrder({ id: 901, reservedAt: '2026-03-18T11:15:00.000Z', dispatchedAt: 'queued' });
+  listedOrders.push(order);
+  const result = await sendConfirmationAt(confirmationService, order, now);
+  assert.equal(result.ok, true);
+  assert.equal(wasenderCalls.length, 1);
+  const meta = Object.fromEntries(listedOrders[0].meta_data.map((row) => [row.key, row.value]));
+  assert.equal(meta.rhymat_whatsapp_confirmation_request_state, 'sent');
+  assert.match(meta.rhymat_whatsapp_confirmation_request_dispatched_at, /^2\d{3}-/, 'marked as handed to WhatsApp');
+});
+
+test('a queued reservation younger than 30 minutes is left alone (it may still be waiting in the live queue)', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const now = new Date('2026-03-18T12:00:00.000Z');
+  const order = reservedOrder({ id: 902, reservedAt: '2026-03-18T11:50:00.000Z', dispatchedAt: 'queued' });
+  listedOrders.push(order);
+  const result = await sendConfirmationAt(confirmationService, order, now);
+  assert.equal(result.inProgress, true);
+  assert.equal(wasenderCalls.length, 0);
+});
+
+test('a message handed to WhatsApp is never sent again, even hours later', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const now = new Date('2026-03-18T15:00:00.000Z');
+  const order = reservedOrder({ id: 903, reservedAt: '2026-03-18T11:00:00.000Z', dispatchedAt: '2026-03-18T11:00:30.000Z' });
+  listedOrders.push(order);
+  const result = await sendConfirmationAt(confirmationService, order, now);
+  assert.equal(result.ambiguous, true);
+  assert.equal(wasenderCalls.length, 0);
+});
+
+test('an older reservation written before this version (no marker) keeps the old rule: never resent', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const now = new Date('2026-03-18T12:00:00.000Z');
+  const order = reservedOrder({ id: 904, reservedAt: '2026-03-18T10:00:00.000Z', dispatchedAt: '' });
+  listedOrders.push(order);
+  const result = await sendConfirmationAt(confirmationService, order, now);
+  assert.equal(result.inProgress || result.ambiguous, true);
+  assert.equal(wasenderCalls.length, 0);
+});
+
+test('a send taken over by another sender while it waited in the queue is not sent', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const order = {
+    id: 905, status: 'processing', total: '139.00', currency: 'MAD',
+    billing: { first_name: 'Queue', last_name: 'Test', phone: '+212611000990', state: 'Casablanca', address_1: '1 Rue Queue' },
+    line_items: [{ name: 'Produit', quantity: 1 }], meta_data: []
+  };
+  listedOrders.push(order);
+  const originalSend = confirmationService.wasenderClient.sendMessage;
+  confirmationService.wasenderClient.sendMessage = async (payload) => {
+    // While the message waits in the queue, the hourly task (after a restart) claims the same message.
+    const index = listedOrders.findIndex((item) => String(item.id) === '905');
+    listedOrders[index] = {
+      ...listedOrders[index],
+      meta_data: listedOrders[index].meta_data.map((row) => (row.key === 'rhymat_whatsapp_confirmation_request_claim'
+        ? { ...row, value: JSON.stringify({ state: 'reserved', claimId: 'srv-2-newinstance:zzz', at: new Date().toISOString() }) }
+        : row))
+    };
+    return originalSend(payload);
+  };
+  const result = await sendConfirmationAt(confirmationService, order, new Date());
+  assert.equal(result.claimedElsewhere, true);
+  assert.equal(wasenderCalls.length, 0, 'the message was not sent by the sender that lost the claim');
+});
+
+test('a queued reservation older than 2 hours that nothing resends is closed and the team is told', async () => {
+  const { confirmationService, listedOrders, wasenderCalls, teamNotices } = createTestContext();
+  // A reply sent after a decision is lost in a restart: nothing resends it, so the 2 hour backstop must still catch it.
+  const order = reservedOrder({ id: 911, reservedAt: '2026-03-18T08:00:00.000Z', dispatchedAt: 'queued' });
+  order.meta_data = [
+    ...order.meta_data.map((row) => ({ ...row, key: row.key.replace('confirmation_request', 'confirmation_success') })),
+    { key: 'rhymat_whatsapp_state', value: 'confirmed' },
+    { key: 'rhymat_whatsapp_confirmation_sent_at', value: '2026-03-18T07:00:00.000Z' }
+  ];
+  listedOrders.push(order);
+  const summary = await confirmationService.runOrderFollowups({ now: new Date('2026-03-18T11:00:00.000Z') });
+  assert.equal(summary.ambiguous, 1);
+  assert.equal(wasenderCalls.length, 0);
+  assert.equal(teamNotices.length, 1);
+});
+
+test('a WooCommerce failure while marking the dispatch is a clean failure: nothing sent, reservation released', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const order = { id: 912, status: 'processing', total: '139.00', currency: 'MAD', billing: { first_name: 'Queue', last_name: 'Test', phone: '+212611000990', state: 'Casablanca', address_1: '1 Rue Queue' }, line_items: [{ name: 'Produit', quantity: 1 }], meta_data: [] };
+  listedOrders.push(order);
+  const originalUpdate = confirmationService.wooClient.updateOrderMeta.bind(confirmationService.wooClient);
+  let calls = 0;
+  confirmationService.wooClient.updateOrderMeta = async (orderId, metaData) => {
+    calls += 1;
+    if (calls === 2) { // the "handed to WhatsApp" mark
+      const error = new Error('WooCommerce request failed with 502');
+      error.ambiguous = true; // a Woo write answered with a 5xx looks ambiguous to the HTTP layer
+      throw error;
+    }
+    return originalUpdate(orderId, metaData);
+  };
+  await assert.rejects(sendConfirmationAt(confirmationService, order, new Date()), /nothing was sent/);
+  assert.equal(wasenderCalls.length, 0);
+  const meta = Object.fromEntries(listedOrders[0].meta_data.map((row) => [row.key, row.value]));
+  assert.equal(meta.rhymat_whatsapp_confirmation_request_state, '', 'the reservation is released, so it is sent again later');
+  assert.equal(meta.rhymat_whatsapp_confirmation_request_dispatched_at, '');
+});
+
+test('a message another sender already sent is not sent again by the one that waited', async () => {
+  const { confirmationService, listedOrders, wasenderCalls } = createTestContext();
+  const order = { id: 913, status: 'processing', total: '139.00', currency: 'MAD', billing: { first_name: 'Queue', last_name: 'Test', phone: '+212611000990', state: 'Casablanca', address_1: '1 Rue Queue' }, line_items: [{ name: 'Produit', quantity: 1 }], meta_data: [] };
+  listedOrders.push(order);
+  const originalSend = confirmationService.wasenderClient.sendMessage;
+  confirmationService.wasenderClient.sendMessage = async (payload) => {
+    const index = listedOrders.findIndex((item) => String(item.id) === '913');
+    listedOrders[index] = {
+      ...listedOrders[index],
+      meta_data: listedOrders[index].meta_data.map((row) => (row.key === 'rhymat_whatsapp_confirmation_request_state' ? { ...row, value: 'sent' } : row))
+    };
+    return originalSend(payload);
+  };
+  const result = await sendConfirmationAt(confirmationService, order, new Date());
+  assert.equal(result.claimedElsewhere, true);
+  assert.equal(wasenderCalls.length, 0);
+});
+
+test('a sender that lost the claim does not touch the new holder\'s marker', async () => {
+  const { confirmationService, listedOrders } = createTestContext();
+  const order = { id: 914, status: 'processing', total: '139.00', currency: 'MAD', billing: { first_name: 'Queue', last_name: 'Test', phone: '+212611000990', state: 'Casablanca', address_1: '1 Rue Queue' }, line_items: [{ name: 'Produit', quantity: 1 }], meta_data: [] };
+  listedOrders.push(order);
+  const originalSend = confirmationService.wasenderClient.sendMessage;
+  confirmationService.wasenderClient.sendMessage = async (payload) => {
+    const index = listedOrders.findIndex((item) => String(item.id) === '914');
+    listedOrders[index] = {
+      ...listedOrders[index],
+      meta_data: listedOrders[index].meta_data.map((row) => {
+        if (row.key === 'rhymat_whatsapp_confirmation_request_claim') {
+          return { ...row, value: JSON.stringify({ state: 'reserved', claimId: 'srv-9-new:q', at: new Date().toISOString() }) };
+        }
+        return row;
+      })
+    };
+    return originalSend(payload);
+  };
+  await sendConfirmationAt(confirmationService, order, new Date());
+  const meta = Object.fromEntries(listedOrders[0].meta_data.map((row) => [row.key, row.value]));
+  assert.equal(meta.rhymat_whatsapp_confirmation_request_dispatched_at, 'queued', 'the marker of the new holder is unchanged');
 });

@@ -5,6 +5,10 @@ import { maskPhone } from '../utils/format.js';
 // The longest a routine team notice (low lane) waits behind customer messages.
 export const LOW_LANE_MAX_WAIT_MS = 60 * 1000;
 
+// A customer message that waits longer than this in the send queue tells the team once (then at most every 30 minutes).
+export const BACKLOG_ALERT_AFTER_MS = 10 * 60 * 1000;
+export const BACKLOG_ALERT_EVERY_MS = 30 * 60 * 1000;
+
 export class WasenderClient {
   constructor({
     baseUrl,
@@ -34,14 +38,32 @@ export class WasenderClient {
     this.lanes = { normal: [], low: [] };
     this.lowLaneMaxWaitMs = lowLaneMaxWaitMs;
     this.pumping = false;
+    // Set by the server once the alert path exists: onBacklog({ waiting, waitMs }).
+    this.onBacklog = null;
+    this.lastBacklogAlertAt = 0;
   }
 
-  async sendMessage({ to, message, priority = 'normal' }) {
-    return this.enqueue(() => this.sendMessageWithRetries({ to, message }), priority);
+  // `beforeDispatch` (optional, async) runs inside the queue slot, right before the request leaves. If it throws, nothing
+  // is sent and the error is passed on: the caller uses it to mark "handed to WhatsApp" at the last moment, or to cancel
+  // a send that was taken over by someone else while it waited in the queue.
+  async sendMessage({ to, message, priority = 'normal', beforeDispatch = null }) {
+    return this.enqueue(async () => {
+      if (beforeDispatch) {
+        await beforeDispatch();
+      }
+      return this.sendMessageWithRetries({ to, message });
+    }, priority);
   }
 
   async sendPoll({ to, question, options }) {
     return this.enqueue(() => this.sendMessageWithRetries({ to, poll: { question, options, multiSelect: false } }), 'normal');
+  }
+
+  // How many sends wait and how long the oldest has waited (numbers only; shown on the readiness page).
+  queueStats() {
+    const heads = [this.lanes.normal[0], this.lanes.low[0]].filter(Boolean);
+    const oldestWaitMs = heads.length ? Math.max(...heads.map((entry) => this.now() - entry.queuedAt)) : 0;
+    return { waiting: this.lanes.normal.length + this.lanes.low.length, oldestWaitMs: Math.max(0, oldestWaitMs) };
   }
 
   // Number of sends waiting per lane (for tests and logs).
@@ -69,6 +91,7 @@ export class WasenderClient {
         if (!next) {
           return;
         }
+        this.checkBacklog(next);
         try {
           next.resolve(await next.job());
         } catch (error) {
@@ -77,6 +100,27 @@ export class WasenderClient {
       }
     } finally {
       this.pumping = false;
+    }
+  }
+
+  // Called every minute by the server: a queue stuck behind a hanging send still raises the alert.
+  checkQueueAge() {
+    const { waiting, oldestWaitMs } = this.queueStats();
+    if (waiting > 0) {
+      this.checkBacklog({ queuedAt: this.now() - oldestWaitMs });
+    }
+  }
+
+  checkBacklog(next) {
+    const waitMs = this.now() - next.queuedAt;
+    if (!this.onBacklog || waitMs < BACKLOG_ALERT_AFTER_MS || this.now() - this.lastBacklogAlertAt < BACKLOG_ALERT_EVERY_MS) {
+      return;
+    }
+    this.lastBacklogAlertAt = this.now();
+    try {
+      this.onBacklog({ waiting: this.lanes.normal.length + this.lanes.low.length + 1, waitMs });
+    } catch (error) {
+      this.logger.warn(`[wasender] backlog alert failed: ${error?.message || error}`);
     }
   }
 
