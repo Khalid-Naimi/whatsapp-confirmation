@@ -490,7 +490,8 @@ export class HdAutoSendService {
       trackingNumber: '—',
       problem: '',
       customerPhone: raw?.shipping?.phone || raw?.billing?.phone || '',
-      deliveryCity: raw?.shipping?.city || raw?.billing?.city || '',
+      // The checkout keeps the customer's city in the billing STATE field (the city field is empty); the same order as the parcel.
+      deliveryCity: raw?.shipping?.city || raw?.billing?.city || raw?.shipping?.state || raw?.billing?.state || '',
       deliveryAddress: [raw?.shipping?.address_1, raw?.shipping?.address_2].filter(Boolean).join(', ')
         || [raw?.billing?.address_1, raw?.billing?.address_2].filter(Boolean).join(', '),
       orderItemsSummary: summarizeOrderItems(raw?.line_items || []),

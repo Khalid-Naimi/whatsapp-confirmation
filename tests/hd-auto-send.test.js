@@ -315,3 +315,10 @@ test('one WhatsApp number failing does not stop the other', async () => {
   assert.equal(result.notified, 1);
   assert.deepEqual(sent.map((m) => m.to), ['+491729031097']);
 });
+
+test('the team notice shows the city when the checkout keeps it in the state field and the city field is empty', async () => {
+  const { service, sent } = makeService({ order: wooOrder({ shipping: {}, billing: { first_name: 'Jane', last_name: 'Doe', phone: '0612345678', address_1: 'Rue 1', city: '', state: 'EL KELAÂ DES SRAGHNA' } }) });
+  const result = await service.autoSend({ orderId: '501' });
+  assert.equal(result.status, 'sent');
+  assert.match(sent[0].message, /Ville: EL KELAÂ DES SRAGHNA\n/u);
+});
