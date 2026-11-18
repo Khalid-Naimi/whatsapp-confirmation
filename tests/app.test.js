@@ -982,6 +982,36 @@ test('reply 1 confirms and updates WooCommerce to on-hold', async () => {
   assert.equal(store.getOrder('103').internalNotifiedConfirmed, 'yes');
 });
 
+for (const [typed, state, status] of [['1.', 'confirmed', 'on-hold'], ['Option 2', 'cancelled', 'cancelled']]) {
+  test(`a typed "${typed}" counts like a poll vote`, async () => {
+    const { app, store, wooOrderUpdates } = createTestContext();
+    const orderPayload = {
+      id: 303,
+      status: 'pending',
+      total: '90.00',
+      currency: 'MAD',
+      billing: { first_name: 'Lina', last_name: 'B', phone: '212600000009', state: 'Casablanca' },
+      line_items: [{ name: 'Savon', quantity: 1 }]
+    };
+    await dispatch(app, {
+      method: 'POST',
+      url: '/webhooks/woocommerce',
+      headers: { 'x-wc-webhook-signature': signWoo(orderPayload), 'x-wc-webhook-delivery-id': 'delivery-typed' },
+      payload: orderPayload
+    });
+    const result = await dispatch(app, {
+      method: 'POST',
+      url: '/webhooks/wasender',
+      headers: { 'x-wasender-signature': signWasenderPlain() },
+      payload: { data: { messages: { key: { cleanedSenderPn: '212600000009', fromMe: false }, messageBody: typed } } }
+    });
+    assert.equal(result.statusCode, 200);
+    assert.equal(store.getOrder('303').decision, state);
+    assert.equal(wooOrderUpdates.find((u) => u.fields.status)?.fields.status, status);
+    assert.equal(store.getOrder('303').invalidReplyCount ?? 0, 0);
+  });
+}
+
 function pollVotePayload({ pollId = 'POLL1', voters = {}, fromMe = true } = {}) {
   return {
     event: 'poll.results',

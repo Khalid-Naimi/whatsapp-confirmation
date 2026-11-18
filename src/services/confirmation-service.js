@@ -13,6 +13,7 @@ import { interpolateTemplate, maskEmail, maskPhone, redactPhones, validatePhone 
 import { DEFAULT_WOO_STATUSES } from '../utils/hd-status.js';
 import { KeyedLock, outsideLocks } from '../utils/keyed-lock.js';
 import { isOptOutMessage } from '../utils/opt-out.js';
+import { parseDecisionReply } from '../utils/decision-reply.js';
 import { isQuietHours } from '../utils/quiet-hours.js';
 import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID } from './claim.js';
 import { feedbackMethods } from './confirmation/feedback.js';
@@ -623,7 +624,7 @@ export class ConfirmationService {
           this.logger.warn(`[confirmation] could not re-read orderId=${pendingOrder.orderId} before the reply: ${error.message}`);
         }
       }
-      const reply = message.kind === 'audio' ? '' : String(message.textBody || '').trim();
+      const reply = message.kind === 'audio' ? '' : parseDecisionReply(message.textBody);
       const decisionMeta = getDecisionMeta(pendingOrder.rawOrder || {});
       if (decisionMeta.lastConfirmationMessageKey && decisionMeta.lastConfirmationMessageKey === message.messageKey) {
         return {
@@ -1823,7 +1824,7 @@ function isSameFinalDecision(order, inbound) {
     return false;
   }
 
-  const reply = inbound.text.trim();
+  const reply = parseDecisionReply(inbound.text);
   if (reply !== '1' && reply !== '2') {
     return false;
   }
