@@ -64,7 +64,7 @@ Backend-only Node.js service that:
 - `INVALID_REPLY_MESSAGE`: invalid-reply follow-up message
 - `REMINDER_MESSAGE`: 24h/48h reminder template
 - `CONFIRMED_REPLY_MESSAGE`: confirmation follow-up message. The default says thanks, gives the order number and the tracking link (`{{customerName}}`, `{{orderId}}` and `{{trackingUrl}}` can be used in a text set here)
-- `TRACKING_URL_BASE`: where the link in that message points, default `rhymat.ma/suivi` (the order number is added as `?n=<orderId>` and the /suivi page fills it in)
+- `TRACKING_URL_BASE`: where the link in that message points, default `https://rhymat.ma/suivi` (the order number is added as `?n=<orderId>` and the /suivi page fills it in)
 - `CANCELLED_REPLY_MESSAGE`: cancellation follow-up message
 - `CANCELLATION_EMAIL_SUBJECT`: subject template for invalid/non-WhatsApp cancellation emails
 - `CANCELLATION_EMAIL_BODY`: body template for invalid/non-WhatsApp cancellation emails

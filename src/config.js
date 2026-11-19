@@ -299,7 +299,7 @@ export function loadConfig(env = process.env) {
         'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.',
       confirmedReply: env.CONFIRMED_REPLY_MESSAGE || CONFIRMED_REPLY_TEMPLATE,
       // Where the "Suivi" link in the confirmed reply points; the order number is added as ?n=<orderId> (the /suivi page pre-fills it).
-      trackingUrlBase: env.TRACKING_URL_BASE || 'rhymat.ma/suivi',
+      trackingUrlBase: env.TRACKING_URL_BASE || 'https://rhymat.ma/suivi',
       cancelledReply: env.CANCELLED_REPLY_MESSAGE ||
         'La commande dyalk t annulat.',
       cancellationEmailSubject: env.CANCELLATION_EMAIL_SUBJECT ||
@@ -376,7 +376,7 @@ const AUTOMATIC_NOTICE = 'Hada message automatique, ila 3endek chi question, sef
 export const CONFIRMED_REPLY_TEMPLATE = [
   'Chokran {{customerName}}, la commande dyalk t confirmat.',
   'Numero dyal la commande: {{orderId}}',
-  'Suivi: {{trackingUrl}}',
+  'Tbe3 la commande dyalk: {{trackingUrl}}',
   'Ghadi ytwasl m3ak livreur mli twsl lmdintk.'
 ].join('\n');
 

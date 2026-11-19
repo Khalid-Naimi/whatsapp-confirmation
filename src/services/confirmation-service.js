@@ -1107,7 +1107,7 @@ export class ConfirmationService {
 
   // The link customers get in the confirmed reply: the /suivi page with their order number already filled in.
   trackingLink(orderId) {
-    const base = String(this.messages?.trackingUrlBase || 'rhymat.ma/suivi').replace(/[?#].*$/u, '').replace(/\/+$/u, '');
+    const base = String(this.messages?.trackingUrlBase || 'https://rhymat.ma/suivi').replace(/[?#].*$/u, '').replace(/\/+$/u, '');
     return `${base}?n=${encodeURIComponent(String(orderId ?? ''))}`;
   }
 

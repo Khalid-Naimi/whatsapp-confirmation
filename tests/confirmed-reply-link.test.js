@@ -52,7 +52,7 @@ test('the confirmed reply carries the name, the order number and the tracking li
   assert.equal(text, [
     'Chokran Yassine Test, la commande dyalk t confirmat.',
     'Numero dyal la commande: 10412',
-    'Suivi: rhymat.ma/suivi?n=10412',
+    'Tbe3 la commande dyalk: https://rhymat.ma/suivi?n=10412',
     'Ghadi ytwasl m3ak livreur mli twsl lmdintk.'
   ].join('\n'));
 });
