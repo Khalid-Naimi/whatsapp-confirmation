@@ -52,7 +52,7 @@ export const FEEDBACK_META_KEYS = Object.freeze({
   payloadJson: 'rhymat_feedback_payload_json'
 });
 
-// --- Order meta: feedback requests and self-tests (WordPress feedback plugin writes them; the server only reads) ----
+// --- Order meta: feedback requests and self-tests (the WordPress feedback plugin writes them; the server also writes the token and request times when it sends the automatic feedback request) ----
 export const FEEDBACK_TEST_META_KEYS = Object.freeze({
   token: 'rhymat_feedback_token',
   testPhone: 'rhymat_feedback_test_phone',
@@ -74,7 +74,8 @@ export const OUTBOUND_LOGICAL_KEYS = Object.freeze({
   cancellationSuccess: 'customer:cancellation_success',
   autoCancellation: 'customer:auto_cancellation',
   hdShipped: 'customer:hd_shipped',
-  hdArriving: 'customer:hd_arriving'
+  hdArriving: 'customer:hd_arriving',
+  feedbackRequest: 'customer:feedback_request'
 });
 
 export const OUTBOUND_META_KEYS = Object.freeze({
@@ -122,6 +123,12 @@ export const OUTBOUND_META_KEYS = Object.freeze({
     reservedAt: 'rhymat_whatsapp_hd_arriving_reserved_at',
     sentAt: 'rhymat_whatsapp_hd_arriving_sent_at',
     messageId: 'rhymat_whatsapp_hd_arriving_message_id'
+  }),
+  [OUTBOUND_LOGICAL_KEYS.feedbackRequest]: Object.freeze({
+    state: 'rhymat_whatsapp_feedback_request_state',
+    reservedAt: 'rhymat_whatsapp_feedback_request_reserved_at',
+    sentAt: 'rhymat_whatsapp_feedback_request_sent_at',
+    messageId: 'rhymat_whatsapp_feedback_request_message_id'
   })
 });
 
@@ -213,7 +220,12 @@ function buildRegistry() {
       // The feedback state is set to waiting_for_feedback by WordPress and to reply_received by the server.
       row.key === FEEDBACK_META_KEYS.state ? { ...row, owner: 'wordpress', alsoWrittenBy: ['server'] } : row
     )),
-    ...rows('order', 'wordpress', 'feedback request', FEEDBACK_TEST_META_KEYS),
+    ...rows('order', 'wordpress', 'feedback request', FEEDBACK_TEST_META_KEYS).map((row) => (
+      // The server's automatic feedback request (feedback-request-service.js) writes the token and the request times.
+      [FEEDBACK_TEST_META_KEYS.token, FEEDBACK_TEST_META_KEYS.requestedAt, FEEDBACK_TEST_META_KEYS.sentAt].includes(row.key)
+        ? { ...row, alsoWrittenBy: ['server'] }
+        : row
+    )),
     ...outboundRows(),
     // The desktop app writes the same claim, state and sent time when it sends an order itself (two-way claim).
     ...rows('order', 'server', 'highdelivery auto-send', HD_META).map((row) => (

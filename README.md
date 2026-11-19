@@ -147,6 +147,15 @@ The desktop Matching page writes one JSON document per WooCommerce product into 
 | `HD_LINKS_FOR_ORDERS` | `on` | `off`, `shadow` or `on` (see above) |
 | `MATCHING_ALERTS_ENABLED` | `false` | one WhatsApp digest to the team when a new product or HighDelivery item has no link (product names only; again after 7 days if still unlinked) |
 
+## Automatic feedback request
+
+The hourly task (after the HighDelivery status sync) sends the feedback message, with the invitation to send a video on rhymat.ma/video, once to each customer whose parcel was delivered 3 days ago. Code: `src/services/feedback-request-service.js` and `sendFeedbackRequest` in `confirmation-service.js`.
+
+- Only parcels whose delivery was saved on or after `FEEDBACK_REQUEST_FROM` (default `2026-11-19T00:00:00Z`) and at most `FEEDBACK_REQUEST_MAX_AGE_DAYS` (14) ago, so turning it on never messages old orders.
+- `FEEDBACK_REQUEST_ENABLED` (default on), `FEEDBACK_REQUEST_DELAY_DAYS` (3), `FEEDBACK_REQUEST_MAX_PER_RUN` (30), `FEEDBACK_REQUEST_MESSAGE` (text; `{{customerName}}`, `{{feedbackToken}}`; the automatic-message line is added by the service).
+- Never twice: reserved like the shipped message (`rhymat_whatsapp_feedback_request_*`), and skipped when the order already has a feedback request time, token or state (for example one sent by the desktop app). Not in quiet hours; not to opted-out numbers.
+- After the send the order gets `rhymat_feedback_state=waiting_for_feedback`, the token `FDBK-<order id>` and the request times, so the customer's reply is matched to the order as before.
+
 ## Notes
 
 - The JSON file (`DATA_FILE`) is only a fast local cache and debug history: Render wipes it on every deploy or restart. The data is kept in memory and written to the file at most once per second, plus on SIGTERM and at process exit; every read hands out a copy. Orders older than 120 days are dropped from it unless still waiting for a confirmation or feedback reply (contacts stay). Writes are atomic (temp file + rename), an unreadable file is moved aside as `.corrupt-<time>` and the service starts empty, events and messages keep the newest 5000, and events store a small summary instead of the webhook body.

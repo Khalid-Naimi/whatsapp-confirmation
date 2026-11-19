@@ -6,7 +6,7 @@ import { log, redact } from './log.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 
-export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, healthTracker = null, hdClient = null, stockSyncService = null, durableState = null, alerts = null, queueStats = null, logger = console, maxBodyBytes = MAX_BODY_BYTES }) {
+export function createApp({ config, confirmationService, store, stockAlertService = null, hdStatusSyncService = null, feedbackRequestService = null, healthTracker = null, hdClient = null, stockSyncService = null, durableState = null, alerts = null, queueStats = null, logger = console, maxBodyBytes = MAX_BODY_BYTES }) {
   // The hourly task must never run twice at once (two runs could message the same customer twice).
   let followupsRunning = false;
 
@@ -53,6 +53,14 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         hdStatus = await hdStatusSyncService.run();
       } catch (error) {
         logger.warn(`[task][order-followups] hd status sync failed: ${redact(error.message)}`);
+      }
+    }
+    // The feedback request, three days after a delivery (never breaks the other steps).
+    if (feedbackRequestService) {
+      try {
+        await feedbackRequestService.run();
+      } catch (error) {
+        logger.warn(`[task][order-followups] feedback requests failed: ${redact(error.message)}`);
       }
     }
     // Stock alerts held back by the quiet hours go out now.

@@ -272,6 +272,15 @@ export function loadConfig(env = process.env) {
       writeDelayMs: parseCountEnv(env.STOCK_SYNC_WRITE_DELAY_MS, 300)
     },
     // A WhatsApp digest to the team phones when a new product has no HighDelivery link yet.
+    // The automatic feedback request (services/feedback-request-service.js): once per delivered order, after the delay,
+    // only for parcels delivered on or after `from` (so turning it on never messages old orders), never in quiet hours.
+    feedbackRequest: {
+      enabled: parseBooleanEnv(env.FEEDBACK_REQUEST_ENABLED, true),
+      delayDays: parseCountEnv(env.FEEDBACK_REQUEST_DELAY_DAYS, 3),
+      from: String(env.FEEDBACK_REQUEST_FROM || '2026-11-19T00:00:00Z').trim(),
+      maxAgeDays: parseCountEnv(env.FEEDBACK_REQUEST_MAX_AGE_DAYS, 14),
+      maxPerRun: parseCountEnv(env.FEEDBACK_REQUEST_MAX_PER_RUN, 30)
+    },
     matchingAlertsEnabled: parseBooleanEnv(env.MATCHING_ALERTS_ENABLED, false),
     alertEmailTo: (env.ALERT_EMAIL_TO || '').trim(),
     messages: withAutomaticNotices({
@@ -314,6 +323,9 @@ export function loadConfig(env = process.env) {
         'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) khrjat mn 3endna. Ghadi twsl lik f {{deliveryEta}}. Chokran.',
       outForDeliveryMessage: env.HD_ARRIVING_MESSAGE ||
         'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) wesslat lyoum {{deliveryCity}}, livreur ghadi ytassel bik, 3afak dir balek m3a telephone, itoub.',
+      // The feedback request: sent once, FEEDBACK_REQUEST_DELAY_DAYS after the parcel was delivered (see feedbackRequest).
+      feedbackRequestMessage: env.FEEDBACK_REQUEST_MESSAGE ||
+        'Salam {{customerName}}, itoub 3la la commande\n\nIla 9drti tkhlilna message, tswera, audio wla video 3la kifach jatk la commande, ghatkoun 3awntina bezaf.\n\nAwla t9dr tposter video wla lien dyal tiktok dyalk labess Rhymat hna: rhymat.ma/video\nW ghan9dro n7etoh f la page tiktok dyalna w ntaguiwk\n\nRéférence: {{feedbackToken}}',
       deliveryEtaCasablanca: env.DELIVERY_ETA_CASABLANCA || '24h',
       deliveryEtaOtherCities: env.DELIVERY_ETA_OTHER_CITIES || '2 a 3 jours ouvrables',
       defaultCityLabel: env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'
@@ -384,7 +396,7 @@ export function withAutomaticNotice(text, shopContactPhone) {
 // Every customer WhatsApp text of the confirmation service ends with that line (the stock and drop alerts too, once set).
 const CUSTOMER_MESSAGE_KEYS = [
   'confirmationTemplate', 'invalidReply', 'reminderMessage', 'confirmedReply', 'cancelledReply',
-  'shippedMessage', 'outForDeliveryMessage', 'stockAlertTemplate', 'dropAlertTemplate'
+  'shippedMessage', 'outForDeliveryMessage', 'feedbackRequestMessage', 'stockAlertTemplate', 'dropAlertTemplate'
 ];
 
 function withAutomaticNotices(messages, shopContactPhone) {

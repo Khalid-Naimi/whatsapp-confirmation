@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { redact } from '../log.js';
-import { OUTBOUND_LOGICAL_KEYS } from '../domain/order-meta.js';
+import { FEEDBACK_META_KEYS, FEEDBACK_TEST_META_KEYS, OUTBOUND_LOGICAL_KEYS } from '../domain/order-meta.js';
 import {
   ACTIVE_CONFIRMATION_STATUSES,
   DECISION,
@@ -986,6 +986,83 @@ export class ConfirmationService {
         );
       } catch (metaError) {
         this.logger.warn(`[hd-status] could not record the unreachable number orderId=${normalizedOrder.orderId}: ${metaError.message}`);
+      }
+      return { sent: false, reason: 'unreachable' };
+    }
+    if (outcome.deferred) {
+      return { sent: false, reason: 'quiet_hours' };
+    }
+    if (outcome.duplicate || outcome.ambiguous) {
+      return { sent: false, reason: outcome.ambiguous ? 'ambiguous' : 'already_sent' };
+    }
+    return { sent: outcome.ok === true, reason: '' };
+  }
+
+  // The one feedback request of a delivered order (FeedbackRequestService decides when). Same safety as the stage
+  // messages: reserved before sending, never twice, never in quiet hours. After the send the order gets the same
+  // rhymat_feedback_* fields the desktop app used to write, so the customer's reply is matched to the order.
+  async sendFeedbackRequest(orderPayload, now = new Date()) {
+    const normalizedOrder = normalizeWooOrder(orderPayload, this.messages);
+    const template = this.messages.feedbackRequestMessage;
+    if (!template || !normalizedOrder.phone) {
+      return { sent: false, reason: 'no_template_or_phone' };
+    }
+    if (this.store?.isPhoneOptedOut?.(normalizedOrder.phone) || this.durableState?.isOptedOut?.(normalizedOrder.phone)) {
+      return { sent: false, reason: 'opted_out' };
+    }
+    const logicalKey = OUTBOUND_LOGICAL_KEYS.feedbackRequest;
+    if (getOutboundReservationMeta(orderPayload, logicalKey).state === SEND_STATE.failed) {
+      return { sent: false, reason: 'unreachable' };
+    }
+    const token = `FDBK-${normalizedOrder.orderId}`;
+    let outcome;
+    try {
+      outcome = await this.sendLogicalMessageWithWooReservation({
+        orderPayload,
+        orderId: normalizedOrder.orderId,
+        phone: normalizedOrder.phone,
+        logicalKey,
+        kind: 'feedback_request',
+        message: interpolateTemplate(template, { ...buildTemplateValues(normalizedOrder), feedbackToken: token }),
+        now,
+        persistAfterSend: async ({ acceptedAt, providerMessageId, reservedAt, reservationOrder }) => {
+          const existing = Array.isArray(reservationOrder?.meta_data) ? reservationOrder.meta_data : [];
+          const field = (key, value) => {
+            const row = existing.find((item) => item.key === key);
+            return row?.id ? { id: row.id, key, value } : { key, value };
+          };
+          const updated = await this.wooClient.updateOrderMeta(
+            normalizedOrder.orderId,
+            mergeMetaUpdates(
+              buildLogicalSendMetaUpdate(reservationOrder, logicalKey, {
+                state: SEND_STATE.sent,
+                reservedAt,
+                sentAt: acceptedAt,
+                messageId: providerMessageId
+              }),
+              [
+                field(FEEDBACK_META_KEYS.state, 'waiting_for_feedback'),
+                field(FEEDBACK_TEST_META_KEYS.token, token),
+                field(FEEDBACK_TEST_META_KEYS.sentAt, acceptedAt),
+                field(FEEDBACK_TEST_META_KEYS.requestedAt, acceptedAt)
+              ]
+            )
+          );
+          await this.safeAddOrderNote(normalizedOrder.orderId, 'Feedback request sent to the customer on WhatsApp.');
+          return updated;
+        }
+      });
+    } catch (error) {
+      if (!isWhatsAppContactabilityFailure(error)) {
+        throw error;
+      }
+      try {
+        await this.wooClient.updateOrderMeta(
+          normalizedOrder.orderId,
+          buildLogicalSendMetaUpdate(orderPayload, logicalKey, { state: SEND_STATE.failed, reservedAt: now.toISOString() })
+        );
+      } catch (metaError) {
+        this.logger.warn(`[feedback-request] could not record the unreachable number orderId=${normalizedOrder.orderId}: ${metaError.message}`);
       }
       return { sent: false, reason: 'unreachable' };
     }

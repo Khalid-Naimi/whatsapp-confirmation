@@ -8,6 +8,7 @@ import { ConfirmationService } from './services/confirmation-service.js';
 import { DurableState } from './services/durable-state.js';
 import { HdAutoSendService } from './services/hd-auto-send-service.js';
 import { HdStatusSyncService } from './services/hd-status-sync-service.js';
+import { FeedbackRequestService } from './services/feedback-request-service.js';
 import { HighDeliveryClient } from './services/highdelivery-client.js';
 import { LinkIndex } from './services/link-index.js';
 import { MatchingWatch } from './services/matching-watch.js';
@@ -152,6 +153,15 @@ const hdStatusSyncService = new HdStatusSyncService({
 });
 logger.log(`HighDelivery status sync is ${config.highDelivery.statusSyncEnabled ? 'ON' : 'OFF'}; quiet hours ${config.messages.quietHours.enabled ? `${config.messages.quietHours.startHour}:00-${config.messages.quietHours.endHour}:00 (weekends ${config.messages.quietHours.weekendEndHour}:00) ${config.messages.quietHours.timeZone}` : 'OFF'}.`);
 
+const feedbackRequestService = new FeedbackRequestService({
+  confirmationService,
+  wooClient,
+  config: config.feedbackRequest,
+  wooStatuses: config.wooStatuses,
+  logger
+});
+logger.log(`Automatic feedback request is ${config.feedbackRequest.enabled ? 'ON' : 'OFF'}: ${config.feedbackRequest.delayDays} days after delivery, for parcels delivered from ${config.feedbackRequest.from}.`);
+
 const stockAlertService = new StockAlertService({
   store,
   wasenderClient,
@@ -182,6 +192,7 @@ const app = createApp({
   store,
   stockAlertService,
   hdStatusSyncService,
+  feedbackRequestService,
   healthTracker,
   hdClient: hdAutoSend.hdClient,
   stockSyncService,
