@@ -97,7 +97,7 @@ test('the delivery messages use the agreed wording', () => {
   const { messages } = loadConfig(GOOD);
   assert.match(messages.shippedMessage, /khrjat mn 3endna/u);
   assert.doesNotMatch(messages.shippedMessage, /tkhrjat/u);
-  assert.match(messages.outForDeliveryMessage, /wesslat lyoum \{\{deliveryCity\}\}, livreur ghadi ytassel bik, 3afak dir balek m3a telephone, itoub\./u);
+  assert.match(messages.outForDeliveryMessage, /wslat lmdintk\. Lyouma ghadi ytassel bik livreur, 3afak dir balk m3a telephone dyalk\./u);
   assert.match(messages.confirmationTemplate, /Livraison: \{\{deliveryEta\}\}/u);
   assert.doesNotMatch(messages.confirmationTemplate, /Tawsil/u);
 });
