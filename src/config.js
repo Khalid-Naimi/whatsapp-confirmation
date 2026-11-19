@@ -297,8 +297,9 @@ export function loadConfig(env = process.env) {
         '3afak jawb ghir b 1 bash t confirmer la commande, wela b 2 bach t annuler la commande.',
       reminderMessage: env.REMINDER_MESSAGE ||
         'Salam {{customerName}}, mazal ma jawbtinach 3la la commande dyalk numero {{orderId}}. 3afak jawb ghir b 1 bash t confirmer, wela b 2 bash t annuler.',
-      confirmedReply: env.CONFIRMED_REPLY_MESSAGE ||
-        'Chokran, la commande dyalk t confirmat. Ghadi ytwasl m3ak livreur mli twsl la commande lmdintk.',
+      confirmedReply: env.CONFIRMED_REPLY_MESSAGE || CONFIRMED_REPLY_TEMPLATE,
+      // Where the "Suivi" link in the confirmed reply points; the order number is added as ?n=<orderId> (the /suivi page pre-fills it).
+      trackingUrlBase: env.TRACKING_URL_BASE || 'rhymat.ma/suivi',
       cancelledReply: env.CANCELLED_REPLY_MESSAGE ||
         'La commande dyalk t annulat.',
       cancellationEmailSubject: env.CANCELLATION_EMAIL_SUBJECT ||
@@ -370,6 +371,14 @@ function parsePhoneList(value) {
 // The "write to this number with a question" sentence of the default customer texts. Without SHOP_CONTACT_PHONE
 // (possible only with CONFIG_STRICT=0) the sentence is left out instead of ending on an empty number.
 const AUTOMATIC_NOTICE = 'Hada message automatique, ila 3endek chi question, seft la question dyalk l had numero:';
+
+// Sent when the customer answers 1: thanks, the order number and the tracking link (the /suivi page on the shop).
+export const CONFIRMED_REPLY_TEMPLATE = [
+  'Chokran {{customerName}}, la commande dyalk t confirmat.',
+  'Numero dyal la commande: {{orderId}}',
+  'Suivi: {{trackingUrl}}',
+  'Ghadi ytwasl m3ak livreur mli twsl lmdintk.'
+].join('\n');
 
 const CONFIRMATION_TEMPLATE = [
   'Salam {{customerName}}, twsselna b la commande dyalk.',

@@ -1105,6 +1105,12 @@ export class ConfirmationService {
     return (updated?.customerReplySent || '') === 'yes';
   }
 
+  // The link customers get in the confirmed reply: the /suivi page with their order number already filled in.
+  trackingLink(orderId) {
+    const base = String(this.messages?.trackingUrlBase || 'rhymat.ma/suivi').replace(/[?#].*$/u, '').replace(/\/+$/u, '');
+    return `${base}?n=${encodeURIComponent(String(orderId ?? ''))}`;
+  }
+
   async sendCustomerDecisionReply({ order, decisionOrderPayload, phone, logicalKey, nextState, nowIso, currentInvalidReplyCount, message, reservationNow = null }) {
     // Quiet hours hold the reply back: remember that, so the hourly task sends exactly this reply later.
     if (this.isQuietNow()) {
@@ -1117,13 +1123,18 @@ export class ConfirmationService {
         this.logger.warn(`[quiet-hours] could not mark the held reply orderId=${order.orderId}: ${error.message}`);
       }
     }
+    // The reply may carry the customer's name, the order number and the tracking link ({{customerName}}, {{orderId}}, {{trackingUrl}}).
+    const renderedMessage = interpolateTemplate(String(message ?? ''), {
+      ...buildTemplateValues(normalizeWooOrder(decisionOrderPayload, this.messages)),
+      trackingUrl: this.trackingLink(order.orderId)
+    });
     const sendOutcome = await this.sendLogicalMessageWithWooReservation({
       orderPayload: decisionOrderPayload,
       orderId: order.orderId,
       phone,
       logicalKey,
       kind: logicalKey === OUTBOUND_LOGICAL_KEYS.confirmationSuccess ? 'confirmation_success' : 'cancellation_success',
-      message,
+      message: renderedMessage,
       now: reservationNow || new Date(nowIso),
       persistAfterSend: async ({ providerMessageId, reservedAt, reservationOrder }) => {
         const updatedOrder = await this.persistWorkflowAndDecisionMeta({
