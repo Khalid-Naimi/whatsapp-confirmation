@@ -313,7 +313,7 @@ export function loadConfig(env = process.env) {
       shippedMessage: env.HD_SHIPPED_MESSAGE ||
         'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) khrjat mn 3endna. Ghadi twsl lik f {{deliveryEta}}. Chokran.',
       outForDeliveryMessage: env.HD_ARRIVING_MESSAGE ||
-        'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) wslat lmdintk. Lyouma ghadi ytassel bik livreur, 3afak dir balk m3a telephone dyalk.',
+        'Salam {{customerName}}, la commande dyalk (numero {{orderId}}) wesslat lyoum {{deliveryCity}}, livreur ghadi ytassel bik, 3afak dir balek m3a telephone, itoub.',
       deliveryEtaCasablanca: env.DELIVERY_ETA_CASABLANCA || '24h',
       deliveryEtaOtherCities: env.DELIVERY_ETA_OTHER_CITIES || '2 a 3 jours ouvrables',
       defaultCityLabel: env.DEFAULT_DELIVERY_CITY_LABEL || 'Maghrib'
