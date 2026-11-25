@@ -29,6 +29,14 @@ export const HD_STATUSES = Object.freeze([
   'returned_to_stock'
 ]);
 
+// The courier has the parcel from "picked_up" on: the customer can no longer cancel or change the order. Not collected
+// = no status, created, pickup_pending, saved, cancelled.
+export const HD_COLLECTED_STATUSES = new Set([
+  'picked_up', 'in_hub', 'dispatched_to_runsheet', 'in_transit', 'out_for_delivery', 'delivered', 'postponed',
+  'not_delivered', 'refused', 'returned_by_driver', 'returned', 'returned_to_client', 'returned_to_stock'
+]);
+export const HD_NOT_COLLECTED_STATUSES = new Set(['', 'created', 'pickup_pending', 'saved', 'cancelled']);
+
 // WooCommerce statuses the service writes, by role (domain/order-states.js). The defaults are the shop's old codes
 // (on-hold = confirmed, completed = sent to HighDelivery and delivered). After the "Rhymat Order Statuses" plugin is
 // installed, set WOO_STATUS_CONFIRMED=confirmed and WOO_STATUS_DELIVERED=delivered. Reading always accepts both, so

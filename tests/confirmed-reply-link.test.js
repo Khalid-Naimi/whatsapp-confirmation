@@ -51,8 +51,20 @@ test('the confirmed reply carries the name, the order number and the tracking li
   const text = sent[0].text ?? sent[0].message ?? '';
   assert.equal(text, [
     'Chokran Yassine Test, la commande dyalk t confirmat.',
+    '',
     'Numero dyal la commande: 10412',
-    'Tbe3 la commande dyalk: https://rhymat.ma/suivi?n=10412',
+    '',
+    'Bghiti tracker wla tmodifier la commande dyalk:',
+    'https://rhymat.ma/suivi/?n=10412',
+    '',
+    'Mn had lien t9dr:',
+    '• Tzid un article',
+    '• T7yed un article',
+    '• Tbdel la taille',
+    '• T’annuler la commande',
+    '',
+    'Momkin tmodifier la commande fa9at 9bl manseftoha !',
+    '',
     'Ghadi ytwasl m3ak livreur mli twsl lmdintk.'
   ].join('\n'));
 });

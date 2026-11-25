@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { DECISION_META_KEYS, REPLACEMENT_META } from '../domain/order-meta.js';
+import { ACTIVE_CONFIRMATION_STATUSES, DECISION } from '../domain/order-states.js';
 import { HD_META } from './hd-auto-send-service.js';
 import { hasValidQuantity, warehouseQuantity } from './hd-product-match.js';
 import { findUnlinked } from './matching-watch.js';
@@ -36,12 +38,18 @@ export function computeTarget(hdQty, reserved, unit) {
 // Units of each HighDelivery item that open orders will still take: Map hdId -> quantity.
 // An order that is already at HighDelivery (state "sent") has been taken out of the HighDelivery stock; every
 // other open order counts, including "sending" and "unknown" (counting an order twice only under-sells).
+// A replacement order the customer has not confirmed holds nothing: the order it would replace still holds the stock.
 //   resolveLines(lineItems) -> [{ hdId, quantity }]
 //   resolveLines(lineItems, order) -> [{ hdId, quantity }]
 export function computeReservations(orders, resolveLines) {
   const reserved = new Map();
   for (const order of orders) {
     if (readMeta(order, HD_META.state) === 'sent') {
+      continue;
+    }
+    if (readMeta(order, REPLACEMENT_META.replaces)
+      && ACTIVE_CONFIRMATION_STATUSES.includes(String(order.status || ''))
+      && readMeta(order, DECISION_META_KEYS.decision) !== DECISION.confirmed) {
       continue;
     }
     for (const { hdId, quantity } of resolveLines(order.line_items, order)) {

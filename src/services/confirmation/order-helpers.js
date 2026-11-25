@@ -9,6 +9,7 @@ import {
   OUTBOUND_META_KEYS,
   outboundDispatchedKey,
   outboundFailureKey,
+  REPLACEMENT_META,
   WORKFLOW_META_KEYS
 } from '../../domain/order-meta.js';
 import { assertState, DECISION, OUTBOUND_SEND, WHATSAPP_WORKFLOW, WOO_STATUS, WORKFLOW_STATE } from '../../domain/order-states.js';
@@ -31,6 +32,29 @@ export function isExpectedStatusForDecision(status, decision, wooStatuses = DEFA
   return false;
 }
 
+export function readMetaText(order, key) {
+  const row = (Array.isArray(order?.meta_data) ? order.meta_data : []).find((item) => item?.key === key);
+  return row ? String(row.value ?? '') : '';
+}
+
+// The id of the order this one is meant to replace, or ''.
+export function replacedOrderId(order) {
+  const value = readMetaText(order, REPLACEMENT_META.replaces).trim();
+  return /^\d+$/u.test(value) && value !== '0' && value !== String(order?.id ?? '') ? value : '';
+}
+
+// The local form (05..., 06..., 07...) is read as Moroccan: a half-finished /suivi change that left it on an order must
+// never end with the order cancelled as "invalid phone".
+export function moroccanLocalPhone(value) {
+  const digits = String(value || '').replace(/[\s.()-]/gu, '');
+  return /^0[5-7]\d{8}$/u.test(digits) ? `+212${digits.slice(1)}` : '';
+}
+
+function orderPhone(payload) {
+  const raw = payload.billing?.phone || payload.shipping?.phone;
+  return normalizePhone(raw) || moroccanLocalPhone(raw);
+}
+
 export function normalizeWooOrder(payload, messages) {
   const billing = payload.billing || {};
   const shipping = payload.shipping || {};
@@ -45,7 +69,7 @@ export function normalizeWooOrder(payload, messages) {
 
   return {
     orderId: String(payload.id),
-    phone: normalizePhone(billing.phone || shipping.phone),
+    phone: orderPhone(payload),
     customerEmail: String(billing.email || '').trim(),
     customerName: [billing.first_name, billing.last_name].filter(Boolean).join(' ').trim(),
     total: payload.total,

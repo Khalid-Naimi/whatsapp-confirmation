@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { secretMatchesAny, verifyWasenderSignature, verifyWooSignature } from './utils/signatures.js';
 import { buildHealthDetails, buildReadiness } from './services/health-tracker.js';
 import { warehouseQuantity } from './services/hd-product-match.js';
+import { MANAGE_KINDS } from './services/confirmation/manage.js';
 import { log, redact } from './log.js';
 
 export const MAX_BODY_BYTES = 1024 * 1024;
@@ -72,6 +73,32 @@ export function createApp({ config, confirmationService, store, stockAlertServic
       }
     }
     return { result, hdStatus, followupsError };
+  }
+
+  // The website's "manage my order" page. A refusal is HTTP 200 { ok:false, reason }.
+  async function handleManage(res, action, body) {
+    const orderId = String(body?.orderId ?? '');
+    const needsKind = action === 'check' || action === 'send';
+    if (!/^[1-9]\d{0,11}$/u.test(orderId) || (needsKind && !MANAGE_KINDS.includes(body.kind))) {
+      return sendJson(res, 400, { ok: false, reason: 'bad_request' });
+    }
+    try {
+      let result;
+      if (action === 'check') {
+        result = await confirmationService.manageCheck(orderId, body.kind);
+      } else if (action === 'send') {
+        result = await confirmationService.manageSend(orderId, body.kind);
+      } else if (action === 'cancel') {
+        result = await confirmationService.manageCancel(orderId, body.reason);
+      } else {
+        result = await confirmationService.manageDropReplacement(orderId);
+      }
+      logger.log(`[task][manage] ${action} orderId=${orderId} kind=${needsKind ? body.kind : '-'} ok=${result.ok} reason=${result.reason || ''}`);
+      return sendJson(res, 200, result);
+    } catch (error) {
+      logger.error(`[task][manage] ${action} failed orderId=${orderId}: ${redact(error.message)}`);
+      return sendJson(res, 500, { ok: false, reason: 'internal_error' });
+    }
   }
 
   // The HighDelivery items with their ids, so the desktop app links products to ids and not to names.
@@ -340,6 +367,14 @@ export function createApp({ config, confirmationService, store, stockAlertServic
           return sendJson(res, 202, { ok: true, skipped: 'already_running' });
         }
         return sendJson(res, 200, { ok: true, ...result });
+      }
+
+      const manageMatch = pathname.match(/^\/tasks\/manage\/(check|send|cancel|drop-replacement)$/);
+      if (manageMatch) {
+        if (!checkTaskSecret(req, res, 'task][manage')) {
+          return undefined;
+        }
+        return handleManage(res, manageMatch[1], parseJsonBody(rawBody));
       }
 
       // The website calls this when someone sends a video on rhymat.ma/video: the team gets one WhatsApp with a link to

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { redact } from '../log.js';
-import { FEEDBACK_META_KEYS, FEEDBACK_TEST_META_KEYS, OUTBOUND_LOGICAL_KEYS } from '../domain/order-meta.js';
+import { FEEDBACK_META_KEYS, FEEDBACK_TEST_META_KEYS, MANAGE_META, OUTBOUND_LOGICAL_KEYS } from '../domain/order-meta.js';
 import {
   ACTIVE_CONFIRMATION_STATUSES,
   DECISION,
@@ -18,6 +18,7 @@ import { isQuietHours } from '../utils/quiet-hours.js';
 import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID } from './claim.js';
 import { feedbackMethods } from './confirmation/feedback.js';
 import { followupMethods } from './confirmation/followups.js';
+import { DEFAULT_MANAGE_DAILY_SHOP_LIMIT, MANAGE_DISPATCH_BUDGET_MS, MANAGE_HOLD_MS, manageMethods } from './confirmation/manage.js';
 import {
   CONFIRMATION_POLL_OPTIONS,
   extractFeedbackToken,
@@ -42,11 +43,13 @@ import {
   isExpectedStatusForDecision,
   isFeedbackSelfTestOrder,
   mergeMetaUpdates,
-  normalizeWooOrder
+  normalizeWooOrder,
+  readMetaText,
+  replacedOrderId
 } from './confirmation/order-helpers.js';
 import { ordersReadModelMethods } from './confirmation/orders-read-model.js';
 import { reservedSendMethods } from './confirmation/outbound/reserved-send.js';
-import { WasenderSendError } from './wasender-client.js';
+import { isWhatsAppContactabilityFailure } from './wasender-client.js';
 
 const REPLY_RECOVERY_STATUSES = [...ACTIVE_CONFIRMATION_STATUSES];
 const MAX_WOO_SYNC_ATTEMPTS = 6;
@@ -61,8 +64,17 @@ const DEFAULT_INBOUND_ACK_BUDGET_MS = 1000;
 const DEFAULT_WOO_ACK_BUDGET_MS = 3000;
 
 export class ConfirmationService {
-  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, claimSettleMs = DEFAULT_CLAIM_SETTLE_MS, instanceId = INSTANCE_ID, inboundAckBudgetMs = DEFAULT_INBOUND_ACK_BUDGET_MS, wooAckBudgetMs = DEFAULT_WOO_ACK_BUDGET_MS, logger = console }) {
+  constructor({ store, wasenderClient, wooClient, mailService = null, wordpressClient = null, optOutKeywords = null, hdAutoSend = null, messages, wooStatuses = DEFAULT_WOO_STATUSES, durableState = null, notifyTeam = null, sleep = defaultSleep, claimSettleMs = DEFAULT_CLAIM_SETTLE_MS, instanceId = INSTANCE_ID, inboundAckBudgetMs = DEFAULT_INBOUND_ACK_BUDGET_MS, wooAckBudgetMs = DEFAULT_WOO_ACK_BUDGET_MS, manageSecret = '', manageDailyShopLimit = DEFAULT_MANAGE_DAILY_SHOP_LIMIT, manageDispatchBudgetMs = MANAGE_DISPATCH_BUDGET_MS, manageHoldMs = MANAGE_HOLD_MS, logger = console }) {
     this.store = store;
+    // The /suivi page (services/confirmation/manage.js): the key of its direct links and the shop-wide daily cap.
+    this.manageSecret = manageSecret;
+    this.manageDailyShopLimit = manageDailyShopLimit;
+    this.manageDispatchBudgetMs = manageDispatchBudgetMs;
+    this.manageHoldMs = manageHoldMs;
+    // orderId -> time until which the delayed first message holds back (a /suivi change just failed).
+    this.firstMessageHolds = new Map();
+    // Orders whose refused cancel request the team already heard about.
+    this.reportedCancelRequests = new Set();
     // Opt-outs are also saved in WooCommerce (services/durable-state.js): the local store is wiped on every restart.
     this.durableState = durableState;
     // One WhatsApp alert to the team phones (services/team-notifier.js); optional.
@@ -81,6 +93,10 @@ export class ConfirmationService {
     this.wordpressClient = wordpressClient;
     this.optOutKeywords = optOutKeywords;
     this.hdAutoSend = hdAutoSend;
+    if (hdAutoSend) {
+      // An auto-send held while the website changed the order starts again as a tracked task.
+      hdAutoSend.retrySend = (order) => this.scheduleHdAutoSend(order);
+    }
     this.backgroundTasks = new Set();
     this.messages = messages;
     // The Woo status written when the customer confirms (on-hold until the order statuses plugin is installed).
@@ -179,6 +195,11 @@ export class ConfirmationService {
         this.logger.log(`[confirmation] delayed send skipped orderId=${orderId} status=${String(order?.status || '')}`);
         return;
       }
+      // A replacement order is only ever started by /tasks/manage/send; a failed /suivi change is undone first.
+      if (replacedOrderId(order) || (this.firstMessageHolds.get(String(orderId)) || 0) > Date.now()) {
+        this.logger.log(`[confirmation] delayed send skipped orderId=${orderId} reason=left_to_manage_page`);
+        return;
+      }
       if (isConfirmationAlreadyStarted(getWorkflowMeta(order), this.store.getOrder(orderId))) {
         this.logger.log(`[confirmation] delayed send skipped orderId=${orderId} reason=already_started`);
         return;
@@ -274,6 +295,10 @@ export class ConfirmationService {
 
         if (isConfirmationAlreadyStarted(workflow, this.store.getOrder(normalizedOrder.orderId))) {
           return { status: 200, body: { ok: true, duplicate: true, reason: 'duplicate_order' } };
+        }
+
+        if (replacedOrderId(payload)) {
+          return { status: 200, body: { ok: true, skipped: true, reason: 'replacement_order' } };
         }
 
         const confirmationDelayMs = Number(this.messages.confirmationDelayMs) || 0;
@@ -556,7 +581,11 @@ export class ConfirmationService {
       { allowWooRecovery: options.allowWooRecovery !== false }
     );
     const typedAnswer = message.kind === 'audio' ? '' : parseDecisionReply(message.textBody);
-    const repeated = typedAnswer && resolvedReplyContext.pendingOrders.length > 0 && this.findRecentlyDecidedOrder(message.senderPhone, typedAnswer);
+    const decided = typedAnswer && resolvedReplyContext.pendingOrders.length > 0 && this.findRecentlyDecidedOrder(message.senderPhone, typedAnswer);
+    // Not a repeat when a /suivi message (a change, a replacement) went out after that decision: this answers it.
+    const repeated = decided && !resolvedReplyContext.pendingOrders.some((order) => (
+      Date.parse(order.manageLastAt || readMetaText(order.rawOrder, MANAGE_META.lastAt) || '') > Date.parse(decided.decisionAt)
+    )) ? decided : null;
     if (repeated) {
       this.logger.log(`[confirmation] repeated answer ignored, the customer's other order was just decided orderId=${repeated.orderId} messageKey=${message.messageKey}`);
       this.appendInboundMessage({ message, orderId: repeated.orderId, storedKind: 'customer_reply' });
@@ -632,18 +661,57 @@ export class ConfirmationService {
       storedKind: message.kind === 'audio' ? 'customer_audio_reply' : 'customer_reply'
     });
 
-    const result = await this.withOrderLock(pendingOrder.orderId, async () => {
+    const result = await this.withManageLocks(pendingOrder.orderId, async () => {
+      let freshRead = false;
       // The order meta is the record that survives a restart: read it again inside the lock, so a reply that was
       // already handled (same message key, decision already written) is recognised even with an empty local cache.
       if (typeof this.wooClient.getOrder === 'function') {
         try {
           const fresh = await this.wooClient.getOrder(pendingOrder.orderId);
           if (fresh && typeof fresh === 'object') {
+            freshRead = true;
             pendingOrder = { ...pendingOrder, rawOrder: fresh };
+            if (fresh.billing) {
+              // The stored copy goes stale (a /suivi change): the team notices and templates use the order as it is.
+              const current = normalizeWooOrder(fresh, this.messages);
+              for (const key of ['customerName', 'customerEmail', 'total', 'currency', 'deliveryAddress', 'deliveryCity', 'deliveryEta', 'lineItems', 'orderItemsSummary']) {
+                pendingOrder[key] = current[key];
+              }
+              if (readMetaText(fresh, MANAGE_META.numberChanged) === 'yes') {
+                pendingOrder.phone = current.phone;
+              }
+            }
           }
         } catch (error) {
           this.logger.warn(`[confirmation] could not re-read orderId=${pendingOrder.orderId} before the reply: ${error.message}`);
         }
+      }
+      // The number was changed on /suivi: answers and votes from the old one no longer count for this order.
+      if (readMetaText(pendingOrder.rawOrder, MANAGE_META.numberChanged) === 'yes' && pendingOrder.phone !== message.senderPhone) {
+        this.logger.log(`[confirmation] reply from the old number ignored orderId=${pendingOrder.orderId}`);
+        return {
+          ok: false,
+          ignored: true,
+          duplicate: false,
+          failed: false,
+          route: 'confirmation',
+          eventStatus: 'order_not_open',
+          reason: 'order_not_open'
+        };
+      }
+      // /suivi messages carry no poll, so a vote on an order that got one is on an older poll: it answers nothing.
+      // The customer's typed 1 or 2 still counts.
+      if (String(message.messageKey).startsWith('poll:') && readMetaText(pendingOrder.rawOrder, MANAGE_META.lastAt)) {
+        this.logger.log(`[confirmation] vote on an older poll ignored orderId=${pendingOrder.orderId}`);
+        return {
+          ok: false,
+          ignored: true,
+          duplicate: false,
+          failed: false,
+          route: 'confirmation',
+          eventStatus: 'order_not_open',
+          reason: 'old_poll_vote'
+        };
       }
       const reply = message.kind === 'audio' ? '' : parseDecisionReply(message.textBody);
       const decisionMeta = getDecisionMeta(pendingOrder.rawOrder || {});
@@ -783,16 +851,40 @@ export class ConfirmationService {
         };
       }
 
-      const nextState = reply === '1' ? DECISION.confirmed : DECISION.cancelled;
-      const nextWooStatus = reply === '1' ? this.wooStatuses.confirmed : WOO_STATUS.cancelled;
-      const note = reply === '1'
+      const existingDecision = pendingOrder.decision || decisionMeta.decision;
+      // A replacement order: the answer also settles what happens to the order it replaces.
+      let replacement = null;
+      const replacedId = replacedOrderId(pendingOrder.rawOrder);
+      // Only the order meta counts here: a stale cached decision must never confirm a replacement without the swap.
+      if (replacedId && !decisionMeta.decision) {
+        replacement = await this.resolveReplacementReply({ order: pendingOrder.rawOrder, reply, freshRead });
+        if (replacement.abort) {
+          return {
+            ok: false,
+            ignored: false,
+            duplicate: false,
+            failed: true,
+            route: 'confirmation',
+            eventStatus: 'processing_failed',
+            reason: 'replacement_not_decided'
+          };
+        }
+      }
+      const nextState = replacement ? replacement.nextState : (reply === '1' ? DECISION.confirmed : DECISION.cancelled);
+      const confirming = nextState === DECISION.confirmed;
+      const nextWooStatus = confirming ? this.wooStatuses.confirmed : WOO_STATUS.cancelled;
+      let note = confirming
         ? 'Customer confirmed order via WhatsApp.'
         : 'Customer cancelled order via WhatsApp.';
-      const followUpMessage = reply === '1'
+      let followUpMessage = confirming
         ? this.messages.confirmedReply
         : this.messages.cancelledReply;
+      const replacementRefused = Boolean(replacement) && !confirming;
+      if (replacementRefused) {
+        note = `Replacement of order #${replacedId} cancelled (${replacement.cancellationReason}); that order is not changed by this.`;
+        followUpMessage = replacement.message;
+      }
       const nowIso = new Date().toISOString();
-      const existingDecision = pendingOrder.decision || decisionMeta.decision;
       const customerReplySent = pendingOrder.customerReplySent || decisionMeta.customerReplySent;
       const internalNotifiedConfirmed = pendingOrder.internalNotifiedConfirmed || decisionMeta.internalNotifiedConfirmed;
       const internalNotifiedCancelled = pendingOrder.internalNotifiedCancelled || decisionMeta.internalNotifiedCancelled;
@@ -827,7 +919,8 @@ export class ConfirmationService {
         wooSyncStatus: WOO_SYNC_STATUS.pendingRetry,
         wooSyncAttempts: Number(pendingOrder.wooSyncAttempts || decisionMeta.wooSyncAttempts || 0),
         lastSyncError: '',
-        customerReplySent: customerReplySent || 'no',
+        // A silent outcome counts as answered, so nothing is sent for it later either.
+        customerReplySent: replacementRefused && !followUpMessage ? 'yes' : (customerReplySent || 'no'),
         invalidReplyCount: currentInvalidReplyCount,
         manualFollowupRequired: false,
         lastConfirmationMessageKey: message.messageKey
@@ -847,7 +940,8 @@ export class ConfirmationService {
             wooSyncStatus: WOO_SYNC_STATUS.pendingRetry,
             wooSyncAttempts: nextOrderState.wooSyncAttempts || 0,
             lastSyncError: '',
-            customerReplySent: customerReplySent || 'no',
+            customerReplySent: nextOrderState.customerReplySent || 'no',
+            cancellationReason: replacementRefused ? replacement.cancellationReason : undefined,
             invalidReplyCount: currentInvalidReplyCount,
             manualFollowupRequired: 'no',
             lastConfirmationMessageKey: message.messageKey
@@ -866,7 +960,7 @@ export class ConfirmationService {
           order: nextOrderState,
           decisionOrderPayload: nextOrderState.rawOrder || pendingOrder.rawOrder || {},
           phone: pendingOrder.phone,
-          logicalKey: reply === '1'
+          logicalKey: confirming
             ? OUTBOUND_LOGICAL_KEYS.confirmationSuccess
             : OUTBOUND_LOGICAL_KEYS.cancellationSuccess,
           nextState,
@@ -879,9 +973,10 @@ export class ConfirmationService {
       nextOrderState = await this.sendInternalDecisionNotifications({
         order: nextOrderState,
         decision: nextState,
-        alreadyNotified: nextState === DECISION.confirmed
+        // A refused replacement is not a lost sale: the old order stays, so no "cancelled" notice.
+        alreadyNotified: replacementRefused || (nextState === DECISION.confirmed
           ? internalNotifiedConfirmed === 'yes' || nextOrderState.internalNotifiedConfirmed === 'yes'
-          : internalNotifiedCancelled === 'yes' || nextOrderState.internalNotifiedCancelled === 'yes'
+          : internalNotifiedCancelled === 'yes' || nextOrderState.internalNotifiedCancelled === 'yes')
       });
 
       const reconciliation = await this.reconcileWooDecision({
@@ -893,6 +988,9 @@ export class ConfirmationService {
       });
       if (nextState === DECISION.confirmed && reconciliation.success) {
         this.scheduleHdAutoSend(nextOrderState);
+      }
+      if (replacementRefused) {
+        await this.clearPendingReplacement(replacedId, pendingOrder.orderId);
       }
       return {
         ok: true,
@@ -906,7 +1004,7 @@ export class ConfirmationService {
             ? nextState
             : reconciliation.syncStatus
       };
-    });
+    }, pendingOrder.rawOrder);
 
     return result;
   }
@@ -1091,6 +1189,8 @@ export class ConfirmationService {
       || !nextOrderState.phone) {
       return false;
     }
+    const replacedId = replacedOrderId(order);
+    const notice = !confirmed && replacedId ? this.replacementNotice(decisionMeta.cancellationReason, replacedId) : '';
     const updated = await this.sendCustomerDecisionReply({
       order: nextOrderState,
       decisionOrderPayload: order,
@@ -1100,7 +1200,7 @@ export class ConfirmationService {
       nowIso: decidedAt,
       reservationNow: now,
       currentInvalidReplyCount: decisionMeta.invalidReplyCount || 0,
-      message: confirmed ? this.messages.confirmedReply : this.messages.cancelledReply
+      message: confirmed ? this.messages.confirmedReply : (notice || this.messages.cancelledReply)
     });
     return (updated?.customerReplySent || '') === 'yes';
   }
@@ -1123,10 +1223,11 @@ export class ConfirmationService {
         this.logger.warn(`[quiet-hours] could not mark the held reply orderId=${order.orderId}: ${error.message}`);
       }
     }
-    // The reply may carry the customer's name, the order number and the tracking link ({{customerName}}, {{orderId}}, {{trackingUrl}}).
+    // The reply may carry {{customerName}}, {{orderId}}, {{trackingUrl}} and {{manageLink}} (the direct /suivi link).
     const renderedMessage = interpolateTemplate(String(message ?? ''), {
       ...buildTemplateValues(normalizeWooOrder(decisionOrderPayload, this.messages)),
-      trackingUrl: this.trackingLink(order.orderId)
+      trackingUrl: this.trackingLink(order.orderId),
+      manageLink: this.manageLink(order.orderId)
     });
     const sendOutcome = await this.sendLogicalMessageWithWooReservation({
       orderPayload: decisionOrderPayload,
@@ -1209,7 +1310,7 @@ export class ConfirmationService {
     }
   }
 
-  async persistInitialConfirmationMeta({ orderPayload, normalizedOrder, acceptedAt, providerMessageId, reservedAt }) {
+  async persistInitialConfirmationMeta({ orderPayload, normalizedOrder, acceptedAt, providerMessageId, reservedAt, extraMeta = [] }) {
     const metaUpdatedOrder = await this.wooClient.updateOrderMeta(
       normalizedOrder.orderId,
       mergeMetaUpdates(
@@ -1239,7 +1340,8 @@ export class ConfirmationService {
           reservedAt,
           sentAt: acceptedAt,
           messageId: providerMessageId || ''
-        })
+        }),
+        extraMeta
       )
     );
 
@@ -1352,7 +1454,8 @@ export class ConfirmationService {
       return { status: 202, body: { ok: false, reason: 'missing_phone' } };
     }
 
-    if (!phoneValidation.isValid) {
+    // normalizedOrder.phone also reads the Moroccan local form (06...).
+    if (!phoneValidation.isValid && !normalizedOrder.phone) {
       this.logger.warn(`[confirmation] classified invalid_or_non_whatsapp_number orderId=${normalizedOrder.orderId} reason=invalid_phone`);
       const cancelledOrder = await this.cancelOrderForInvalidPhone(orderPayload, now);
       return {
@@ -1713,6 +1816,7 @@ export class ConfirmationService {
           rawOrder: updatedOrder || normalizedOrder.rawOrder
         });
         await this.safeAddOrderNote(normalizedOrder.orderId, 'WhatsApp workflow stopped due to manual WooCommerce status change.');
+        await this.afterReplacementOverride(current, status);
       } catch (error) {
         this.logger.warn(`Unable to persist manual override for order ${normalizedOrder.orderId}: ${error.message}`);
       }
@@ -1905,6 +2009,7 @@ Object.assign(ConfirmationService.prototype, followupMethods);
 Object.assign(ConfirmationService.prototype, feedbackMethods);
 Object.assign(ConfirmationService.prototype, optOutMethods);
 Object.assign(ConfirmationService.prototype, ordersReadModelMethods);
+Object.assign(ConfirmationService.prototype, manageMethods);
 
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1927,32 +2032,6 @@ function hashPayload(value) {
   } catch {
     return createHash('sha256').update(String(value || '')).digest('hex');
   }
-}
-
-function isWhatsAppContactabilityFailure(error) {
-  if (!(error instanceof WasenderSendError)) {
-    return false;
-  }
-
-  if (![400, 404, 422].includes(Number(error.status))) {
-    return false;
-  }
-
-  const haystack = JSON.stringify(error.data || {}).toLowerCase();
-  return [
-    'not on whatsapp',
-    'not registered on whatsapp',
-    'not connected to whatsapp',
-    'not a valid whatsapp',
-    'invalid phone',
-    'invalid number',
-    'number is invalid',
-    'phone number is invalid',
-    'invalid recipient',
-    'recipient does not exist',
-    'unreachable',
-    'jid'
-  ].some((pattern) => haystack.includes(pattern));
 }
 
 // `detail` is the WhatsApp provider's answer (already redacted by the Wasender client), when there is one.
@@ -1981,6 +2060,15 @@ function safeErrorData(error) {
 // Newest order first. A cached order may have lost its dates (it was re-saved from a partial answer), so when either date
 // is missing the order number decides: WooCommerce numbers grow with time.
 function compareNewestFirst(left, right) {
+  // After a /suivi message the answer belongs to the order the customer was asked about last, not the newest one.
+  const askedLater = (order) => Date.parse(order.manageLastAt || readMetaText(order.rawOrder, MANAGE_META.lastAt) || '') || 0;
+  if (askedLater(left) || askedLater(right)) {
+    const lastAsked = (order) => Math.max(askedLater(order), Date.parse(order.confirmationSentAt || getWorkflowMeta(order.rawOrder).confirmationSentAt || '') || 0);
+    const difference = lastAsked(right) - lastAsked(left);
+    if (difference) {
+      return difference;
+    }
+  }
   const createdMs = (order) => {
     const source = order.rawOrder || order;
     const parsed = Date.parse(String(source?.date_created_gmt || source?.date_created || ''));

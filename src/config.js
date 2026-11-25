@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseQuietHoursEnv } from './utils/quiet-hours.js';
+import { MANAGE_TEXTS } from './domain/manage-texts.js';
 
 function readEnvFile(filePath = '.env') {
   try {
@@ -88,6 +89,7 @@ export const ENV_TABLE = Object.freeze([
   { name: 'QUIET_HOURS_END', type: 'hour' },
   { name: 'QUIET_HOURS_WEEKEND_END', type: 'hour' },
   { name: 'QUIET_HOURS_TIMEZONE', type: 'timezone' },
+  { name: 'MANAGE_DAILY_SHOP_LIMIT', type: 'int' },
   { name: 'CONFIG_STRICT', type: 'bool' }
 ]);
 
@@ -281,6 +283,8 @@ export function loadConfig(env = process.env) {
       maxAgeDays: parseCountEnv(env.FEEDBACK_REQUEST_MAX_AGE_DAYS, 14),
       maxPerRun: parseCountEnv(env.FEEDBACK_REQUEST_MAX_PER_RUN, 30)
     },
+    // The "manage my order" page: at most this many of its messages a day, for the whole shop.
+    manage: { dailyShopLimit: parseCountEnv(env.MANAGE_DAILY_SHOP_LIMIT, 60) },
     matchingAlertsEnabled: parseBooleanEnv(env.MATCHING_ALERTS_ENABLED, false),
     alertEmailTo: (env.ALERT_EMAIL_TO || '').trim(),
     messages: withAutomaticNotices({
@@ -302,6 +306,9 @@ export function loadConfig(env = process.env) {
       trackingUrlBase: env.TRACKING_URL_BASE || 'https://rhymat.ma/suivi',
       cancelledReply: env.CANCELLED_REPLY_MESSAGE ||
         'La commande dyalk t annulat.',
+      replacementTooLateMessage: MANAGE_TEXTS.replacementTooLate,
+      replacementFailedMessage: MANAGE_TEXTS.replacementFailed,
+      replacementKeptMessage: MANAGE_TEXTS.replacementKept,
       cancellationEmailSubject: env.CANCELLATION_EMAIL_SUBJECT ||
         'Your order #{{orderId}} has been cancelled',
       cancellationEmailBody: env.CANCELLATION_EMAIL_BODY ||
@@ -372,11 +379,23 @@ function parsePhoneList(value) {
 // (possible only with CONFIG_STRICT=0) the sentence is left out instead of ending on an empty number.
 const AUTOMATIC_NOTICE = 'Hada message automatique, ila 3endek chi question, seft la question dyalk l had numero:';
 
-// Sent when the customer answers 1: thanks, the order number and the tracking link (the /suivi page on the shop).
+// Sent when the customer answers 1: thanks, the order number and the direct link to track or change the order.
 export const CONFIRMED_REPLY_TEMPLATE = [
   'Chokran {{customerName}}, la commande dyalk t confirmat.',
+  '',
   'Numero dyal la commande: {{orderId}}',
-  'Tbe3 la commande dyalk: {{trackingUrl}}',
+  '',
+  'Bghiti tracker wla tmodifier la commande dyalk:',
+  '{{manageLink}}',
+  '',
+  'Mn had lien t9dr:',
+  '• Tzid un article',
+  '• T7yed un article',
+  '• Tbdel la taille',
+  '• T’annuler la commande',
+  '',
+  'Momkin tmodifier la commande fa9at 9bl manseftoha !',
+  '',
   'Ghadi ytwasl m3ak livreur mli twsl lmdintk.'
 ].join('\n');
 
@@ -405,7 +424,8 @@ export function withAutomaticNotice(text, shopContactPhone) {
 // Every customer WhatsApp text of the confirmation service ends with that line (the stock and drop alerts too, once set).
 const CUSTOMER_MESSAGE_KEYS = [
   'confirmationTemplate', 'invalidReply', 'reminderMessage', 'confirmedReply', 'cancelledReply',
-  'shippedMessage', 'outForDeliveryMessage', 'feedbackRequestMessage', 'stockAlertTemplate', 'dropAlertTemplate'
+  'shippedMessage', 'outForDeliveryMessage', 'feedbackRequestMessage', 'stockAlertTemplate', 'dropAlertTemplate',
+  'replacementTooLateMessage', 'replacementFailedMessage', 'replacementKeptMessage'
 ];
 
 function withAutomaticNotices(messages, shopContactPhone) {

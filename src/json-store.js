@@ -323,6 +323,21 @@ export class JsonStore {
     return clone(this.db.messages.filter((msg) => msg.phone === phone));
   }
 
+  // The daily caps of the /suivi page messages (one day at a time). Wiped with the disk, which only loosens them.
+  getManageDaily(day) {
+    const current = this.db.manageDaily;
+    return current?.day === day ? clone(current) : { day, shop: 0, phones: {}, alerted: false };
+  }
+
+  updateManageDaily(day, mutator) {
+    return this.transaction((db) => {
+      const current = db.manageDaily?.day === day ? db.manageDaily : { day, shop: 0, phones: {}, alerted: false };
+      mutator(current);
+      db.manageDaily = current;
+      return current;
+    });
+  }
+
   upsertContact(contact) {
     return this.transaction((db) => {
       if (!db.contacts) {

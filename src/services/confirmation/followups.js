@@ -2,7 +2,7 @@
 // decisions whose Woo write failed, the one-time HighDelivery retry and stuck sends. Every customer step re-reads
 // the order first. Methods run with the ConfirmationService as `this`. Moved unchanged out of confirmation-service.js.
 
-import { HD_META, HD_PARCEL_TRACE_META, OUTBOUND_LOGICAL_KEYS, OUTBOUND_META_KEYS } from '../../domain/order-meta.js';
+import { HD_META, HD_PARCEL_TRACE_META, MANAGE_META, OUTBOUND_LOGICAL_KEYS, OUTBOUND_META_KEYS, REPLACEMENT_META } from '../../domain/order-meta.js';
 import {
   ACTIVE_CONFIRMATION_STATUSES,
   DECISION,
@@ -29,8 +29,11 @@ import {
   isExpectedStatusForDecision,
   isFeedbackSelfTestOrder,
   mergeMetaUpdates,
-  normalizeWooOrder
+  normalizeWooOrder,
+  replacedOrderId
 } from './order-helpers.js';
+import { readEditHold } from '../hd-auto-send-service.js';
+import { REPLACEMENT_EXPIRY_MS } from './manage.js';
 import { hasAmbiguousCustomerOutboundState } from './outbound/reserved-send.js';
 
 export const BACKFILL_MAX_ORDER_AGE_MS = 72 * 60 * 60 * 1000;
@@ -73,6 +76,7 @@ export function followupSignature(order) {
     decision.customerReplySent,
     decision.manualOverride,
     decision.lastConfirmationMessageKey,
+    Object.values(MANAGE_META).map((key) => readOrderMeta(order, key)),
     Object.keys(OUTBOUND_META_KEYS).map((logicalKey) => getOutboundReservationMeta(order, logicalKey).state)
   ]);
 }
@@ -112,7 +116,8 @@ function orderCreatedMs(order) {
 // order is cancelled, the older one is no longer in this set and its reminders carry on as usual.
 export function findSupersededOrderIds(orders, messages) {
   const byPhone = new Map();
-  for (const order of orders) {
+  // A replacement order is a change to a confirmed order, never half of a double order.
+  for (const order of orders.filter((item) => !replacedOrderId(item))) {
     const phone = normalizeWooOrder(order, messages).phone;
     if (!phone) {
       continue;
@@ -218,7 +223,7 @@ export const followupMethods = {
       const orderId = String(listedOrder.id);
 
       try {
-        const action = await this.withOrderLock(orderId, async () => {
+        const action = await this.withManageLocks(orderId, async () => {
           let order = listedOrder;
           let workflow = getWorkflowMeta(order);
           let decisionMeta = getDecisionMeta(order);
@@ -271,6 +276,11 @@ export const followupMethods = {
               action: 'skip_manual_override'
             });
             return 'skipped';
+          }
+
+          // A parcel postponed while the website was changing the order, and the retry timer was lost.
+          if (effectiveDecision === DECISION.confirmed && !backfillOnly) {
+            this.resumeHeldHdSend(order, now);
           }
 
           if (effectiveDecision) {
@@ -366,7 +376,27 @@ export const followupMethods = {
             return 'skipped';
           }
 
+          // A /suivi message held by the quiet hours.
+          if (!backfillOnly && readOrderMeta(order, MANAGE_META.deferred) && !this.isQuietNow()) {
+            if (await stillSame()) {
+              await this.sendDeferredManageMessage(order, now);
+            }
+            return 'skipped';
+          }
+
           if (!workflow.confirmationSentAt) {
+            // A replacement order is only ever started by /tasks/manage/send. One the website abandoned is cancelled.
+            if (replacedOrderId(order)) {
+              if (!backfillOnly && this.isAbandonedReplacement(order, now)) {
+                if (!await stillSame()) {
+                  return 'skipped';
+                }
+                this.logFollowupDecision({ orderId, orderStatus: order.status, workflowState: workflow.state, confirmationSentAt: '', reminderCount: 0, action: 'cancel_unsent_replacement' });
+                return await this.expireReplacement(order, { cancellationReason: 'replacement_never_sent', why: 'never sent to the customer' }) ? 'autoCancelled' : 'skipped';
+              }
+              this.logFollowupDecision({ orderId, orderStatus: order.status, workflowState: workflow.state, confirmationSentAt: '', reminderCount: workflow.reminderCount, action: 'skip_replacement_order' });
+              return 'skipped';
+            }
             if (isFeedbackSelfTestOrder(order)) {
               const feedbackMeta = getFeedbackMeta(order);
               this.logger.log(
@@ -437,6 +467,24 @@ export const followupMethods = {
               reminderCount: workflow.reminderCount,
               action: 'skip_final_state'
             });
+            return 'skipped';
+          }
+
+          const manageLastMs = Date.parse(readOrderMeta(order, MANAGE_META.lastAt));
+
+          // No reminders for a replacement: without an answer only it is cancelled, silently.
+          if (replacedOrderId(order)) {
+            const lastMs = Math.max(manageLastMs || 0, Date.parse(workflow.confirmationSentAt) || 0);
+            if (lastMs && now.getTime() - lastMs >= REPLACEMENT_EXPIRY_MS && await stillSame()) {
+              this.logFollowupDecision({ orderId, orderStatus: order.status, workflowState: workflow.state, confirmationSentAt: workflow.confirmationSentAt, reminderCount: 0, action: 'expire_replacement' });
+              return await this.expireReplacement(order) ? 'autoCancelled' : 'skipped';
+            }
+            return 'skipped';
+          }
+
+          // The customer just got a new message about this order: no reminder or auto-cancel within a day of it.
+          if (now.getTime() - manageLastMs < AUTO_CANCEL_AFTER_SECOND_REMINDER_MS) {
+            this.logFollowupDecision({ orderId, orderStatus: order.status, workflowState: workflow.state, confirmationSentAt: workflow.confirmationSentAt, reminderCount: workflow.reminderCount, action: 'skip_recent_customer_message' });
             return 'skipped';
           }
 
@@ -551,7 +599,7 @@ export const followupMethods = {
             action: 'skip_not_due'
           });
           return 'skipped';
-        });
+        }, listedOrder);
 
         if (action === 'backfilled') {
           summary.backfilled += 1;
@@ -612,6 +660,21 @@ export const followupMethods = {
       this.logger.warn(`[task][order-followups] could not re-read orderId=${orderId}: ${error.message}`);
       return null;
     }
+  },
+
+  resumeHeldHdSend(order, now = new Date()) {
+    const hold = readEditHold(order);
+    if (!this.hdAutoSend?.enabled
+      || !hold.sendWaiting
+      || hold.untilMs > now.getTime()
+      || getHdAutoSendState(order)
+      || HD_PARCEL_TRACE_META.some((key) => readOrderMeta(order, key))
+      || !wooStatusMatchesTarget(order.status, this.wooStatuses.confirmed)) {
+      return false;
+    }
+    this.logger.log(`[hd-auto-send] resuming a postponed auto-send orderId=${order.id}`);
+    this.scheduleHdAutoSend({ ...normalizeWooOrder(order, this.messages), rawOrder: order });
+    return true;
   },
 
   // A confirmed order whose HighDelivery auto-send never ran (its first status write failed, or the process stopped
@@ -789,6 +852,10 @@ export const followupMethods = {
             || !ACTIVE_CONFIRMATION_STATUSES.includes(String(fresh?.status || ''))
             || freshDecision.decision
             || freshDecision.manualOverride === 'yes') {
+            return;
+          }
+          // The customer worked on this one on /suivi (a change or a replacement): it is wanted, never cancelled silently.
+          if ([MANAGE_META.lastAt, ...Object.values(REPLACEMENT_META)].some((key) => readOrderMeta(fresh, key))) {
             return;
           }
           cancelledNow = true;

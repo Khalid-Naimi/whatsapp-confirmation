@@ -140,6 +140,8 @@ const confirmationService = new ConfirmationService({
   wooStatuses: config.wooStatuses,
   durableState,
   notifyTeam,
+  manageSecret: config.tasks.secret,
+  manageDailyShopLimit: config.manage.dailyShopLimit,
   logger
 });
 

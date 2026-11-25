@@ -233,6 +233,33 @@ function describeReply(data) {
   return parts.length ? ` ${parts.join(' ')}` : '';
 }
 
+// The provider says the number itself is the problem (not on WhatsApp), not the send.
+export function isWhatsAppContactabilityFailure(error) {
+  if (!(error instanceof WasenderSendError)) {
+    return false;
+  }
+
+  if (![400, 404, 422].includes(Number(error.status))) {
+    return false;
+  }
+
+  const haystack = JSON.stringify(error.data || {}).toLowerCase();
+  return [
+    'not on whatsapp',
+    'not registered on whatsapp',
+    'not connected to whatsapp',
+    'not a valid whatsapp',
+    'invalid phone',
+    'invalid number',
+    'number is invalid',
+    'phone number is invalid',
+    'invalid recipient',
+    'recipient does not exist',
+    'unreachable',
+    'jid'
+  ].some((pattern) => haystack.includes(pattern));
+}
+
 export class WasenderSendError extends Error {
   constructor({ status, data, message, ambiguous = false }) {
     super(message);

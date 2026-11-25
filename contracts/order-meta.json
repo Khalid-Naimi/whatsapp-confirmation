@@ -602,6 +602,90 @@
       "group": "outbound customer:feedback_request"
     },
     {
+      "key": "rhymat_whatsapp_manage_2_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_2"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_2_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_2"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_2_sent_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_2"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_2_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_2"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_2_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_2"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_2_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_2"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_2_dispatched_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_2"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_3_state",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_3"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_3_reserved_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_3"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_3_sent_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_3"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_3_message_id",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_3"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_3_failed_for",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_3"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_3_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_3"
+    },
+    {
+      "key": "rhymat_whatsapp_manage_3_dispatched_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "outbound customer:manage_3"
+    },
+    {
       "key": "rhymat_hd_api_state",
       "entity": "order",
       "owner": "server",
@@ -666,6 +750,66 @@
       "entity": "order",
       "owner": "server",
       "group": "highdelivery status"
+    },
+    {
+      "key": "rhymat_wa_manage_count",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page",
+      "alsoWrittenBy": [
+        "wordpress"
+      ]
+    },
+    {
+      "key": "rhymat_wa_manage_last_at",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page",
+      "alsoWrittenBy": [
+        "wordpress"
+      ]
+    },
+    {
+      "key": "rhymat_wa_number_changed",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page",
+      "alsoWrittenBy": [
+        "wordpress"
+      ]
+    },
+    {
+      "key": "rhymat_wa_manage_deferred",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page"
+    },
+    {
+      "key": "rhymat_wa_manage_hold_until",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page"
+    },
+    {
+      "key": "rhymat_replaces",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "replacement order"
+    },
+    {
+      "key": "rhymat_replacement_pending",
+      "entity": "order",
+      "owner": "wordpress",
+      "group": "replacement order",
+      "alsoWrittenBy": [
+        "server"
+      ]
+    },
+    {
+      "key": "rhymat_replaced_by",
+      "entity": "order",
+      "owner": "server",
+      "group": "replacement order"
     },
     {
       "key": "rhymat_delivery",
@@ -785,6 +929,22 @@
       "messageId": "rhymat_whatsapp_feedback_request_message_id",
       "failedFor": "rhymat_whatsapp_feedback_request_failed_for",
       "claim": "rhymat_whatsapp_feedback_request_claim"
+    },
+    "customer:manage_2": {
+      "state": "rhymat_whatsapp_manage_2_state",
+      "reservedAt": "rhymat_whatsapp_manage_2_reserved_at",
+      "sentAt": "rhymat_whatsapp_manage_2_sent_at",
+      "messageId": "rhymat_whatsapp_manage_2_message_id",
+      "failedFor": "rhymat_whatsapp_manage_2_failed_for",
+      "claim": "rhymat_whatsapp_manage_2_claim"
+    },
+    "customer:manage_3": {
+      "state": "rhymat_whatsapp_manage_3_state",
+      "reservedAt": "rhymat_whatsapp_manage_3_reserved_at",
+      "sentAt": "rhymat_whatsapp_manage_3_sent_at",
+      "messageId": "rhymat_whatsapp_manage_3_message_id",
+      "failedFor": "rhymat_whatsapp_manage_3_failed_for",
+      "claim": "rhymat_whatsapp_manage_3_claim"
     }
   },
   "stateMachines": {

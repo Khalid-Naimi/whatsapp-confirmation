@@ -75,7 +75,10 @@ export const OUTBOUND_LOGICAL_KEYS = Object.freeze({
   autoCancellation: 'customer:auto_cancellation',
   hdShipped: 'customer:hd_shipped',
   hdArriving: 'customer:hd_arriving',
-  feedbackRequest: 'customer:feedback_request'
+  feedbackRequest: 'customer:feedback_request',
+  // The 2nd and 3rd message of an order (/suivi resend or change). Each has its own record, so none repeats another.
+  manage2: 'customer:manage_2',
+  manage3: 'customer:manage_3'
 });
 
 export const OUTBOUND_META_KEYS = Object.freeze({
@@ -129,7 +132,39 @@ export const OUTBOUND_META_KEYS = Object.freeze({
     reservedAt: 'rhymat_whatsapp_feedback_request_reserved_at',
     sentAt: 'rhymat_whatsapp_feedback_request_sent_at',
     messageId: 'rhymat_whatsapp_feedback_request_message_id'
+  }),
+  [OUTBOUND_LOGICAL_KEYS.manage2]: Object.freeze({
+    state: 'rhymat_whatsapp_manage_2_state',
+    reservedAt: 'rhymat_whatsapp_manage_2_reserved_at',
+    sentAt: 'rhymat_whatsapp_manage_2_sent_at',
+    messageId: 'rhymat_whatsapp_manage_2_message_id'
+  }),
+  [OUTBOUND_LOGICAL_KEYS.manage3]: Object.freeze({
+    state: 'rhymat_whatsapp_manage_3_state',
+    reservedAt: 'rhymat_whatsapp_manage_3_reserved_at',
+    sentAt: 'rhymat_whatsapp_manage_3_sent_at',
+    messageId: 'rhymat_whatsapp_manage_3_message_id'
   })
+});
+
+// --- Order meta: the "manage my order" page (/suivi) ------------------------------------------------------------------
+// The first three are the per-chain limits (the website copies them to a replacement order). `deferred` is
+// "<kind>|<ISO time>" while a message waits for the quiet hours to end. `holdUntil` is "<ISO time>[|send]": no parcel is
+// created before that time because the website is changing the order ("send" = an auto-send waits for it).
+export const MANAGE_META = Object.freeze({
+  count: 'rhymat_wa_manage_count',
+  lastAt: 'rhymat_wa_manage_last_at',
+  numberChanged: 'rhymat_wa_number_changed',
+  deferred: 'rhymat_wa_manage_deferred',
+  holdUntil: 'rhymat_wa_manage_hold_until'
+});
+
+// replaces (on the new order) and replacementPending (on the old one) are set by the website; the server empties
+// replacementPending and sets replacedBy.
+export const REPLACEMENT_META = Object.freeze({
+  replaces: 'rhymat_replaces',
+  replacementPending: 'rhymat_replacement_pending',
+  replacedBy: 'rhymat_replaced_by'
 });
 
 // The reservation time of the last send that failed cleanly (nothing went out), kept apart from the state.
@@ -232,6 +267,12 @@ function buildRegistry() {
       DESKTOP_ALSO_WRITES.includes(row.key) ? { ...row, alsoWrittenBy: ['desktop'] } : row
     )),
     ...rows('order', 'server', 'highdelivery status', HD_STATUS_META),
+    ...rows('order', 'server', 'manage page', MANAGE_META).map((row) => (
+      [MANAGE_META.count, MANAGE_META.lastAt, MANAGE_META.numberChanged].includes(row.key) ? { ...row, alsoWrittenBy: ['wordpress'] } : row
+    )),
+    { key: REPLACEMENT_META.replaces, entity: 'order', owner: 'wordpress', group: 'replacement order' },
+    { key: REPLACEMENT_META.replacementPending, entity: 'order', owner: 'wordpress', group: 'replacement order', alsoWrittenBy: ['server'] },
+    { key: REPLACEMENT_META.replacedBy, entity: 'order', owner: 'server', group: 'replacement order' },
     ...rows('shipping_line', 'wordpress', 'checkout delivery', SHIPPING_LINE_META),
     { key: LINK_META.link, entity: 'product', owner: 'desktop', group: 'product links' },
     { key: LINK_META.last, entity: 'product', owner: 'server', group: 'product links', alsoWrittenBy: ['desktop'] },

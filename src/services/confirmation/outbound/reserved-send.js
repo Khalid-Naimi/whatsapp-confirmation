@@ -3,7 +3,7 @@
 // for 2 hours are closed by the hourly task. Methods run with the ConfirmationService as `this`.
 // Moved unchanged out of confirmation-service.js.
 
-import { OUTBOUND_LOGICAL_KEYS, OUTBOUND_META_KEYS, outboundClaimKey } from '../../../domain/order-meta.js';
+import { MANAGE_META, OUTBOUND_LOGICAL_KEYS, OUTBOUND_META_KEYS, outboundClaimKey } from '../../../domain/order-meta.js';
 import { assertTransition, OUTBOUND_SEND, SEND_STATE, WORKFLOW_STATE } from '../../../domain/order-states.js';
 import { claim, parseClaim } from '../../claim.js';
 import {
@@ -45,7 +45,9 @@ export const AMBIGUOUS_CHECK_KEYS = [
   OUTBOUND_LOGICAL_KEYS.reminder2,
   OUTBOUND_LOGICAL_KEYS.confirmationSuccess,
   OUTBOUND_LOGICAL_KEYS.cancellationSuccess,
-  OUTBOUND_LOGICAL_KEYS.autoCancellation
+  OUTBOUND_LOGICAL_KEYS.autoCancellation,
+  OUTBOUND_LOGICAL_KEYS.manage2,
+  OUTBOUND_LOGICAL_KEYS.manage3
 ];
 
 export function isStaleReservation(outboundMeta, now) {
@@ -63,14 +65,7 @@ export function extractMessageId(sendResult) {
 }
 
 export function hasAmbiguousCustomerOutboundState(order, now = new Date()) {
-  return [
-    OUTBOUND_LOGICAL_KEYS.confirmationRequest,
-    OUTBOUND_LOGICAL_KEYS.reminder1,
-    OUTBOUND_LOGICAL_KEYS.reminder2,
-    OUTBOUND_LOGICAL_KEYS.confirmationSuccess,
-    OUTBOUND_LOGICAL_KEYS.cancellationSuccess,
-    OUTBOUND_LOGICAL_KEYS.autoCancellation
-  ].some((logicalKey) => {
+  return AMBIGUOUS_CHECK_KEYS.some((logicalKey) => {
     const outboundMeta = getOutboundReservationMeta(order, logicalKey);
     if (outboundMeta.state !== SEND_STATE.reserved) {
       return false;
@@ -130,6 +125,11 @@ export const reservedSendMethods = {
         if (logicalKey === OUTBOUND_LOGICAL_KEYS.reminder2 && workflow.reminderCount < 2) {
           updates.push(...buildWorkflowMetaUpdate(order, { reminderCount: 2, lastReminderAt: at }));
         }
+        // A /suivi message that may have gone out counts against the order's limit.
+        const manageSlot = { [OUTBOUND_LOGICAL_KEYS.manage2]: 2, [OUTBOUND_LOGICAL_KEYS.manage3]: 3 }[logicalKey];
+        if (manageSlot && !(Number(order.meta_data?.find((row) => row.key === MANAGE_META.count)?.value) >= manageSlot)) {
+          updates.push({ key: MANAGE_META.count, value: manageSlot }, { key: MANAGE_META.lastAt, value: at });
+        }
       }
       const updated = await this.wooClient.updateOrderMeta(orderId, mergeMetaUpdates(updates));
       const kinds = unanswered.map((key) => key.replace('customer:', '')).join(', ');
@@ -154,7 +154,9 @@ export const reservedSendMethods = {
     kind,
     message,
     persistAfterSend = null,
-    now = new Date()
+    now = new Date(),
+    // The message is given up (nothing sent) when it could not leave the send queue by this time (ms since epoch).
+    dispatchBy = 0
   }) {
     const outboundMeta = getOutboundReservationMeta(orderPayload, logicalKey);
     const nowIso = now.toISOString();
@@ -243,6 +245,11 @@ export const reservedSendMethods = {
       return superseded;
     };
     const beforeDispatch = async () => {
+      if (dispatchBy && Date.now() > dispatchBy) {
+        const late = new Error('the message could not leave the send queue in time; nothing was sent');
+        late.dispatchFailed = true;
+        throw late;
+      }
       // A WooCommerce problem here means nothing was sent, so it must not look like a WhatsApp "no answer": it becomes a
       // plain failure (the reservation is released, the message is sent again later). The wait is short so a slow shop
       // never holds the one send slot for long.

@@ -21,6 +21,26 @@ Backend-only Node.js service that:
 - `GET /api/stock-sync/status` (same secret; effective mode, last run, the last plan, unlinked products and items, broken links)
 - `POST /tasks/stock-sync` (same secret; `?dryRun=1` computes only, `?approve=<planHash>` applies a plan that was stopped only by a size limit)
 
+## "Manage my order" page (`/suivi`)
+
+The website changes the order in WooCommerce; this service sends every message about it, counts them and cancels the HighDelivery parcel. The contract is `docs/MANAGE_ORDER.md` in `connector-wo-hd`. All four are `POST` with a JSON body and the `x-task-secret` header (`TASK_SECRET`); a refusal is HTTP 200 `{"ok":false,"reason":"..."}`.
+
+- `/tasks/manage/check` `{orderId, kind}`: may this message be sent now (sends nothing). `kind`: `resend`, `updated`, `address`, `phone`, `replacement` (old order id for `check`, new order id for `send`).
+- `/tasks/manage/send` `{orderId, kind}`: checks again, sends, records. Both answer `{ok:true, left, lastSentAt, deferred}`; `deferred` means the quiet hours hold it and the hourly task sends it.
+- `/tasks/manage/cancel` `{orderId, reason}`: the HighDelivery parcel first, then the order and its waiting replacement. Refused with `too_late` or `hd_cancel_failed`.
+- `/tasks/manage/drop-replacement` `{orderId}` (old order): silently cancels the waiting replacement.
+
+Other refusals: `not_found`, `bad_request` (HTTP 400), `internal_error` (HTTP 500). Limits: 3 messages per order (the first confirmation included, reminders not), 3 minutes apart (the first correction is free), a number can be changed once, 3 a day per phone, `MANAGE_DAILY_SHOP_LIMIT` a day for the shop. A parcel that cannot be found or checked on HighDelivery is never treated as cancelled. Replacement orders (`rhymat_replaces`) are skipped by the order webhook and the backfill, get no reminders and are cancelled silently after 72 hours without an answer. There is no reminder or auto-cancel within 24 hours of a message the customer asked for.
+
+Safety rules:
+
+- An accepted `check` holds the order for 90 seconds: no HighDelivery parcel is created while the website is changing it. A successful `send` releases the hold; a postponed auto-send runs after it (the hourly task catches it after a restart). The desktop app does not see this hold.
+- An order a person handles by hand (`rhymat_whatsapp_manual_override=yes`) is refused with `not_changeable`. A replacement needs the customer's confirmation or the team's `confirmed` status. A customer cancel of an order that is neither waiting nor confirmed (for example on-hold without a confirmation) is refused and the team is told.
+- Before the swap on reply 1, the replacement's items must be in the shop's stock (the old order's pieces counted back). The hourly stock sync reserves nothing for a waiting replacement.
+- A replacement older than 30 minutes that never got a message is cancelled silently by the hourly task.
+- `/suivi` messages carry no confirmation poll, and a poll vote on an order that got such a message is ignored.
+- A Moroccan local number (`05`, `06`, `07`) is read as `+212`, so it is never cancelled as an invalid phone.
+
 ## Quick start
 
 1. Copy `.env.example` to `.env` and fill in your credentials.
@@ -63,8 +83,9 @@ Backend-only Node.js service that:
 - `CONFIRMATION_POLL_QUESTION`: poll question, default `Confirmer votre commande ?`
 - `INVALID_REPLY_MESSAGE`: invalid-reply follow-up message
 - `REMINDER_MESSAGE`: 24h/48h reminder template
-- `CONFIRMED_REPLY_MESSAGE`: confirmation follow-up message. The default says thanks, gives the order number and the tracking link (`{{customerName}}`, `{{orderId}}` and `{{trackingUrl}}` can be used in a text set here)
-- `TRACKING_URL_BASE`: where the link in that message points, default `https://rhymat.ma/suivi` (the order number is added as `?n=<orderId>` and the /suivi page fills it in)
+- `CONFIRMED_REPLY_MESSAGE`: confirmation follow-up message. The default says thanks, gives the order number and the direct link to track or change the order (`{{customerName}}`, `{{orderId}}`, `{{manageLink}}` and `{{trackingUrl}}` can be used in a text set here; a text set here replaces the default, so it needs `{{manageLink}}` to carry the link)
+- `MANAGE_DAILY_SHOP_LIMIT` (default `60`): messages the `/suivi` page may cause per day for the whole shop; one team alert when it is reached
+- `TRACKING_URL_BASE`: where the link in that message points, default `https://rhymat.ma/suivi` (the order number is added as `?n=<orderId>` and the /suivi page fills it in; `{{manageLink}}` adds `&k=<token>`, signed with `TASK_SECRET` and valid 45 days)
 - `CANCELLED_REPLY_MESSAGE`: cancellation follow-up message
 - `CANCELLATION_EMAIL_SUBJECT`: subject template for invalid/non-WhatsApp cancellation emails
 - `CANCELLATION_EMAIL_BODY`: body template for invalid/non-WhatsApp cancellation emails

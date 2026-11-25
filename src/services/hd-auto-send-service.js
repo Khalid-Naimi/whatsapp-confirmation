@@ -3,10 +3,10 @@ import { isConfirmedWooStatus } from '../utils/hd-status.js';
 import { formatOrderTotal, interpolateTemplate, maskPhone, summarizeOrderItems } from '../utils/format.js';
 import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
 import { buildUnitLookup, describeResolution, resolveOrderItems, sameResolution } from './order-resolver.js';
-import { HD_META, SHIPPING_LINE_META } from '../domain/order-meta.js';
+import { HD_META, MANAGE_META, REPLACEMENT_META, SHIPPING_LINE_META } from '../domain/order-meta.js';
 import { HD_BLOCKING_STATES, HD_SEND, HD_STATE, assertTransition, resolveWooStatuses } from '../domain/order-states.js';
 import { DEFAULT_CLAIM_SETTLE_MS, INSTANCE_ID, claim, parseClaim } from './claim.js';
-import { KeyedLock } from '../utils/keyed-lock.js';
+import { KeyedLock, outsideLocks } from '../utils/keyed-lock.js';
 
 // Woo order meta written by the auto-send (domain/order-meta.js). The state doubles as the "never send twice" guard.
 export { HD_META };
@@ -102,6 +102,12 @@ function isDesktopClaim(existing) {
   return Boolean(existing?.claimId?.startsWith(DESKTOP_CLAIM_PREFIX));
 }
 
+// The edit hold on an order (MANAGE_META.holdUntil): { untilMs, sendWaiting }.
+export function readEditHold(order) {
+  const [until, flag] = metaValue(order, MANAGE_META.holdUntil).split('|');
+  return { untilMs: Date.parse(until) || 0, sendWaiting: flag === 'send' };
+}
+
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -136,6 +142,43 @@ export class HdAutoSendService {
     // Orders being sent by this process (utils/keyed-lock.js tryRun: a second call skips, it never waits).
     this.inFlightLock = new KeyedLock({ logger: () => this.logger });
     this.inFlight = this.inFlightLock.held;
+    // orderId -> time until which the website is changing the order (also in the order meta, see readEditHold).
+    this.editHolds = new Map();
+    this.editRetries = new Map();
+    // How a held auto-send is started again; the confirmation service sets its tracked background runner here.
+    this.retrySend = null;
+  }
+
+  holdForEdit(orderId, untilMs) {
+    this.editHolds.set(String(orderId), untilMs);
+  }
+
+  releaseEditHold(orderId) {
+    this.editHolds.delete(String(orderId));
+  }
+
+  editHoldUntil(orderId, order) {
+    return Math.max(this.editHolds.get(String(orderId)) || 0, readEditHold(order).untilMs);
+  }
+
+  // No parcel from half-changed data: try again after the hold, reading the order again then. The meta mark lets the
+  // hourly task do it when the process restarts in between.
+  async postponeForEdit(orderId, order, untilMs) {
+    await this.safe(() => this.wooClient.updateOrderMeta(orderId, [{ key: MANAGE_META.holdUntil, value: `${new Date(untilMs).toISOString()}|send` }]));
+    if (!this.editRetries.has(orderId)) {
+      const timer = outsideLocks(() => setTimeout(() => {
+        this.editRetries.delete(orderId);
+        if (this.retrySend) {
+          this.retrySend(order);
+        } else {
+          this.autoSend(order);
+        }
+      }, Math.max(0, untilMs - Date.now()) + 250));
+      timer.unref?.();
+      this.editRetries.set(orderId, timer);
+    }
+    this.logger.log(`[hd-auto-send] postponed orderId=${orderId} reason=edit_in_progress`);
+    return { status: 'skipped', reason: 'edit_in_progress' };
   }
 
   // Sends one confirmed order to HighDelivery. Never throws: whatever happens, the order is either completed in Woo
@@ -167,6 +210,36 @@ export class HdAutoSendService {
       return { status: 'skipped', reason: 'already_running' };
     }
     return attempt.value;
+  }
+
+  // Runs `work` while no auto-send of this order runs in this process (a customer cancel or swap must not race a parcel
+  // being created). Waits for a running send; an auto-send that starts meanwhile is skipped.
+  // -> { ran: true, value } or { ran: false } when the send did not finish in time.
+  async runExclusive(orderId, work, { waitMs = 15000, pollMs = 250 } = {}) {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const attempt = await this.inFlightLock.tryRun(String(orderId), work);
+      if (attempt.ran || Date.now() >= deadline) {
+        return attempt;
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+
+  // A replacement order whose old order already had its parcel accepted: the cancelled parcel may have lowered the
+  // number's score, and that must not hold the replacement. The blacklist still holds it.
+  async replacesSentOrder(order, orderId) {
+    const oldId = metaValue(order, REPLACEMENT_META.replaces);
+    if (!/^\d+$/u.test(oldId)) {
+      return false;
+    }
+    try {
+      const old = await this.wooClient.getOrder(oldId);
+      return metaValue(old, REPLACEMENT_META.replacedBy) === String(orderId) && metaValue(old, HD_META.state) === HD_STATE.sent;
+    } catch (error) {
+      this.logger.warn(`[hd-auto-send] could not read the replaced order ${oldId}: ${error.message}`);
+      return false;
+    }
   }
 
   // Keeps the last result on the stored order so the health page can list what needs a human. Never throws.
@@ -214,6 +287,14 @@ export class HdAutoSendService {
       return { status: 'skipped', reason: `status_${raw.status}` };
     }
 
+    const holdUntil = this.editHoldUntil(orderId, raw);
+    if (holdUntil > Date.now()) {
+      return this.postponeForEdit(orderId, order, holdUntil);
+    }
+    if (readEditHold(raw).sendWaiting) {
+      await this.safe(() => this.wooClient.updateOrderMeta(orderId, [{ key: MANAGE_META.holdUntil, value: '' }]));
+    }
+
     // Fresh Woo data wins; the order as the webhook delivered it fills any field Woo's answer does not carry.
     const full = { ...(order?.rawOrder || {}), ...raw };
     context.raw = full;
@@ -254,6 +335,14 @@ export class HdAutoSendService {
     // Nothing was sent: the claim is taken back, so the order can be sent later (by anyone).
     const unreserve = () => this.releaseClaim(orderId, claimed);
 
+    // Cancelled (by the customer, on another instance) between the first read and the claim: nothing to send.
+    const claimedStatus = claimed.order?.status;
+    if (claimedStatus && !isConfirmedWooStatus(claimedStatus)) {
+      await unreserve();
+      this.logger.log(`[hd-auto-send] skipped orderId=${orderId} reason=status_${claimedStatus}`);
+      return { status: 'skipped', reason: `status_${claimedStatus}` };
+    }
+
     // Which warehouse products and quantities does this order take? Without a match the platform refuses the parcel.
     const parcel = { ...built.parcel };
     if (this.productMap) {
@@ -285,11 +374,18 @@ export class HdAutoSendService {
       // The check must never block a good order: log it and carry on.
       this.logger.warn(`[hd-auto-send] trust check unavailable orderId=${orderId} ${error.message}`);
     }
-    if (trust && (trust.blacklisted || trust.score < this.minTrustScore)) {
+    if (trust && (trust.blacklisted || (trust.score < this.minTrustScore && !(await this.replacesSentOrder(full, orderId))))) {
       const why = trust.blacklisted ? 'the number is blacklisted on HighDelivery' : `its trust score is ${trust.score} (minimum ${this.minTrustScore})`;
       await unreserve();
       await this.note(orderId, `Auto-send to HighDelivery held for review: ${why} (${trust.totalOrders} parcels, ${trust.deliveredOrders} delivered, ${trust.failedOrders} failed). The order stays on-hold; decide from the desktop app.`);
       return { status: 'held', reason: 'low_trust', trust };
+    }
+
+    // A change on the website may have started during the checks above.
+    const lateHold = this.editHoldUntil(orderId, claimed.order);
+    if (lateHold > Date.now()) {
+      await unreserve();
+      return this.postponeForEdit(orderId, order, lateHold);
     }
 
     // Reserve right before the creation: if we cannot record that we are sending, we must not send (a retry could
