@@ -735,3 +735,16 @@ test('every send kind writes a send record to the order before the provider call
     assert.notDeepEqual(atCall, before, `${kind} ${id}`);
   }
 });
+
+test('the order confirmation message carries the direct link, also when it is sent again', async () => {
+  const t = setup([order(90)]);
+  t.service.messages.confirmationTemplate = 'Salam\n\nBghiti tbdel chi 7aja f la commande dyalk ? clicker 3la had lien:\n{{manageLink}}\n\njawb b "1".';
+  await t.service.sendInitialConfirmation(t.get(90), { note: 'sent', now: t.now.value });
+  const first = t.sent[0].message;
+  assert.match(first, /clicker 3la had lien:\nhttps:\/\/rhymat\.ma\/suivi\/\?n=90&k=[0-9a-z]+-[0-9a-f]{32}\n/u);
+  // The send time is stamped with the real clock; step the test clock well past it.
+  t.now.value = new Date(Date.now() + HOUR);
+  const again = await t.service.manageSend('90', 'resend');
+  assert.equal(again.ok, true, again.reason);
+  assert.match(t.sent[1].message, /https:\/\/rhymat\.ma\/suivi\/\?n=90&k=/u);
+});

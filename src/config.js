@@ -408,6 +408,7 @@ const CONFIRMATION_TEMPLATE = [
   "L'adresse: {{deliveryAddress}}",
   'Livraison: {{deliveryEta}}',
   'Fach ghatwsl la commande dyalk lmdina dyalk, livreur ghay3eyet 3lik fhad numero dyal telephone, w tma t9dr tressi m3ah fin yji 3endek yjiblik la commande, Lkhlas 3nd l-istilam.',
+  'Bghiti tbdel chi 7aja f la commande dyalk ? clicker 3la had lien:\n{{manageLink}}',
   '- Bach t confirmer la commande dyalk, jawb b "1".\n- Bach t annuler la commande dyalk, jawb b "2".'
 ].join('\n\n');
 

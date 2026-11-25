@@ -473,7 +473,7 @@ export const manageMethods = {
 
   buildManageMessage(normalizedOrder, order, kind) {
     const oldOrderId = replacedOrderId(order);
-    const values = { ...buildTemplateValues(normalizedOrder), oldOrderId };
+    const values = { ...buildTemplateValues(normalizedOrder), oldOrderId, manageLink: this.manageLink(normalizedOrder.orderId) };
     const body = interpolateTemplate(this.messages.confirmationTemplate, values);
     // "The old one no longer counts" only makes sense when there was an old message.
     const header = oldOrderId

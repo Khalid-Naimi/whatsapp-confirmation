@@ -1469,7 +1469,10 @@ export class ConfirmationService {
       };
     }
 
-    const message = interpolateTemplate(this.messages.confirmationTemplate, buildTemplateValues(normalizedOrder));
+    const message = interpolateTemplate(this.messages.confirmationTemplate, {
+      ...buildTemplateValues(normalizedOrder),
+      manageLink: this.manageLink(normalizedOrder.orderId)
+    });
     const acceptedAtFallback = now.toISOString();
 
     try {
