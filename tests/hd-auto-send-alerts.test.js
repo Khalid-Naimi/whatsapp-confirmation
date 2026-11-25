@@ -62,7 +62,7 @@ test('a low-trust number is held and both phones are told to send it manually', 
   const outcome = await service.autoSend({ orderId: '901' });
   assert.equal(outcome.status, 'held');
   assert.deepEqual(sent.map((row) => row.to), PHONES);
-  assert.match(texts(sent)[0], /^MANUAL 901 Jane Doe numero a risque \(score 10\)/u);
+  assert.match(texts(sent)[0], /^MANUAL 901 Jane Doe numero a risque : score 10, minimum 30/u);
 });
 
 test('an incomplete order (no usable phone) is a manual alert', async () => {

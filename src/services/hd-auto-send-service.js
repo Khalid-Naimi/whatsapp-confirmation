@@ -2,6 +2,8 @@ import { HighDeliveryError } from './highdelivery-client.js';
 import { isConfirmedWooStatus } from '../utils/hd-status.js';
 import { formatOrderTotal, interpolateTemplate, maskPhone, summarizeOrderItems } from '../utils/format.js';
 import { describeItems, resolveWarehouseItems } from './hd-product-match.js';
+import { hdReasonInFrench } from '../utils/hd-reason.js';
+import { teamSendOptions } from '../utils/team-send.js';
 import { buildUnitLookup, describeResolution, resolveOrderItems, sameResolution } from './order-resolver.js';
 import { HD_META, MANAGE_META, REPLACEMENT_META, SHIPPING_LINE_META } from '../domain/order-meta.js';
 import { HD_BLOCKING_STATES, HD_SEND, HD_STATE, assertTransition, resolveWooStatuses } from '../domain/order-states.js';
@@ -183,7 +185,8 @@ export class HdAutoSendService {
 
   // Sends one confirmed order to HighDelivery. Never throws: whatever happens, the order is either completed in Woo
   // (sent) or left exactly as it is (confirmed / on-hold) so the desktop app still picks it up.
-  async autoSend(order) {
+  // `force`: the team said yes to this order, so a low trust score no longer holds it. Every other check still applies.
+  async autoSend(order, { force = false } = {}) {
     if (!this.enabled) {
       return { status: 'disabled' };
     }
@@ -194,7 +197,7 @@ export class HdAutoSendService {
     const attempt = await this.inFlightLock.tryRun(orderId, async () => {
       try {
         const context = {};
-        const outcome = await this.run(orderId, order, context);
+        const outcome = await this.run(orderId, order, context, { force });
         this.rememberOutcome(orderId, outcome);
         await this.notifyProblem(orderId, context.raw || order, outcome);
         return outcome;
@@ -259,7 +262,7 @@ export class HdAutoSendService {
     }
   }
 
-  async run(orderId, order, context = {}) {
+  async run(orderId, order, context = {}, { force = false } = {}) {
     if (!this.hdClient?.isConfigured()) {
       this.logger.warn(`[hd-auto-send] skipped orderId=${orderId} reason=not_configured`);
       return { status: 'skipped', reason: 'not_configured' };
@@ -374,7 +377,7 @@ export class HdAutoSendService {
       // The check must never block a good order: log it and carry on.
       this.logger.warn(`[hd-auto-send] trust check unavailable orderId=${orderId} ${error.message}`);
     }
-    if (trust && (trust.blacklisted || (trust.score < this.minTrustScore && !(await this.replacesSentOrder(full, orderId))))) {
+    if (trust && (trust.blacklisted || (!force && trust.score < this.minTrustScore && !(await this.replacesSentOrder(full, orderId))))) {
       const why = trust.blacklisted ? 'the number is blacklisted on HighDelivery' : `its trust score is ${trust.score} (minimum ${this.minTrustScore})`;
       await unreserve();
       await this.note(orderId, `Auto-send to HighDelivery held for review: ${why} (${trust.totalOrders} parcels, ${trust.deliveredOrders} delivered, ${trust.failedOrders} failed). The order stays on-hold; decide from the desktop app.`);
@@ -523,24 +526,31 @@ export class HdAutoSendService {
     switch (outcome?.status) {
       case 'held': {
         const trust = outcome.trust || {};
-        return { kind: 'manual', problem: trust.blacklisted ? 'numero blackliste sur HighDelivery' : `numero a risque (score ${trust.score})` };
+        const history = `${trust.totalOrders ?? 0} colis, ${trust.deliveredOrders ?? 0} livres, ${trust.failedOrders ?? 0} echecs`;
+        return {
+          kind: 'manual',
+          retry: !trust.blacklisted,
+          problem: trust.blacklisted
+            ? `numero blackliste sur HighDelivery (${history})`
+            : `numero a risque : score ${trust.score}, minimum ${this.minTrustScore} (${history})`
+        };
       }
       case 'skipped':
         if (outcome.reason === 'invalid_order') {
-          return { kind: 'manual', problem: detail || 'commande incomplete' };
+          return { kind: 'manual', retry: true, problem: hdReasonInFrench(detail) || 'commande incomplete' };
         }
         if (outcome.reason === 'no_warehouse_match') {
-          return { kind: 'manual', problem: detail || 'produit introuvable dans le stock HighDelivery' };
+          return { kind: 'manual', retry: true, problem: hdReasonInFrench(detail) || 'produit introuvable dans le stock HighDelivery' };
         }
         if (outcome.reason === 'stock_read_failed') {
-          return { kind: 'error', problem: `stock HighDelivery illisible: ${detail}` };
+          return { kind: 'error', retry: true, problem: `stock HighDelivery illisible: ${detail}` };
         }
         if (['woo_read_failed', 'reservation_failed', 'not_configured'].includes(outcome.reason)) {
-          return { kind: 'error', problem: `envoi impossible (${outcome.reason})` };
+          return { kind: 'error', retry: outcome.reason !== 'not_configured', problem: `envoi impossible (${outcome.reason})` };
         }
         return null;
       case 'failed':
-        return { kind: 'error', problem: `HighDelivery a refuse: ${detail}` };
+        return { kind: 'error', retry: true, problem: `HighDelivery a refuse: ${hdReasonInFrench(detail)}` };
       case 'unknown':
         return { kind: 'error', problem: `pas de reponse de HighDelivery, verifier avant de renvoyer (${detail})` };
       case 'error':
@@ -561,13 +571,32 @@ export class HdAutoSendService {
       if (!problem || !template) {
         return 0;
       }
-      return await this.sendInternal(orderId, order?.rawOrder || order || {}, template, {
+      const sentTo = await this.sendInternal(orderId, order?.rawOrder || order || {}, template, {
         trackingNumber: outcome?.trackingNumber || '—',
         problem: problem.problem
       }, problem.kind === 'manual' ? 'internal_hd_manual_notification' : 'internal_hd_error_notification');
+      // Only where sending again cannot make a second parcel; "no answer" and "sent" never get a poll.
+      if (problem.retry) {
+        await this.askTeamToSend(orderId);
+      }
+      return sentTo;
     } catch (error) {
       this.logger.warn(`[hd-auto-send] could not build the alert for order ${orderId}: ${error.message}`);
       return 0;
+    }
+  }
+
+  // One poll per team phone under the alert. A failed poll is only logged: the typed answer works without it.
+  async askTeamToSend(orderId) {
+    if (typeof this.wasenderClient?.sendPoll !== 'function') {
+      return;
+    }
+    for (const phone of this.notifyPhones || []) {
+      try {
+        await this.wasenderClient.sendPoll({ to: phone, question: `Envoyer la commande #${orderId} a High Delivery ? (ou repondez : envoyer ${orderId})`, options: teamSendOptions(orderId) });
+      } catch (error) {
+        this.logger.warn(`[hd-auto-send] could not send the team poll orderId=${orderId} to ${maskPhone(phone)}: ${error.message}`);
+      }
     }
   }
 

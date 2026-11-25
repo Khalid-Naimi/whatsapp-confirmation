@@ -235,3 +235,8 @@ The WordPress theme keeps the subscriptions (phone + product + size). When a siz
 The answer is `202 { ok, accepted: [ids], skipped: [{ id, reason }] }` straight away. Messages are then sent one by one in the
 background (Wasender is rate limited). Opted-out numbers are skipped, every alert id is remembered so a retry never sends
 twice, and a failed alert is queued again when WordPress hands the same id over again.
+
+## Team: send a held order, and the evening count
+
+- When the auto-send holds an order or it fails in a way that can be retried, each `INTERNAL_NOTIFY_PHONES` number gets the reason and a poll: `1 - Envoyer #N` / `0 - Ne pas envoyer #N`. Typing `envoyer N` or `ne pas envoyer N` does the same. A yes skips only the low trust score; the blacklist and every other check stay. No poll when the parcel may already exist.
+- At 21:00 (shop time) the hourly task tells the team how many parcels were delivered that day; nothing is sent when none were.

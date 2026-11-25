@@ -1,3 +1,5 @@
+import { isConfirmedWooStatus } from '../utils/hd-status.js';
+import { parseTeamText } from '../utils/team-send.js';
 import { createHash } from 'node:crypto';
 import { redact } from '../log.js';
 import { FEEDBACK_META_KEYS, FEEDBACK_TEST_META_KEYS, MANAGE_META, OUTBOUND_LOGICAL_KEYS } from '../domain/order-meta.js';
@@ -496,6 +498,11 @@ export class ConfirmationService {
         route: 'ignored',
         eventStatus: 'ignored_non_message'
       };
+    }
+
+    const teamRoute = this.routeTeamAnswer(message);
+    if (teamRoute) {
+      return teamRoute;
     }
 
     if (message.senderPhone && this.optOutKeywords && isOptOutMessage(message.textBody, message.captionText, this.optOutKeywords)) {
@@ -1730,6 +1737,65 @@ export class ConfirmationService {
       this.logger.warn(`Unable to persist internal notification flag for order ${order.orderId}: ${error.message}`);
       return nextOrder;
     }
+  }
+
+  // A team phone answering "send this order to HighDelivery?". -> a route result, or null for every other message.
+  // The team poll's votes never count as a customer's decision, whoever casts them.
+  routeTeamAnswer(message) {
+    const digits = (value) => String(value || '').replace(/\D/gu, '');
+    const fromTeam = Boolean(digits(message.senderPhone))
+      && (this.messages.internalNotifyPhones || []).some((phone) => digits(phone) === digits(message.senderPhone));
+    const answer = message.teamVote || (fromTeam && message.kind === 'text' ? parseTeamText(message.textBody) : null);
+    if (!answer) {
+      return null;
+    }
+    if (!fromTeam) {
+      this.logger.warn(`[team-send] vote from a phone that is not on the team ignored senderPhone=${maskPhone(message.senderPhone)}`);
+      return { ok: false, ignored: true, duplicate: false, failed: false, route: 'team', eventStatus: 'ignored_non_message' };
+    }
+    // The send takes a while: the webhook is answered first.
+    this.trackBackground(() => this.handleTeamAnswer(answer, message.senderPhone), `team send ${answer.orderId}`);
+    return { ok: true, ignored: false, duplicate: false, failed: false, route: 'team', eventStatus: 'processed' };
+  }
+
+  async handleTeamAnswer({ orderId, send }, phone) {
+    const reply = (text) => this.wasenderClient.sendMessage({ to: phone, message: text })
+      .catch((error) => this.logger.warn(`[team-send] could not answer orderId=${orderId}: ${error.message}`));
+    this.logger.log(`[team-send] answer orderId=${orderId} send=${send ? 'yes' : 'no'} senderPhone=${maskPhone(phone)}`);
+    if (!send) {
+      await this.safeAddOrderNote(orderId, 'The team answered on WhatsApp: do not send this order to HighDelivery.');
+      return reply(`OK, commande #${orderId} non envoyee.`);
+    }
+    if (!this.hdAutoSend?.enabled) {
+      return reply(`Commande #${orderId} non envoyee : l'envoi automatique est desactive.`);
+    }
+    let raw;
+    try {
+      raw = await this.wooClient.getOrder(orderId);
+    } catch (error) {
+      this.logger.warn(`[team-send] could not read orderId=${orderId}: ${error.message}`);
+      return reply(`Commande #${orderId} non envoyee : commande illisible dans WooCommerce. Votez de nouveau plus tard.`);
+    }
+    // Replaced, cancelled or not yet confirmed: the auto-send refuses these too, this only says why.
+    if (!isConfirmedWooStatus(raw?.status)) {
+      return reply(`Commande #${orderId} non envoyee : son statut est "${raw?.status || 'inconnu'}", pas confirmee.`);
+    }
+    await this.safeAddOrderNote(orderId, 'The team answered on WhatsApp: send this order to HighDelivery.');
+    const outcome = await this.hdAutoSend.autoSend({ ...normalizeWooOrder(raw, this.messages), rawOrder: raw }, { force: true });
+    // "sent" and every problem already produce their own team message.
+    const silent = {
+      already_sent: 'elle est deja envoyee',
+      already_sent_by_desktop: 'elle est deja envoyee depuis l\'application',
+      already_sending: 'un envoi est en cours',
+      already_unknown: 'un envoi precedent n\'a pas eu de reponse, verifiez sur High Delivery',
+      claimed_elsewhere: 'un autre envoi est en cours',
+      already_running: 'un envoi est en cours',
+      edit_in_progress: 'le client est en train de la modifier. Si elle n\'est pas partie dans quelques minutes, votez de nouveau'
+    };
+    if (outcome?.status === 'skipped' && (silent[outcome.reason] || String(outcome.reason).startsWith('status_'))) {
+      return reply(`Commande #${orderId} : ${silent[outcome.reason] || 'son statut a change, rien envoye'}.`);
+    }
+    return null;
   }
 
   // Hands a confirmed order to the HighDelivery auto-send without holding up the WhatsApp webhook answer.

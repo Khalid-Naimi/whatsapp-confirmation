@@ -314,13 +314,13 @@ export function loadConfig(env = process.env) {
       cancellationEmailBody: env.CANCELLATION_EMAIL_BODY ||
         'Salam {{customerName}},\n\nWe were unable to confirm your order because the phone number provided appears to be incorrect or not connected to WhatsApp.\n\nFor that reason, your order #{{orderId}} has been cancelled.\n\nIf you would still like to receive your order, please place a new order using a valid phone number that is reachable on WhatsApp.\n\nThank you for your understanding.',
       internalConfirmedTemplate: env.INTERNAL_CONFIRMED_TEMPLATE ||
-        'Commande confirmat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
+        "Commande t'confirmat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}",
       internalCancelledTemplate: env.INTERNAL_CANCELLED_TEMPLATE ||
-        'Commande annulat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
+        "Commande t'annulat.\nClient: {{customerName}}\nNumero: {{orderId}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}",
       internalHdSentTemplate: env.INTERNAL_HD_SENT_TEMPLATE ||
         'Commande envoyee a High Delivery.\nNumero: {{orderId}}\nTracking: {{trackingNumber}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nAdresse: {{deliveryAddress}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}',
       internalHdManualTemplate: env.INTERNAL_HD_MANUAL_TEMPLATE ||
-        'ATTENTION: commande a envoyer manuellement a High Delivery.\nNumero: {{orderId}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nRaison: {{problem}}',
+        'ATTENTION: commande pas envoyee a High Delivery.\nNumero: {{orderId}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nTalab: {{orderItemsSummary}}\nTotal: {{orderTotal}}\nRaison: {{problem}}',
       internalHdErrorTemplate: env.INTERNAL_HD_ERROR_TEMPLATE ||
         'ERREUR High Delivery.\nNumero: {{orderId}}\nClient: {{customerName}}\nTelephone: {{customerPhone}}\nVille: {{deliveryCity}}\nProbleme: {{problem}}',
       stockAlertTemplate: env.STOCK_ALERT_MESSAGE_TEMPLATE || '',

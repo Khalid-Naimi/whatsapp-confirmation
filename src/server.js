@@ -1,3 +1,4 @@
+import { DeliveredDigestService } from './services/delivered-digest-service.js';
 import fs from 'node:fs';
 import http from 'node:http';
 import { createApp } from './app.js';
@@ -188,6 +189,13 @@ const stockSyncService = new StockSyncService({
 });
 logger.log(`Stock sync mode: ${config.stockSync.mode}; order routing by product links: ${config.highDelivery.linksMode}.`);
 
+const deliveredDigestService = new DeliveredDigestService({
+  hdClient: hdAutoSend.hdClient,
+  alert: alerts.alert,
+  timeZone: config.messages.quietHours.timeZone,
+  logger
+});
+
 const app = createApp({
   config,
   confirmationService,
@@ -195,6 +203,7 @@ const app = createApp({
   stockAlertService,
   hdStatusSyncService,
   feedbackRequestService,
+  deliveredDigestService,
   healthTracker,
   hdClient: hdAutoSend.hdClient,
   stockSyncService,

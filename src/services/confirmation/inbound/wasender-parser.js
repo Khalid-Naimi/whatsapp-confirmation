@@ -5,6 +5,7 @@
 import { createHash } from 'node:crypto';
 import { normalizePhone } from '../../../utils/format.js';
 import { normalizeFeedbackTokenValue } from '../order-helpers.js';
+import { parseTeamPollOption } from '../../../utils/team-send.js';
 
 export const MAX_FEEDBACK_PAYLOAD_JSON_LENGTH = 4000;
 
@@ -27,7 +28,11 @@ export function extractPollVoteMessages(payload, eventKey, logger = console) {
   const messages = [];
 
   for (const result of results) {
-    const reply = POLL_OPTION_REPLIES.find(({ pattern }) => pattern.test(String(result?.name || '').trim()))?.reply;
+    // A vote on the team's "send to HighDelivery?" poll is not a customer decision: it is marked and handled apart.
+    const teamVote = parseTeamPollOption(result?.name);
+    const reply = teamVote
+      ? (teamVote.send ? '1' : '0')
+      : POLL_OPTION_REPLIES.find(({ pattern }) => pattern.test(String(result?.name || '').trim()))?.reply;
     if (!reply) {
       continue;
     }
@@ -45,7 +50,9 @@ export function extractPollVoteMessages(payload, eventKey, logger = console) {
       messages.push({
         webhookEventKey: eventKey,
         messageIndex: index,
-        messageKey: `poll:${pollId}:${senderPhone}:${reply}`,
+        // A team member may vote again after a failed try: the time tells that apart from a re-delivered webhook.
+        messageKey: `poll:${pollId}:${senderPhone}:${reply}${teamVote ? `:${payload?.timestamp ?? ''}` : ''}`,
+        ...(teamVote ? { teamVote } : {}),
         providerMessageId: null,
         senderPhone,
         senderRaw,
