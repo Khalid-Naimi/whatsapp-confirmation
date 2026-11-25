@@ -412,11 +412,21 @@ const CONFIRMATION_TEMPLATE = [
   '- Bach t confirmer la commande dyalk, jawb b "1".\n- Bach t annuler la commande dyalk, jawb b "2".'
 ].join('\n\n');
 
+// Texts written by the shop spell that line their own way ("had l'message automatique ... lhad numero"): a text that
+// already says it is automatic, or already gives the shop's number, gets nothing added.
+function alreadySigned(message, shopContactPhone) {
+  if (/message\s+automati/iu.test(message)) {
+    return true;
+  }
+  const digits = String(shopContactPhone).replace(/\D/gu, '').slice(-9);
+  return digits.length === 9 && new RegExp(digits.split('').join('[\\s().-]*'), 'u').test(message);
+}
+
 // The "automatic message, write to this number" line, added once at the end of a customer message. A text that
 // already has it (for example one set in the environment) is left as it is. Without a shop phone nothing is added.
 export function withAutomaticNotice(text, shopContactPhone) {
   const message = String(text ?? '');
-  if (!message.trim() || !shopContactPhone || /hada message automatique/iu.test(message)) {
+  if (!message.trim() || !shopContactPhone || alreadySigned(message, shopContactPhone)) {
     return message;
   }
   return `${message.replace(/\s+$/u, '')}\n\n${AUTOMATIC_NOTICE} ${shopContactPhone}`;

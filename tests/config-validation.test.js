@@ -83,6 +83,18 @@ test('loadConfig carries the problems, has no built-in personal numbers and puts
   }
 });
 
+test('the shop own spelling of the automatic line, or its number, is never doubled', async () => {
+  const { withAutomaticNotice } = await import('../src/config.js');
+  for (const own of [
+    "Chokran.\nhad l'message automatique, ila 3endek chi question seftha lhad numero: +212708357533",
+    'Chokran.\n-Ila 3endek chi question, seft la question dyalk l had numero: +212 708-357533',
+    'Salam.\nHada Message  Automatique.'
+  ]) {
+    assert.equal(withAutomaticNotice(own, '+212708357533'), own);
+  }
+  assert.match(withAutomaticNotice('Chokran.', '+212708357533'), /Hada message automatique/u);
+});
+
 test('every customer message says it is automatic, also texts set in the environment, but never twice', () => {
   const own = loadConfig({ ...GOOD, REMINDER_MESSAGE: 'own text' }).messages.reminderMessage;
   assert.equal(own, 'own text\n\nHada message automatique, ila 3endek chi question, seft la question dyalk l had numero: +212 600-000003');
