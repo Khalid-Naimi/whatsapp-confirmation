@@ -56,6 +56,14 @@ export function createApp({ config, confirmationService, store, stockAlertServic
         logger.warn(`[task][order-followups] hd status sync failed: ${redact(error.message)}`);
       }
     }
+    // A size exchange left half done by a stop (never breaks the other steps).
+    if (typeof confirmationService.settleStaleExchanges === 'function') {
+      try {
+        await confirmationService.settleStaleExchanges();
+      } catch (error) {
+        logger.warn(`[task][order-followups] unfinished exchanges failed: ${redact(error.message)}`);
+      }
+    }
     // The feedback request, three days after a delivery (never breaks the other steps).
     if (feedbackRequestService) {
       try {

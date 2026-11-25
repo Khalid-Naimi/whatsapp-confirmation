@@ -29,6 +29,7 @@ import {
   summarizeWasenderRequestStatus
 } from './confirmation/inbound/wasender-parser.js';
 import { optOutMethods } from './confirmation/opt-out.js';
+import { exchangeMethods } from './confirmation/exchange.js';
 import {
   buildDecisionMetaUpdate,
   buildLogicalSendMetaUpdate,
@@ -2084,6 +2085,7 @@ Object.assign(ConfirmationService.prototype, feedbackMethods);
 Object.assign(ConfirmationService.prototype, optOutMethods);
 Object.assign(ConfirmationService.prototype, ordersReadModelMethods);
 Object.assign(ConfirmationService.prototype, manageMethods);
+Object.assign(ConfirmationService.prototype, exchangeMethods);
 
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

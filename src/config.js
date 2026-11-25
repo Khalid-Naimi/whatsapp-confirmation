@@ -318,6 +318,11 @@ export function loadConfig(env = process.env) {
       contactTooLateMessage: MANAGE_TEXTS.contactTooLate,
       contactFailedMessage: MANAGE_TEXTS.contactFailed,
       contactCheckingMessage: MANAGE_TEXTS.contactChecking,
+      exchangeAskMessage: MANAGE_TEXTS.exchangeAsk,
+      exchangeDoneMessage: MANAGE_TEXTS.exchangeDone,
+      exchangeKeptMessage: MANAGE_TEXTS.exchangeKept,
+      exchangeRetryMessage: MANAGE_TEXTS.exchangeRetry,
+      exchangeTeamMessage: MANAGE_TEXTS.exchangeTeam,
       cancellationEmailSubject: env.CANCELLATION_EMAIL_SUBJECT ||
         'Your order #{{orderId}} has been cancelled',
       cancellationEmailBody: env.CANCELLATION_EMAIL_BODY ||
@@ -448,7 +453,7 @@ const CUSTOMER_MESSAGE_KEYS = [
   'replacementTooLateMessage', 'replacementFailedMessage', 'replacementKeptMessage',
   'contactAddressMessage', 'contactPhoneMessage', 'contactDoneAddressMessage', 'contactDonePhoneMessage',
   'contactKeptAddressMessage', 'contactKeptPhoneMessage', 'contactTooLateMessage', 'contactFailedMessage',
-  'contactCheckingMessage'
+  'contactCheckingMessage', 'exchangeAskMessage', 'exchangeDoneMessage', 'exchangeKeptMessage', 'exchangeRetryMessage', 'exchangeTeamMessage'
 ];
 
 function withAutomaticNotices(messages, shopContactPhone) {

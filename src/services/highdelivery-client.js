@@ -302,6 +302,20 @@ export class HighDeliveryClient {
     return payload.data || {};
   }
 
+  // The platform's own exchange of a delivered parcel: a new linked parcel to the same recipient. The body is the one
+  // its web app sends. Warehouse items win over a typed product name. Returns { trackingNumber, data }.
+  async createExchange(id, { codAmount = 0, productName = '', warehouseItems = [] }) {
+    const body = { cod_amount: Math.round(Number(codAmount) || 0) };
+    if (warehouseItems.length) {
+      body.warehouseItems = warehouseItems;
+    } else if (productName) {
+      body.product_name = productName;
+    }
+    const payload = await this.request('POST', `/client/packages/${encodeURIComponent(id)}/exchange`, body);
+    const data = payload.data || {};
+    return { trackingNumber: extractTrackingNumber(data), data };
+  }
+
   // Creates one parcel. Returns { trackingNumber, data }.
   async createPackage({ recipientName, recipientPhone, address, city, productName, codAmount, comment = '', allowOpening = true, isExpress = false, items = [] }) {
     const cityRow = await this.resolveCity(city);

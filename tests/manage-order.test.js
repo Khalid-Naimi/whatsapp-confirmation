@@ -48,7 +48,7 @@ const replacement = (id, oldId, meta = {}) => order(id, { meta: { rhymat_replace
 const waitingReplacement = (id, oldId) => replacement(id, oldId, { ...SENT('2026-11-20T10:00:00.000Z'), rhymat_wa_manage_count: 2, rhymat_wa_manage_last_at: '2026-11-20T10:00:00.000Z' });
 const confirmedOld = (id, pendingId, extra = {}) => order(id, { status: 'on-hold', meta: { ...CONFIRMED, rhymat_replacement_pending: String(pendingId), ...extra } });
 
-function setup(orders = [], { parcels = [], cancelParcel = null, editParcel = null, shopLimit = 60, quietNow = false, trust = 50, products = {}, holdMs = 90000, poll = false } = {}) {
+function setup(orders = [], { parcels = [], cancelParcel = null, editParcel = null, exchangeParcel = null, shopLimit = 60, quietNow = false, trust = 50, products = {}, holdMs = 90000, poll = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manage-'));
   const store = new JsonStore(path.join(dir, 'db.json'));
   const shop = new Map(orders.map((item) => [String(item.id), item]));
@@ -56,6 +56,7 @@ function setup(orders = [], { parcels = [], cancelParcel = null, editParcel = nu
   const teamNotices = [];
   const mails = [];
   const hdCancels = [];
+  const exchanges = [];
   const hdEdits = [];
   const created = [];
   const now = { value: new Date('2026-11-20T10:00:00.000Z') };
@@ -118,6 +119,12 @@ function setup(orders = [], { parcels = [], cancelParcel = null, editParcel = nu
       Object.assign(parcels.find((item) => item.id === row.id), patch);
       return {};
     },
+    async createExchange(id, body) {
+      exchanges.push([id, body]);
+      if (exchangeParcel) { return exchangeParcel(id, body); }
+      parcels.find((row) => row.id === id).exchange_new_tracking = 'HD-EX-1';
+      return { trackingNumber: 'HD-EX-1' };
+    },
     async trustScore() { return { score: trust, blacklisted: false, totalOrders: 1, deliveredOrders: 0, failedOrders: 0 }; },
     async createPackage(parcel) { created.push(parcel); return { trackingNumber: `HD-NEW-${created.length}` }; }
   };
@@ -164,7 +171,7 @@ function setup(orders = [], { parcels = [], cancelParcel = null, editParcel = nu
     await service.processWasenderInbound({ event: 'poll.results', data: { key: { id: pollId }, pollResult: [{ name: option, voters: [`${from.slice(1)}@s.whatsapp.net`] }] } }, `vote-${pollId}-${option}`);
     await service.drain();
   };
-  return { service, store, shop, get, sent, teamNotices, mails, hdCancels, hdEdits, created, reply, vote, polls, later, now, quietState, send, wooClient, parcels, products };
+  return { service, store, shop, get, sent, teamNotices, mails, hdCancels, hdEdits, exchanges, hdAutoSend, hdClient, created, reply, vote, polls, later, now, quietState, send, wooClient, parcels, products };
 }
 
 test('three messages per order: a first correction is free, then 3 minutes apart, then the limit', async () => {
@@ -906,4 +913,174 @@ test('contact: the parcel edit sends the whole delivery data back and never drop
   assert.deepEqual([body.address, body.recipient_phone, body.city, body.cod_amount, body.comment, body.is_express, body.isExpress], ['Rue 12', '0600000001', 'Rabat', 199, 'Woo #60', true, true]);
   await assert.rejects(client.updatePackage(parcel({ cod_amount: undefined }), { address: 'x' }), /missing: cod_amount/u);
   assert.equal(calls.length, 1);
+});
+
+// --- Size exchange after delivery --------------------------------------------------------------------------------
+
+const delivered = (meta = {}) => order(70, { status: 'delivered', meta: { ...CONFIRMED, ...PARCEL, rhymat_wa_manage_count: 3, ...meta } });
+const deliveredParcel = (extra = {}) => parcel({ status: 'delivered', delivered_at: '2026-11-18T12:00:00.000Z', ...extra });
+const SIZES = [
+  { item: 1, productId: 10, variationId: 11, woo: 'Cargo - M', name: 'Cargo', from: 'S', to: 'M', qty: 1 },
+  { item: 2, productId: 20, variationId: 22, woo: 'Sweat - L', name: 'Sweat', from: 'M', to: 'L', qty: 2 }
+];
+const exchangeMeta = (items = SIZES, askedAt = '2026-11-20T10:00:00.000Z') => JSON.stringify({ items, askedAt });
+const doneOf = (t) => JSON.parse(metaOf(t.get(70), 'rhymat_wa_manage_exchange_done') || 'null');
+
+async function askedExchange(t) {
+  assert.equal((await t.service.manageCheck('70', 'exchange')).ok, true);
+  await t.wooClient.updateOrderMeta('70', [{ key: 'rhymat_wa_manage_exchange', value: exchangeMeta() }]);
+  const result = await t.service.manageSend('70', 'exchange');
+  await t.service.drain();
+  t.later(MINUTE);
+  return result;
+}
+
+test('exchange: asked even with the order messages used up, nothing is created before the 1', async () => {
+  const t = setup([delivered()], { parcels: [deliveredParcel()], quietNow: true });
+  assert.equal((await askedExchange(t)).ok, true);
+  assert.equal(t.sent.length, 1);
+  assert.equal(t.sent[0].to, PHONE);
+  assert.match(t.sent[0].message, /^La commande #70 : échange de taille\nCargo : S → M\nSweat x2 : M → L\nRéponds 1 pour valider/u);
+  assert.deepEqual(t.exchanges, []);
+  assert.equal(doneOf(t), null);
+});
+
+test('exchange: reply 1 creates one HighDelivery exchange for all the sizes, and only one ever', async () => {
+  const t = setup([delivered()], { parcels: [deliveredParcel()] });
+  await askedExchange(t);
+  await t.reply('1');
+  assert.equal(t.exchanges.length, 1);
+  assert.deepEqual(t.exchanges[0], [7, { codAmount: 0, productName: 'Cargo - M x1, Sweat - L x2' }]);
+  assert.equal(doneOf(t).state, 'done');
+  assert.equal(doneOf(t).tracking, 'HD-EX-1');
+  assert.equal(metaOf(t.get(70), 'rhymat_wa_manage_exchange'), '');
+  assert.match(t.sent.at(-1).message, /^C'est fait : l'échange de la commande #70/u);
+  assert.match(t.teamNotices.at(-1), /echange cree.*70.*Cargo : S → M.*HD-EX-1/u);
+  await t.reply('1');
+  assert.equal(t.exchanges.length, 1);
+  assert.equal((await t.service.manageCheck('70', 'exchange')).reason, 'exchange_used');
+});
+
+test('exchange: the warehouse products of the new sizes are named to HighDelivery', async () => {
+  const t = setup([delivered()], { parcels: [deliveredParcel()] });
+  t.hdAutoSend.productMap = new Map();
+  t.hdAutoSend.matchItems = async (_id, full) => ({ ok: true, items: full.line_items.map((line) => ({ productId: `hd-${line.variation_id}`, name: line.name, quantity: line.quantity })), problems: [] });
+  await askedExchange(t);
+  await t.reply('1');
+  assert.deepEqual(t.exchanges[0][1].warehouseItems, [{ productId: 'hd-11', quantity: 1 }, { productId: 'hd-22', quantity: 2 }]);
+});
+
+test('exchange: reply 2 changes nothing and the customer may ask again', async () => {
+  const t = setup([delivered()], { parcels: [deliveredParcel()] });
+  await askedExchange(t);
+  await t.reply('2');
+  assert.deepEqual(t.exchanges, []);
+  assert.equal(metaOf(t.get(70), 'rhymat_wa_manage_exchange'), '');
+  assert.equal(doneOf(t), null);
+  assert.match(t.sent.at(-1).message, /pas d'échange pour la commande #70/u);
+  t.later(5 * MINUTE);
+  assert.equal((await t.service.manageCheck('70', 'exchange')).ok, true);
+});
+
+test('exchange: refused unless the parcel is delivered, recent and never exchanged', async () => {
+  for (const row of [parcel({ status: 'in_transit' }), deliveredParcel({ exchange_new_tracking: 'HD-9' }), deliveredParcel({ reimburse_new_tracking: 'HD-9' }), deliveredParcel({ delivered_at: '2026-11-01T12:00:00.000Z' })]) {
+    const t = setup([delivered()], { parcels: [row] });
+    assert.equal((await t.service.manageCheck('70', 'exchange')).reason, 'not_changeable');
+  }
+  const t = setup([delivered()], { parcels: [deliveredParcel(), { id: 8, tracking_number: 'HD-2', status: 'created', exchange_of_tracking: 'HD-1' }] });
+  assert.equal((await t.service.manageCheck('70', 'exchange')).reason, 'not_changeable');
+});
+
+test('exchange: no stock or a refusal leaves it to the team, once', async () => {
+  const t = setup([delivered()], { parcels: [deliveredParcel()], exchangeParcel: () => { throw new HighDeliveryError('Stock insuffisant', { status: 400 }); } });
+  await askedExchange(t);
+  await t.reply('1');
+  assert.equal(doneOf(t).state, 'team');
+  assert.match(t.teamNotices.at(-1), /PAS cree.*Stock insuffisant/u);
+  assert.match(t.sent.at(-1).message, /On te contacte/u);
+  await t.reply('1');
+  assert.equal(t.exchanges.length, 1);
+});
+
+test('exchange: a lost answer counts only when the platform shows the new parcel', async () => {
+  const lost = () => { throw Object.assign(new HighDeliveryError('timeout'), { ambiguous: true }); };
+  const parcels = [deliveredParcel()];
+  const t = setup([delivered()], { parcels, exchangeParcel: () => { parcels.push({ id: 9, tracking_number: 'HD-EX-9', status: 'created', exchange_of_tracking: 'HD-1' }); return lost(); } });
+  await askedExchange(t);
+  await t.reply('1');
+  assert.equal(doneOf(t).state, 'done');
+  assert.equal(doneOf(t).tracking, 'HD-EX-9');
+
+  const u = setup([delivered()], { parcels: [deliveredParcel()], exchangeParcel: lost });
+  await askedExchange(u);
+  await u.reply('1');
+  assert.equal(doneOf(u).state, 'team');
+  assert.match(u.teamNotices.at(-1), /PEUT-ETRE cree/u);
+});
+
+test('exchange: found again after a restart; a failed question uses nothing', async () => {
+  const t = setup([delivered({ rhymat_wa_manage_exchange: exchangeMeta() })], { parcels: [deliveredParcel()] });
+  await t.reply('1');
+  assert.equal(t.exchanges.length, 1);
+
+  const u = setup([delivered()], { parcels: [deliveredParcel()] });
+  u.send.error = new Error('provider down');
+  await u.wooClient.updateOrderMeta('70', [{ key: 'rhymat_wa_manage_exchange', value: exchangeMeta() }]);
+  assert.equal((await u.service.manageSend('70', 'exchange')).reason, 'send_failed');
+  assert.equal(metaOf(u.get(70), 'rhymat_wa_manage_exchange_asks'), '');
+});
+
+test('exchange: a shop outage creates nothing and asks the customer to send 1 again', async () => {
+  const t = setup([delivered()], { parcels: [deliveredParcel()] });
+  await askedExchange(t);
+  const write = t.wooClient.updateOrderMeta.bind(t.wooClient);
+  t.wooClient.updateOrderMeta = async () => { throw new Error('shop down'); };
+  await t.reply('1');
+  assert.deepEqual(t.exchanges, []);
+  assert.deepEqual(t.teamNotices, []);
+  assert.match(t.sent.at(-1).message, /Renvoie 1 dans quelques minutes/u);
+  t.wooClient.updateOrderMeta = write;
+  t.later(6 * MINUTE);
+  await t.reply('1');
+  assert.equal(t.exchanges.length, 1);
+});
+
+test('exchange: cancelled on the website just before the 1 is applied', async () => {
+  const t = setup([delivered()], { parcels: [deliveredParcel()] });
+  await askedExchange(t);
+  const write = t.wooClient.updateOrderMeta.bind(t.wooClient);
+  t.wooClient.updateOrderMeta = async (id, rows) => {
+    const result = await write(id, rows);
+    // The customer taps "Annuler la demande" while the claim settles.
+    if (rows.some((row) => row.key === 'rhymat_wa_manage_exchange_claim' && row.value)) {
+      await write(id, [{ key: 'rhymat_wa_manage_exchange', value: '' }]);
+    }
+    return result;
+  };
+  await t.reply('1');
+  assert.deepEqual(t.exchanges, []);
+  assert.equal(doneOf(t), null);
+  assert.match(t.sent.at(-1).message, /pas d'échange/u);
+});
+
+test('exchange: one left at "sending" is settled by the hourly task, without creating anything', async () => {
+  const sending = JSON.stringify({ askedAt: '2026-11-20T09:00:00.000Z', at: '2026-11-20T09:30:00.000Z', state: 'sending', items: SIZES });
+  const made = setup([delivered({ rhymat_wa_manage_exchange_done: sending })], { parcels: [deliveredParcel(), { id: 9, tracking_number: 'HD-EX-9', status: 'created', exchange_of_tracking: 'HD-1' }] });
+  assert.equal(await made.service.settleStaleExchanges(), 1);
+  await made.service.drain();
+  assert.equal(doneOf(made).state, 'done');
+  assert.equal(doneOf(made).tracking, 'HD-EX-9');
+  assert.match(made.teamNotices.at(-1), /HD-EX-9/u);
+  assert.equal(await made.service.settleStaleExchanges(), 0);
+
+  const lost = setup([delivered({ rhymat_wa_manage_exchange_done: sending })], { parcels: [deliveredParcel()] });
+  assert.equal(await lost.service.settleStaleExchanges(), 1);
+  await lost.service.drain();
+  assert.equal(doneOf(lost).state, 'team');
+  assert.match(lost.teamNotices.at(-1), /interrompu/u);
+  assert.match(lost.sent.at(-1).message, /On te contacte/u);
+  assert.deepEqual([made.exchanges, lost.exchanges], [[], []]);
+
+  const fresh = setup([delivered({ rhymat_wa_manage_exchange_done: sending.replace('09:30', '09:55') })], { parcels: [deliveredParcel()] });
+  assert.equal(await fresh.service.settleStaleExchanges(), 0);
 });

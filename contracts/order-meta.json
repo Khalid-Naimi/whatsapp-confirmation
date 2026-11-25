@@ -806,6 +806,33 @@
       "group": "manage page"
     },
     {
+      "key": "rhymat_wa_manage_exchange",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page",
+      "alsoWrittenBy": [
+        "wordpress"
+      ]
+    },
+    {
+      "key": "rhymat_wa_manage_exchange_done",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page"
+    },
+    {
+      "key": "rhymat_wa_manage_exchange_asks",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page"
+    },
+    {
+      "key": "rhymat_wa_manage_exchange_claim",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page"
+    },
+    {
       "key": "rhymat_replaces",
       "entity": "order",
       "owner": "wordpress",

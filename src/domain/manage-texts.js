@@ -16,5 +16,11 @@ export const MANAGE_TEXTS = Object.freeze({
   contactTooLate: "Trop tard : la commande #{{orderId}} est déjà partie, rien n'a changé.",
   contactFailed: "La modification n'a pas pu se faire, la commande #{{orderId}} reste comme avant.",
   // The parcel may or may not carry the change: nothing is promised either way.
-  contactChecking: 'On vérifie la modification de la commande #{{orderId}} et on te confirme.'
+  contactChecking: 'On vérifie la modification de la commande #{{orderId}} et on te confirme.',
+  // Size exchange after delivery: the parcel is created only after the customer answers 1.
+  exchangeAsk: "La commande #{{orderId}} : échange de taille\n{{items}}\nRéponds 1 pour valider. Sans réponse, rien ne change.",
+  exchangeDone: "C'est fait : l'échange de la commande #{{orderId}} est enregistré. Le livreur t'apporte la nouvelle taille. Garde l'ancienne pièce propre, avec ses étiquettes, pour la lui rendre.",
+  exchangeKept: "D'accord, pas d'échange pour la commande #{{orderId}}.",
+  exchangeRetry: "Petit souci technique pour l'échange de la commande #{{orderId}}. Renvoie 1 dans quelques minutes.",
+  exchangeTeam: "On a bien reçu ta demande d'échange pour la commande #{{orderId}}. On te contacte pour l'organiser."
 });

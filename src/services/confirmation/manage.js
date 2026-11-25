@@ -21,6 +21,7 @@ import { outsideLocks } from '../../utils/keyed-lock.js';
 import { DEFAULT_QUIET_HOURS } from '../../utils/quiet-hours.js';
 import { cancelParcelThen, editParcelThen, inspectParcel } from '../hd-parcel.js';
 import { normalizeMoroccanPhone } from '../hd-auto-send-service.js';
+import { readExchangeRequest } from './exchange.js';
 import { isWhatsAppContactabilityFailure } from '../wasender-client.js';
 import {
   buildDecisionMetaUpdate,
@@ -38,7 +39,7 @@ import {
 } from './order-helpers.js';
 import { isQueuedLongAgo } from './outbound/reserved-send.js';
 
-export const MANAGE_KINDS = Object.freeze(['resend', 'updated', 'address', 'phone', 'replacement', 'contact_address', 'contact_phone']);
+export const MANAGE_KINDS = Object.freeze(['resend', 'updated', 'address', 'phone', 'replacement', 'contact_address', 'contact_phone', 'exchange']);
 // A new address or phone on a confirmed order -> what it changes.
 const CONTACT_KINDS = Object.freeze({ contact_address: 'address', contact_phone: 'phone' });
 // Unanswered this long, the request is over (as a replacement is).
@@ -274,6 +275,10 @@ export const manageMethods = {
     const replaces = replacedOrderId(order);
     const old = replaces ? await this.readOrderOrNull(replaces) : null;
     const beforeReplacement = kind === 'replacement' && !replaces;
+    // A delivered order: often marked by hand, and HighDelivery's own parcel decides.
+    if (kind === 'exchange') {
+      return this.evaluateExchange(order, { forSend, phone: managePhone(order) });
+    }
     if (this.handledByHand(order) || (old && this.handledByHand(old))) {
       return refusal('not_changeable');
     }
@@ -365,6 +370,10 @@ export const manageMethods = {
       if (!result.ok) {
         return result;
       }
+      // No parcel to hold back and no first message to wait for: the order is delivered.
+      if (kind === 'exchange') {
+        return { ok: true, left: 0, lastSentAt: null, deferred: false };
+      }
       // The website changes the order next: a delayed first message must not run in the middle of that.
       if (kind !== 'replacement') {
         const waiting = this.cancelFirstMessageTimer(target);
@@ -438,6 +447,9 @@ export const manageMethods = {
       const result = await this.evaluateManage(target, kind, { forSend: true });
       if (!result.ok) {
         return result;
+      }
+      if (kind === 'exchange') {
+        return Date.now() > dispatchBy ? refusal('send_failed') : this.sendExchangeQuestion(result);
       }
       const { order, replaces, counters, held, phone } = result;
       if (Date.now() > dispatchBy) {
@@ -901,13 +913,13 @@ export const manageMethods = {
     }
     let orders = [];
     try {
-      orders = await this.listOrdersForStatuses([...new Set([...CONFIRMED_WOO_STATUSES, ...ACTIVE_CONFIRMATION_STATUSES, WOO_STATUS.completed])], { after: new Date(this.clock().getTime() - 30 * 24 * 60 * 60 * 1000).toISOString() });
+      orders = await this.listOrdersForStatuses([...new Set([...CONFIRMED_WOO_STATUSES, ...ACTIVE_CONFIRMATION_STATUSES, WOO_STATUS.completed, WOO_STATUS.delivered])], { after: new Date(this.clock().getTime() - 45 * 24 * 60 * 60 * 1000).toISOString() });
     } catch (error) {
       this.logger.warn(`[manage] could not look for a waiting contact change: ${error.message}`);
     }
     return newest((orders || [])
       .filter((order) => managePhone(order) === phone)
-      .map((order) => ({ orderId: String(order.id), askedAt: readContactRequest(order, this.clock())?.askedAt }))
+      .map((order) => ({ orderId: String(order.id), askedAt: (readExchangeRequest(order, this.clock()) || readContactRequest(order, this.clock()))?.askedAt }))
       .filter((row) => row.askedAt));
   },
 
@@ -945,6 +957,10 @@ export const manageMethods = {
 
   async applyContactReply(orderId, answerText, message) {
     const order = await this.readOrderOrNull(orderId);
+    const exchange = order && readExchangeRequest(order, this.clock());
+    if (exchange && managePhone(order) === message.senderPhone) {
+      return this.applyExchangeReply(order, exchange, answerText, message);
+    }
     const request = readContactRequest(order, this.clock());
     if (!request || managePhone(order) !== message.senderPhone) {
       this.forgetContactRequest(orderId);
