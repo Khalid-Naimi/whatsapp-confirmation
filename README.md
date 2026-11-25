@@ -240,3 +240,7 @@ twice, and a failed alert is queued again when WordPress hands the same id over 
 
 - When the auto-send holds an order or it fails in a way that can be retried, each `INTERNAL_NOTIFY_PHONES` number gets the reason and a poll: `1 - Envoyer #N` / `0 - Ne pas envoyer #N`. Typing `envoyer N` or `ne pas envoyer N` does the same. A yes skips only the low trust score; the blacklist and every other check stay. No poll when the parcel may already exist.
 - At 21:00 (shop time) the hourly task tells the team how many parcels were delivered that day; nothing is sent when none were.
+
+## New address or phone after confirming
+
+`/tasks/manage/check` and `/send` with kinds `contact_address` / `contact_phone` (the website writes `rhymat_wa_manage_contact` first). The question goes to the number already confirmed; only a typed `1` applies it: the HighDelivery parcel is edited, read back, then WooCommerce is saved. When the parcel may or may not carry the change, the customer is told it is being checked and the team gets an alert; nothing is promised.

@@ -583,11 +583,16 @@ export class ConfirmationService {
       return null;
     }
 
-    const resolvedReplyContext = replyContext || await this.resolveReplyContext(
+    let resolvedReplyContext = replyContext || await this.resolveReplyContext(
       message.senderPhone,
       { allowWooRecovery: options.allowWooRecovery !== false }
     );
     const typedAnswer = message.kind === 'audio' ? '' : parseDecisionReply(message.textBody);
+    const contact = await this.routeContactReply(message, typedAnswer, resolvedReplyContext);
+    if (contact?.route) {
+      return contact.route;
+    }
+    resolvedReplyContext = contact?.context || resolvedReplyContext;
     const decided = typedAnswer && resolvedReplyContext.pendingOrders.length > 0 && this.findRecentlyDecidedOrder(message.senderPhone, typedAnswer);
     // Not a repeat when a /suivi message (a change, a replacement) went out after that decision: this answers it.
     const repeated = decided && !resolvedReplyContext.pendingOrders.some((order) => (

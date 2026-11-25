@@ -57,11 +57,9 @@ export async function inspectParcel(order, hdClient) {
   return open.length ? answer('open', '', open) : answer('none');
 }
 
-// Cancels the order's parcel (if any) and then runs `apply(freshOrder, { parcelCancelled })`, which changes the order,
-// while the auto-send (in memory) and any other sender (the claim) are held off.
-// `precheck(order)` (optional) runs before any parcel is cancelled; a text it returns stops everything.
-// -> { outcome: 'ok', value, parcelCancelled } | { outcome: 'too_late' | 'failed', detail }. A throw from apply passes.
-export async function cancelParcelThen({ orderId, hdAutoSend = null, wooClient, reason = '', precheck = null, apply, logger = console }) {
+// Runs `work(freshOrder, hdClient)` while the auto-send (in memory) and any other sender (the claim) are held off, so
+// no parcel appears while one is being changed. -> what `work` returns, or { outcome: 'failed', detail }.
+async function withParcelHeld({ orderId, hdAutoSend, wooClient, logger }, work) {
   const id = String(orderId);
   const guarded = async () => {
     let claimed = null;
@@ -82,7 +80,25 @@ export async function cancelParcelThen({ orderId, hdAutoSend = null, wooClient, 
         }
         order = await wooClient.getOrder(id);
       }
-      const hdClient = hdAutoSend?.hdClient || null;
+      return await work(order, hdAutoSend?.hdClient || null);
+    } finally {
+      if (claimed?.ok) {
+        await claimed.release().catch((error) => logger.warn(`[manage] could not release the HighDelivery claim orderId=${id}: ${error.message}`));
+      }
+    }
+  };
+  if (!hdAutoSend?.runExclusive) {
+    return guarded();
+  }
+  const attempt = await hdAutoSend.runExclusive(id, guarded);
+  return attempt.ran ? attempt.value : { outcome: 'failed', detail: 'the HighDelivery auto-send is still running for this order' };
+}
+
+// Cancels the order's parcel (if any) and then runs `apply(freshOrder, { parcelCancelled })`, which changes the order.
+// `precheck(order)` (optional) runs before any parcel is cancelled; a text it returns stops everything.
+// -> { outcome: 'ok', value, parcelCancelled } | { outcome: 'too_late' | 'failed', detail }. A throw from apply passes.
+export async function cancelParcelThen({ orderId, hdAutoSend = null, wooClient, reason = '', precheck = null, apply, logger = console }) {
+  return withParcelHeld({ orderId, hdAutoSend, wooClient, logger }, async (order, hdClient) => {
       const parcel = await inspectParcel(order, hdClient);
       if (parcel.state === 'collected') {
         return { outcome: 'too_late', detail: parcel.detail };
@@ -114,15 +130,74 @@ export async function cancelParcelThen({ orderId, hdAutoSend = null, wooClient, 
       }
       const parcelCancelled = parcel.parcels.length > 0;
       return { outcome: 'ok', parcelCancelled, value: await apply(order, { parcelCancelled }) };
-    } finally {
-      if (claimed?.ok) {
-        await claimed.release().catch((error) => logger.warn(`[manage] could not release the HighDelivery claim orderId=${id}: ${error.message}`));
-      }
-    }
-  };
-  if (!hdAutoSend?.runExclusive) {
-    return guarded();
+  });
+}
+
+// How the platform may rewrite a text it stored: case, spaces and punctuation do not make it another value.
+const loose = (value) => String((typeof value === 'object' && value !== null ? JSON.stringify(value) : value) ?? '')
+  .normalize('NFKD').replace(/[\u0300-\u036f]/gu, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+const samePhone = (a, b) => String(a ?? '').replace(/\D/gu, '').slice(-9) === String(b ?? '').replace(/\D/gu, '').slice(-9);
+const sameValue = (key, a, b) => (key.startsWith('recipient_phone') ? samePhone(a, b) : loose(a) === loose(b));
+// Everything an edit sends back: none of it may move except what was asked.
+const KEPT_FIELDS = ['recipient_name', 'recipient_phone', 'recipient_phone2', 'address', 'allow_opening', 'comment', 'city', 'product_name', 'cod_amount', 'is_fragile'];
+
+function changedBeyond(before, after, patch) {
+  const moved = KEPT_FIELDS.filter((key) => !(key in patch) && before[key] !== undefined && before[key] !== null && !sameValue(key, before[key], after[key]));
+  if (Boolean(before.is_express ?? before.isExpress) !== Boolean(after.is_express ?? after.isExpress)) {
+    moved.push('express');
   }
-  const attempt = await hdAutoSend.runExclusive(id, guarded);
-  return attempt.ran ? attempt.value : { outcome: 'failed', detail: 'the HighDelivery auto-send is still running for this order' };
+  if (Array.isArray(before.items) && before.items.length !== (Array.isArray(after.items) ? after.items.length : 0)) {
+    moved.push('items');
+  }
+  return moved;
+}
+
+// Edits the order's parcel (if any), reads it back to be sure the platform applied the change and nothing else moved,
+// then runs `apply(freshOrder, { parcelEdited })`.
+// -> { outcome: 'ok', value, parcelEdited, check } | { outcome: 'too_late' | 'failed' | 'unsure', detail }.
+// "failed" means the parcel is certainly as before; "unsure" means it may carry the change.
+export async function editParcelThen({ orderId, hdAutoSend = null, wooClient, patch, apply, logger = console }) {
+  return withParcelHeld({ orderId, hdAutoSend, wooClient, logger }, async (order, hdClient) => {
+    const parcel = await inspectParcel(order, hdClient);
+    if (parcel.state === 'collected') {
+      return { outcome: 'too_late', detail: parcel.detail };
+    }
+    if (parcel.state === 'unverified') {
+      return { outcome: 'failed', detail: parcel.detail };
+    }
+    const moved = new Set();
+    let touched = false;
+    for (const row of parcel.parcels) {
+      const rowId = row.id ?? row._id;
+      let lost = null;
+      try {
+        await hdClient.updatePackage(row, patch);
+      } catch (error) {
+        if (!error?.ambiguous) {
+          return { outcome: touched ? 'unsure' : 'failed', detail: `HighDelivery refused the change: ${error.message}` };
+        }
+        lost = error;
+      }
+      const after = await hdClient.listPackages().then((rows) => rows.find((item) => (item.id ?? item._id) === rowId), () => null);
+      if (!after || !Object.entries(patch).every(([key, value]) => sameValue(key, after[key], value))) {
+        return { outcome: 'unsure', detail: lost ? `no answer from HighDelivery: ${lost.message}` : 'HighDelivery does not show the change' };
+      }
+      touched = true;
+      changedBeyond(row, after, patch).forEach((field) => moved.add(field));
+    }
+    const parcelEdited = parcel.parcels.length > 0;
+    let value;
+    try {
+      value = await apply(order, { parcelEdited });
+    } catch (error) {
+      if (!parcelEdited) {
+        throw error;
+      }
+      return { outcome: 'unsure', detail: `the parcel is changed but WooCommerce was not saved: ${error.message}` };
+    }
+    if (moved.size) {
+      logger.warn(`[manage] HighDelivery changed more than asked orderId=${orderId} fields=${[...moved].join(',')}`);
+    }
+    return { outcome: 'ok', parcelEdited, value, check: moved.size ? `HighDelivery a aussi change : ${[...moved].join(', ')}` : '' };
+  });
 }

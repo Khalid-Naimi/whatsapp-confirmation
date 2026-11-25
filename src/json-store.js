@@ -294,6 +294,11 @@ export class JsonStore {
     return this.listActiveSelfTestFeedbackOrdersByPhone(phone)[0] || null;
   }
 
+  // Orders whose new address or phone waits for this number's "1".
+  listContactRequestsByPhone(phone) {
+    return clone(this.db.orders.filter((order) => order.contactPhone === phone && order.contactAskedAt));
+  }
+
   listPendingOrdersByPhone(phone) {
     return clone(this.db.orders.filter((order) => order.phone === phone && order.confirmationState === 'pending_confirmation'));
   }

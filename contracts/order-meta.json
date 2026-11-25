@@ -791,6 +791,21 @@
       "group": "manage page"
     },
     {
+      "key": "rhymat_wa_manage_contact",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page",
+      "alsoWrittenBy": [
+        "wordpress"
+      ]
+    },
+    {
+      "key": "rhymat_wa_manage_contact_done",
+      "entity": "order",
+      "owner": "server",
+      "group": "manage page"
+    },
+    {
       "key": "rhymat_replaces",
       "entity": "order",
       "owner": "wordpress",

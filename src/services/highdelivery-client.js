@@ -272,6 +272,36 @@ export class HighDeliveryClient {
     return payload.data || {};
   }
 
+  // Edits a parcel the way the platform's own web app does: the whole delivery data goes back, with `patch` on top.
+  // `row` is the parcel as the list gives it. Nothing is sent when a field that must not get lost is missing.
+  async updatePackage(row, patch) {
+    const id = row?.id ?? row?._id;
+    const missing = ['recipient_name', 'recipient_phone', 'address', 'city', 'product_name', 'cod_amount']
+      .filter((key) => row?.[key] === undefined || row?.[key] === null || row?.[key] === '');
+    if (id === undefined || id === null || missing.length) {
+      throw new HighDeliveryError(`The parcel cannot be edited safely (missing: ${missing.join(', ') || 'id'}).`);
+    }
+    const express = Boolean(row.is_express ?? row.isExpress);
+    const body = {
+      recipient_name: row.recipient_name,
+      recipient_phone: row.recipient_phone,
+      recipient_phone2: row.recipient_phone2 ?? null,
+      address: row.address,
+      allow_opening: Boolean(row.allow_opening ?? true),
+      comment: row.comment ?? null,
+      city: row.city,
+      product_name: row.product_name,
+      cod_amount: Number(row.cod_amount),
+      is_fragile: Boolean(row.is_fragile),
+      is_express: express,
+      // Parcel creation only honours the camelCase name; sent both ways so an edit never drops the express choice.
+      isExpress: express,
+      ...patch
+    };
+    const payload = await this.request('PUT', `/client/packages/${encodeURIComponent(id)}`, body);
+    return payload.data || {};
+  }
+
   // Creates one parcel. Returns { trackingNumber, data }.
   async createPackage({ recipientName, recipientPhone, address, city, productName, codAmount, comment = '', allowOpening = true, isExpress = false, items = [] }) {
     const cityRow = await this.resolveCity(city);

@@ -309,6 +309,15 @@ export function loadConfig(env = process.env) {
       replacementTooLateMessage: MANAGE_TEXTS.replacementTooLate,
       replacementFailedMessage: MANAGE_TEXTS.replacementFailed,
       replacementKeptMessage: MANAGE_TEXTS.replacementKept,
+      contactAddressMessage: MANAGE_TEXTS.contactAddress,
+      contactPhoneMessage: MANAGE_TEXTS.contactPhone,
+      contactDoneAddressMessage: MANAGE_TEXTS.contactDoneAddress,
+      contactDonePhoneMessage: MANAGE_TEXTS.contactDonePhone,
+      contactKeptAddressMessage: MANAGE_TEXTS.contactKeptAddress,
+      contactKeptPhoneMessage: MANAGE_TEXTS.contactKeptPhone,
+      contactTooLateMessage: MANAGE_TEXTS.contactTooLate,
+      contactFailedMessage: MANAGE_TEXTS.contactFailed,
+      contactCheckingMessage: MANAGE_TEXTS.contactChecking,
       cancellationEmailSubject: env.CANCELLATION_EMAIL_SUBJECT ||
         'Your order #{{orderId}} has been cancelled',
       cancellationEmailBody: env.CANCELLATION_EMAIL_BODY ||
@@ -436,7 +445,10 @@ export function withAutomaticNotice(text, shopContactPhone) {
 const CUSTOMER_MESSAGE_KEYS = [
   'confirmationTemplate', 'invalidReply', 'reminderMessage', 'confirmedReply', 'cancelledReply',
   'shippedMessage', 'outForDeliveryMessage', 'feedbackRequestMessage', 'stockAlertTemplate', 'dropAlertTemplate',
-  'replacementTooLateMessage', 'replacementFailedMessage', 'replacementKeptMessage'
+  'replacementTooLateMessage', 'replacementFailedMessage', 'replacementKeptMessage',
+  'contactAddressMessage', 'contactPhoneMessage', 'contactDoneAddressMessage', 'contactDonePhoneMessage',
+  'contactKeptAddressMessage', 'contactKeptPhoneMessage', 'contactTooLateMessage', 'contactFailedMessage',
+  'contactCheckingMessage'
 ];
 
 function withAutomaticNotices(messages, shopContactPhone) {

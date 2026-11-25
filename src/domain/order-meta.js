@@ -156,7 +156,11 @@ export const MANAGE_META = Object.freeze({
   lastAt: 'rhymat_wa_manage_last_at',
   numberChanged: 'rhymat_wa_number_changed',
   deferred: 'rhymat_wa_manage_deferred',
-  holdUntil: 'rhymat_wa_manage_hold_until'
+  holdUntil: 'rhymat_wa_manage_hold_until',
+  // JSON {"kind":"address"|"phone","value","askedAt"}: asked on the website, applied when the customer answers 1.
+  contact: 'rhymat_wa_manage_contact',
+  // The askedAt of the last change that was applied (the website counts it).
+  contactDone: 'rhymat_wa_manage_contact_done'
 });
 
 // replaces (on the new order) and replacementPending (on the old one) are set by the website; the server empties
@@ -268,7 +272,7 @@ function buildRegistry() {
     )),
     ...rows('order', 'server', 'highdelivery status', HD_STATUS_META),
     ...rows('order', 'server', 'manage page', MANAGE_META).map((row) => (
-      [MANAGE_META.count, MANAGE_META.lastAt, MANAGE_META.numberChanged].includes(row.key) ? { ...row, alsoWrittenBy: ['wordpress'] } : row
+      [MANAGE_META.count, MANAGE_META.lastAt, MANAGE_META.numberChanged, MANAGE_META.contact].includes(row.key) ? { ...row, alsoWrittenBy: ['wordpress'] } : row
     )),
     { key: REPLACEMENT_META.replaces, entity: 'order', owner: 'wordpress', group: 'replacement order' },
     { key: REPLACEMENT_META.replacementPending, entity: 'order', owner: 'wordpress', group: 'replacement order', alsoWrittenBy: ['server'] },

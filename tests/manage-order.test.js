@@ -9,7 +9,7 @@ import { createApp } from '../src/app.js';
 import { JsonStore } from '../src/json-store.js';
 import { ConfirmationService } from '../src/services/confirmation-service.js';
 import { HdAutoSendService } from '../src/services/hd-auto-send-service.js';
-import { HighDeliveryError } from '../src/services/highdelivery-client.js';
+import { HighDeliveryClient, HighDeliveryError } from '../src/services/highdelivery-client.js';
 import { WasenderSendError } from '../src/services/wasender-client.js';
 import { CONFIRMED_REPLY_TEMPLATE } from '../src/config.js';
 import { computeReservations } from '../src/services/stock-sync-service.js';
@@ -48,7 +48,7 @@ const replacement = (id, oldId, meta = {}) => order(id, { meta: { rhymat_replace
 const waitingReplacement = (id, oldId) => replacement(id, oldId, { ...SENT('2026-11-20T10:00:00.000Z'), rhymat_wa_manage_count: 2, rhymat_wa_manage_last_at: '2026-11-20T10:00:00.000Z' });
 const confirmedOld = (id, pendingId, extra = {}) => order(id, { status: 'on-hold', meta: { ...CONFIRMED, rhymat_replacement_pending: String(pendingId), ...extra } });
 
-function setup(orders = [], { parcels = [], cancelParcel = null, shopLimit = 60, quietNow = false, trust = 50, products = {}, holdMs = 90000, poll = false } = {}) {
+function setup(orders = [], { parcels = [], cancelParcel = null, editParcel = null, shopLimit = 60, quietNow = false, trust = 50, products = {}, holdMs = 90000, poll = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manage-'));
   const store = new JsonStore(path.join(dir, 'db.json'));
   const shop = new Map(orders.map((item) => [String(item.id), item]));
@@ -56,6 +56,7 @@ function setup(orders = [], { parcels = [], cancelParcel = null, shopLimit = 60,
   const teamNotices = [];
   const mails = [];
   const hdCancels = [];
+  const hdEdits = [];
   const created = [];
   const now = { value: new Date('2026-11-20T10:00:00.000Z') };
   const quietState = { on: quietNow };
@@ -111,6 +112,12 @@ function setup(orders = [], { parcels = [], cancelParcel = null, shopLimit = 60,
       parcels.find((row) => row.id === id).status = 'cancelled';
       return {};
     },
+    async updatePackage(row, patch) {
+      hdEdits.push([row.id, patch]);
+      if (editParcel) { return editParcel(row, patch); }
+      Object.assign(parcels.find((item) => item.id === row.id), patch);
+      return {};
+    },
     async trustScore() { return { score: trust, blacklisted: false, totalOrders: 1, deliveredOrders: 0, failedOrders: 0 }; },
     async createPackage(parcel) { created.push(parcel); return { trackingNumber: `HD-NEW-${created.length}` }; }
   };
@@ -157,7 +164,7 @@ function setup(orders = [], { parcels = [], cancelParcel = null, shopLimit = 60,
     await service.processWasenderInbound({ event: 'poll.results', data: { key: { id: pollId }, pollResult: [{ name: option, voters: [`${from.slice(1)}@s.whatsapp.net`] }] } }, `vote-${pollId}-${option}`);
     await service.drain();
   };
-  return { service, store, shop, get, sent, teamNotices, mails, hdCancels, created, reply, vote, polls, later, now, quietState, send, wooClient, parcels, products };
+  return { service, store, shop, get, sent, teamNotices, mails, hdCancels, hdEdits, created, reply, vote, polls, later, now, quietState, send, wooClient, parcels, products };
 }
 
 test('three messages per order: a first correction is free, then 3 minutes apart, then the limit', async () => {
@@ -747,4 +754,156 @@ test('the order confirmation message carries the direct link, also when it is se
   const again = await t.service.manageSend('90', 'resend');
   assert.equal(again.ok, true, again.reason);
   assert.match(t.sent[1].message, /https:\/\/rhymat\.ma\/suivi\/\?n=90&k=/u);
+});
+
+// --- A new address or phone on a confirmed order ---------------------------------------------------------------
+
+const parcel = (extra = {}) => ({ id: 7, tracking_number: 'HD-1', status: 'created', recipient_name: 'Sara Test', recipient_phone: '0600000001', address: 'Rue 1', city: 'Rabat', product_name: 'Cap x1', cod_amount: 199, is_express: false, ...extra });
+const confirmed = (meta = {}) => order(60, { status: 'on-hold', meta: { ...CONFIRMED, ...PARCEL, ...meta } });
+const request = (kind, value, askedAt = '2026-11-20T10:00:00.000Z') => JSON.stringify({ kind, value, askedAt });
+
+async function asked(t, kind, value) {
+  assert.equal((await t.service.manageCheck('60', `contact_${kind}`)).ok, true);
+  // The website writes the request on the order, then asks for the message.
+  await t.wooClient.updateOrderMeta('60', [{ key: 'rhymat_wa_manage_contact', value: request(kind, value) }]);
+  const result = await t.service.manageSend('60', `contact_${kind}`);
+  await t.service.drain();
+  t.later(MINUTE);
+  return result;
+}
+
+test('contact: the customer is asked first, nothing changes and the order stays confirmed', async () => {
+  const t = setup([confirmed()], { parcels: [parcel()] });
+  assert.equal((await asked(t, 'address', 'Rue 12, Agdal')).ok, true);
+  assert.equal(t.sent.length, 1);
+  assert.equal(t.sent[0].to, PHONE);
+  assert.match(t.sent[0].message, /^La commande #60 : nouvelle adresse : Rue 12, Agdal\nRéponds 1 pour valider/u);
+  assert.equal(t.get(60).billing.address_1, 'Rue 1');
+  assert.equal(t.get(60).status, 'on-hold');
+  assert.equal(metaOf(t.get(60), 'rhymat_whatsapp_decision'), 'confirmed');
+  assert.deepEqual(t.hdEdits, []);
+});
+
+test('contact: reply 1 edits the parcel, then the order, and tells the customer and the team', async () => {
+  const parcels = [parcel()];
+  const t = setup([confirmed()], { parcels });
+  await asked(t, 'address', 'Rue 12, Agdal');
+  await t.reply('1');
+  assert.deepEqual(t.hdEdits, [[7, { address: 'Rue 12, Agdal' }]]);
+  assert.equal(parcels[0].address, 'Rue 12, Agdal');
+  assert.equal(t.get(60).billing.address_1, 'Rue 12, Agdal');
+  assert.equal(metaOf(t.get(60), 'rhymat_wa_manage_contact'), '');
+  assert.equal(metaOf(t.get(60), 'rhymat_wa_manage_contact_done'), '2026-11-20T10:00:00.000Z');
+  assert.equal(t.sent.at(-1).message, "C'est fait : la commande #60 a la nouvelle adresse.");
+  assert.match(t.teamNotices.at(-1), /commande 60: nouvelle adresse : Rue 12, Agdal \(colis High Delivery modifie\)/u);
+  assert.equal(t.get(60).status, 'on-hold');
+  // A second "1" changes nothing more.
+  await t.reply('1');
+  assert.equal(t.hdEdits.length, 1);
+});
+
+test('contact: reply 2 keeps the old address', async () => {
+  const t = setup([confirmed()], { parcels: [parcel()] });
+  await asked(t, 'address', 'Rue 12, Agdal');
+  await t.reply('2');
+  assert.deepEqual(t.hdEdits, []);
+  assert.equal(t.get(60).billing.address_1, 'Rue 1');
+  assert.equal(t.get(60).status, 'on-hold', 'a 2 here never cancels the order');
+  assert.equal(t.sent.at(-1).message, "La commande #60 garde l'ancienne adresse.");
+});
+
+test('contact: too late once collected, and nothing is saved when HighDelivery does not apply it', async () => {
+  const parcels = [parcel()];
+  const late = setup([confirmed()], { parcels });
+  await asked(late, 'address', 'Rue 12, Agdal');
+  parcels[0].status = 'picked_up';
+  await late.reply('1');
+  assert.equal(late.get(60).billing.address_1, 'Rue 1');
+  assert.equal(late.sent.at(-1).message, "Trop tard : la commande #60 est déjà partie, rien n'a changé.");
+
+  const ignored = setup([confirmed()], { parcels: [parcel()], editParcel: async () => ({}) });
+  await asked(ignored, 'address', 'Rue 12, Agdal');
+  await ignored.reply('1');
+  assert.equal(ignored.get(60).billing.address_1, 'Rue 1');
+  assert.equal(ignored.sent.at(-1).message, 'On vérifie la modification de la commande #60 et on te confirme.', 'never "nothing changed" once the edit was sent');
+  assert.match(ignored.teamNotices.at(-1), /Verifier High Delivery ET WooCommerce/u);
+
+  const refused = setup([confirmed()], { parcels: [parcel()], editParcel: async () => { throw new HighDeliveryError('nope', { status: 400 }); } });
+  await asked(refused, 'address', 'Rue 12, Agdal');
+  await refused.reply('1');
+  assert.match(refused.sent.at(-1).message, /n'a pas pu se faire/u);
+
+  const broken = setup([confirmed()], { parcels: [parcel()] });
+  await asked(broken, 'address', 'Rue 12, Agdal');
+  broken.wooClient.updateOrder = async () => { throw new Error('woo down'); };
+  await broken.reply('1');
+  assert.match(broken.sent.at(-1).message, /^On vérifie/u);
+});
+
+test('contact: the platform may rewrite the text, and anything else it moves is reported', async () => {
+  const parcels = [parcel({ comment: 'Woo #60', items: [{ id: 1 }] })];
+  const t = setup([confirmed()], {
+    parcels,
+    editParcel: async () => { Object.assign(parcels[0], { address: 'RUE 12 AGDAL.', comment: null, items: [] }); return {}; }
+  });
+  await asked(t, 'address', 'Rue 12, Agdal');
+  await t.reply('1');
+  assert.equal(t.get(60).billing.address_1, 'Rue 12, Agdal');
+  assert.equal(t.get(60).billing.address_2, '');
+  assert.match(t.teamNotices.at(-1), /HighDelivery a aussi change : comment, items/u);
+});
+
+test('contact: a 1 answering a later reminder of another order is not applied here', async () => {
+  const other = order(70, { meta: { ...SENT('2026-11-20T09:00:00.000Z'), rhymat_whatsapp_last_reminder_at: '2026-11-20T10:30:00.000Z', rhymat_whatsapp_reminder_count: 1 } });
+  const t = setup([confirmed(), other], { parcels: [parcel()] });
+  await asked(t, 'address', 'Rue 12, Agdal');
+  t.later(HOUR);
+  await t.reply('1');
+  assert.deepEqual(t.hdEdits, []);
+  assert.equal(t.get(60).billing.address_1, 'Rue 1');
+  assert.equal(metaOf(t.get(70), 'rhymat_whatsapp_decision'), 'confirmed');
+  // Sent again by mistake: still not the address change.
+  await t.reply('1');
+  assert.deepEqual(t.hdEdits, []);
+});
+
+test('contact: found again after a restart, and works when no parcel exists yet', async () => {
+  const t = setup([order(60, { status: 'on-hold', meta: { ...CONFIRMED, rhymat_wa_manage_contact: request('address', 'Rue 12, Agdal') } })]);
+  await t.reply('1');
+  assert.equal(t.get(60).billing.address_1, 'Rue 12, Agdal');
+  assert.deepEqual(t.hdEdits, []);
+});
+
+test('contact: a new phone goes to the parcel and the order, once', async () => {
+  const parcels = [parcel()];
+  const t = setup([confirmed()], { parcels });
+  await asked(t, 'phone', '+212611223344');
+  assert.equal(t.sent[0].to, PHONE, 'asked on the number already confirmed');
+  assert.match(t.sent[0].message, /nouveau numéro : 0611223344/u);
+  await t.reply('1');
+  assert.equal(parcels[0].recipient_phone, '0611223344');
+  assert.equal(t.get(60).billing.phone, '+212611223344');
+  assert.equal(metaOf(t.get(60), 'rhymat_wa_number_changed'), 'yes');
+  assert.equal((await t.service.manageCheck('60', 'contact_phone')).reason, 'number_already_changed');
+});
+
+test('contact: refused before confirmation, with a replacement waiting, or once collected', async () => {
+  const t = setup([order(60, { meta: SENT() })]);
+  assert.equal((await t.service.manageCheck('60', 'contact_address')).reason, 'not_changeable');
+  const pending = setup([confirmed({ rhymat_replacement_pending: '61' })], { parcels: [parcel()] });
+  assert.equal((await pending.service.manageCheck('60', 'contact_address')).reason, 'pending');
+  const gone = setup([confirmed()], { parcels: [parcel({ status: 'in_transit' })] });
+  assert.equal((await gone.service.manageCheck('60', 'contact_address')).reason, 'not_changeable');
+});
+
+test('contact: the parcel edit sends the whole delivery data back and never drops the express choice', async () => {
+  const calls = [];
+  const client = new HighDeliveryClient({ phone: 'x', password: 'y' });
+  client.request = async (method, url, body) => { calls.push([method, url, body]); return { data: {} }; };
+  await client.updatePackage(parcel({ is_express: true, comment: 'Woo #60' }), { address: 'Rue 12' });
+  const [method, url, body] = calls[0];
+  assert.deepEqual([method, url], ['PUT', '/client/packages/7']);
+  assert.deepEqual([body.address, body.recipient_phone, body.city, body.cod_amount, body.comment, body.is_express, body.isExpress], ['Rue 12', '0600000001', 'Rabat', 199, 'Woo #60', true, true]);
+  await assert.rejects(client.updatePackage(parcel({ cod_amount: undefined }), { address: 'x' }), /missing: cod_amount/u);
+  assert.equal(calls.length, 1);
 });

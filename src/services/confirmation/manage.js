@@ -19,7 +19,8 @@ import {
 import { interpolateTemplate, normalizePhone } from '../../utils/format.js';
 import { outsideLocks } from '../../utils/keyed-lock.js';
 import { DEFAULT_QUIET_HOURS } from '../../utils/quiet-hours.js';
-import { cancelParcelThen, inspectParcel } from '../hd-parcel.js';
+import { cancelParcelThen, editParcelThen, inspectParcel } from '../hd-parcel.js';
+import { normalizeMoroccanPhone } from '../hd-auto-send-service.js';
 import { isWhatsAppContactabilityFailure } from '../wasender-client.js';
 import {
   buildDecisionMetaUpdate,
@@ -37,7 +38,11 @@ import {
 } from './order-helpers.js';
 import { isQueuedLongAgo } from './outbound/reserved-send.js';
 
-export const MANAGE_KINDS = Object.freeze(['resend', 'updated', 'address', 'phone', 'replacement']);
+export const MANAGE_KINDS = Object.freeze(['resend', 'updated', 'address', 'phone', 'replacement', 'contact_address', 'contact_phone']);
+// A new address or phone on a confirmed order -> what it changes.
+const CONTACT_KINDS = Object.freeze({ contact_address: 'address', contact_phone: 'phone' });
+// Unanswered this long, the request is over (as a replacement is).
+export const CONTACT_EXPIRY_MS = 72 * 60 * 60 * 1000;
 // Messages an order chain may use, the first confirmation included. Reminders do not count.
 export const MANAGE_MAX_MESSAGES = 3;
 export const MANAGE_COOLDOWN_MS = 3 * 60 * 1000;
@@ -104,6 +109,19 @@ function metaRows(order, values) {
       const row = existing.find((item) => item.key === key);
       return row?.id ? { id: row.id, key, value } : { key, value };
     });
+}
+
+// The change of address or phone waiting for the customer's "1", or null.
+export function readContactRequest(order, now = new Date()) {
+  let request;
+  try {
+    request = JSON.parse(readMetaText(order, MANAGE_META.contact) || 'null');
+  } catch {
+    return null;
+  }
+  const value = String(request?.value || '').trim();
+  const age = now.getTime() - Date.parse(request?.askedAt || '');
+  return ['address', 'phone'].includes(request?.kind) && value && age < CONTACT_EXPIRY_MS ? { kind: request.kind, value, askedAt: request.askedAt } : null;
 }
 
 export function managePhone(order) {
@@ -260,7 +278,23 @@ export const manageMethods = {
       return refusal('not_changeable');
     }
 
-    if (kind === 'replacement') {
+    const contactKind = CONTACT_KINDS[kind];
+    if (contactKind) {
+      if (replaces || !this.isConfirmedStageOrder(order)) {
+        return refusal('not_changeable');
+      }
+      if (readMetaText(order, REPLACEMENT_META.replacementPending)) {
+        return refusal('pending');
+      }
+      if (forSend && readContactRequest(order, this.clock())?.kind !== contactKind) {
+        return refusal('not_changeable');
+      }
+      const parcel = await inspectParcel(order, this.hdAutoSend?.hdClient || null);
+      if (parcel.state === 'collected' || parcel.state === 'unverified') {
+        this.logger.log(`[manage] not changeable orderId=${order.id} ${parcel.detail}`);
+        return refusal('not_changeable');
+      }
+    } else if (kind === 'replacement') {
       let current = order;
       if (replaces) {
         if (!this.isWaitingOrder(order)) {
@@ -287,7 +321,7 @@ export const manageMethods = {
     }
 
     const counters = chainCounters(order, old);
-    if (kind === 'phone' && counters.numberChanged) {
+    if ((kind === 'phone' || kind === 'contact_phone') && counters.numberChanged) {
       return refusal('number_already_changed');
     }
     // A message already held for the morning is replaced, not added: it has been counted.
@@ -321,7 +355,7 @@ export const manageMethods = {
     }
     // The very first confirmation of an order is never held for the quiet hours.
     const firstConfirmation = !replaces && !beforeReplacement && counters.count === 0;
-    return { ok: true, order, replaces, counters, held, phone, quiet: this.isQuietNow() && !firstConfirmation };
+    return { ok: true, order, replaces, counters, held, phone, quiet: this.isQuietNow() && !firstConfirmation && !contactKind };
   },
 
   async manageCheck(orderId, kind) {
@@ -472,6 +506,13 @@ export const manageMethods = {
   },
 
   buildManageMessage(normalizedOrder, order, kind) {
+    if (CONTACT_KINDS[kind]) {
+      const request = readContactRequest(order, this.clock());
+      return this.contactText(CONTACT_KINDS[kind] === 'phone' ? 'contactPhone' : 'contactAddress', {
+        orderId: normalizedOrder.orderId,
+        value: request?.kind === 'phone' ? normalizeMoroccanPhone(request.value) || request.value : request?.value || ''
+      });
+    }
     const oldOrderId = replacedOrderId(order);
     const values = { ...buildTemplateValues(normalizedOrder), oldOrderId, manageLink: this.manageLink(normalizedOrder.orderId) };
     const body = interpolateTemplate(this.messages.confirmationTemplate, values);
@@ -488,7 +529,10 @@ export const manageMethods = {
   async deliverManageMessage(order, kind, { phone, slot, numberChanged, dispatchBy = 0 }) {
     const orderId = String(order.id);
     const sentBefore = getWorkflowMeta(order).confirmationSentAt;
-    const logicalKey = sentBefore
+    const contactKind = CONTACT_KINDS[kind];
+    const request = contactKind ? readContactRequest(order, this.clock()) : null;
+    // A contact change is never the order's first confirmation: the order stays as confirmed as it was.
+    const logicalKey = sentBefore || contactKind
       ? (slot >= 3 ? OUTBOUND_LOGICAL_KEYS.manage3 : OUTBOUND_LOGICAL_KEYS.manage2)
       : OUTBOUND_LOGICAL_KEYS.confirmationRequest;
     const normalizedOrder = { ...normalizeWooOrder(order, this.messages), phone };
@@ -523,7 +567,7 @@ export const manageMethods = {
         orderId,
         phone,
         logicalKey,
-        kind: sentBefore ? 'manage_message' : 'confirmation_request',
+        kind: sentBefore || contactKind ? 'manage_message' : 'confirmation_request',
         message: this.buildManageMessage(normalizedOrder, order, kind),
         now,
         dispatchBy,
@@ -531,7 +575,13 @@ export const manageMethods = {
           lastAt = this.clock().toISOString();
           const counters = this.manageMetaRows(order, { slot, lastAt, numberChanged });
           let persisted;
-          if (!sentBefore) {
+          if (contactKind) {
+            persisted = await this.wooClient.updateOrderMeta(orderId, mergeMetaUpdates(
+              buildLogicalSendMetaUpdate(order, logicalKey, { state: SEND_STATE.sent, reservedAt, sentAt: acceptedAt, messageId: providerMessageId || '' }),
+              counters
+            ));
+            this.rememberContactRequest(persisted || order, phone, request);
+          } else if (!sentBefore) {
             persisted = await this.persistInitialConfirmationMeta({ orderPayload: order, normalizedOrder, acceptedAt, providerMessageId, reservedAt, extraMeta: counters });
             this.store.upsertOrder(pendingEntry(persisted, acceptedAt));
           } else {
@@ -563,7 +613,11 @@ export const manageMethods = {
       } catch (error) {
         this.logger.warn(`[manage] could not record the counters orderId=${orderId}: ${error.message}`);
       }
-      this.store.upsertOrder({ ...pendingEntry(order, sentBefore || lastAt), lastError: 'ambiguous_send_state' });
+      if (contactKind) {
+        this.rememberContactRequest(order, phone, request);
+      } else {
+        this.store.upsertOrder({ ...pendingEntry(order, sentBefore || lastAt), lastError: 'ambiguous_send_state' });
+      }
       return { ok: true, deferred: false, lastAt };
     }
     if (!outcome.persisted) {
@@ -646,7 +700,7 @@ export const manageMethods = {
           cancellationReason,
           manualFollowupRequired: 'no'
         }),
-        metaRows(order, { [MANAGE_META.deferred]: '' }),
+        metaRows(order, { [MANAGE_META.deferred]: '', [MANAGE_META.contact]: readMetaText(order, MANAGE_META.contact) ? '' : undefined }),
         extraMeta
       )
     };
@@ -810,6 +864,174 @@ export const manageMethods = {
       this.tellTeam(`ATTENTION: le client veut annuler la commande ${orderId} (page commande). Elle est geree a la main ou en attente: rien n'a ete fait, a traiter.`);
     }
     return refusal('not_changeable');
+  },
+
+  // --- New address or phone on a confirmed order -----------------------------------------------------------------
+
+  contactText(name, values) {
+    return interpolateTemplate(this.messages[`${name}Message`] || MANAGE_TEXTS[name], values);
+  },
+
+  rememberContactRequest(order, phone, request) {
+    const orderId = String(order.id);
+    const known = this.store.getOrder(orderId);
+    this.store.upsertOrder({
+      ...(known || { ...normalizeWooOrder(order, this.messages), confirmationState: 'confirmed' }),
+      rawOrder: order,
+      contactPhone: phone,
+      contactAskedAt: request?.askedAt || this.clock().toISOString()
+    });
+  },
+
+  forgetContactRequest(orderId) {
+    if (this.store.getOrder(String(orderId))) {
+      this.store.upsertOrder({ orderId: String(orderId), contactPhone: '', contactAskedAt: '' });
+    }
+  },
+
+  // The order waiting for this number's "1" on a contact change: from the local record, else (after a restart, when
+  // `recover`) from the confirmed orders in WooCommerce. -> { orderId, askedAt } or null.
+  async findContactRequest(phone, recover) {
+    const newest = (rows) => rows.sort((a, b) => Date.parse(b.askedAt) - Date.parse(a.askedAt))[0] || null;
+    const local = newest(this.store.listContactRequestsByPhone(phone)
+      .filter((order) => this.clock().getTime() - Date.parse(order.contactAskedAt) < CONTACT_EXPIRY_MS)
+      .map((order) => ({ orderId: String(order.orderId), askedAt: order.contactAskedAt })));
+    if (local || !recover) {
+      return local;
+    }
+    let orders = [];
+    try {
+      orders = await this.listOrdersForStatuses([...new Set([...CONFIRMED_WOO_STATUSES, ...ACTIVE_CONFIRMATION_STATUSES, WOO_STATUS.completed])], { after: new Date(this.clock().getTime() - 30 * 24 * 60 * 60 * 1000).toISOString() });
+    } catch (error) {
+      this.logger.warn(`[manage] could not look for a waiting contact change: ${error.message}`);
+    }
+    return newest((orders || [])
+      .filter((order) => managePhone(order) === phone)
+      .map((order) => ({ orderId: String(order.id), askedAt: readContactRequest(order, this.clock())?.askedAt }))
+      .filter((row) => row.askedAt));
+  },
+
+  // The customer's typed "1" or "2" on a contact change. -> { route } when it was one, { context } with the orders
+  // looked up in WooCommerce when it answers one of those instead, or null.
+  async routeContactReply(message, answerText, context) {
+    if (!['1', '2'].includes(answerText) || String(message.messageKey).startsWith('poll:')) {
+      return null;
+    }
+    // WooCommerce is read whenever no order waits for a confirmation: the local record is empty after a restart.
+    const waiting = await this.findContactRequest(message.senderPhone, !context.pendingOrder);
+    if (!waiting) {
+      return null;
+    }
+    // Before applying anything: orders waiting for a confirmation that this process does not remember.
+    const recovered = context.pendingOrder ? null : await this.resolveReplyContext(message.senderPhone, { allowWooRecovery: true });
+    const askedMs = Date.parse(waiting.askedAt);
+    // A message that went out later (a replacement, a new order, a reminder) is the one being answered.
+    const later = (recovered || context).pendingOrders.some((order) => [
+      order.manageLastAt,
+      order.confirmationSentAt,
+      order.lastReminderAt,
+      readMetaText(order.rawOrder, MANAGE_META.lastAt),
+      getWorkflowMeta(order.rawOrder || {}).confirmationSentAt,
+      getWorkflowMeta(order.rawOrder || {}).lastReminderAt
+    ].some((at) => Date.parse(at || '') > askedMs));
+    // The same answer given again right after it settled another order is not about this change.
+    const repeat = this.findRecentlyDecidedOrder(message.senderPhone, answerText);
+    if (later || (repeat && Date.parse(repeat.decisionAt) > askedMs)) {
+      return recovered?.pendingOrder ? { context: recovered } : null;
+    }
+    const route = await this.withOrderLock(waiting.orderId, () => this.applyContactReply(waiting.orderId, answerText, message));
+    return route ? { route } : null;
+  },
+
+  async applyContactReply(orderId, answerText, message) {
+    const order = await this.readOrderOrNull(orderId);
+    const request = readContactRequest(order, this.clock());
+    if (!request || managePhone(order) !== message.senderPhone) {
+      this.forgetContactRequest(orderId);
+      return null;
+    }
+    this.appendInboundMessage({ message, orderId, storedKind: 'customer_reply' });
+    const done = { ok: true, ignored: false, duplicate: false, failed: false, route: 'confirmation', eventStatus: 'processed' };
+    const isPhone = request.kind === 'phone';
+    const say = (name) => this.safeSendTrackedMessage({
+      phone: message.senderPhone,
+      orderId,
+      kind: 'manage_contact_reply',
+      message: this.contactText(name, { orderId })
+    });
+    const clear = () => this.wooClient.updateOrderMeta(orderId, metaRows(order, { [MANAGE_META.contact]: '' }));
+    const finish = async (name, note) => {
+      await clear().catch((error) => this.logger.warn(`[manage] could not clear the contact change orderId=${orderId}: ${error.message}`));
+      this.forgetContactRequest(orderId);
+      await this.safeAddOrderNote(orderId, note);
+      await say(name);
+      return done;
+    };
+
+    if (answerText === '2') {
+      return finish(isPhone ? 'contactKeptPhone' : 'contactKeptAddress', 'The customer refused the new address or phone asked for on the order page.');
+    }
+    if (!this.isConfirmedStageOrder(order) || readMetaText(order, REPLACEMENT_META.replacementPending)) {
+      return finish('contactFailed', 'The new address or phone could not be applied: the order is not in a changeable state.');
+    }
+    const parcelPhone = isPhone ? normalizeMoroccanPhone(request.value) : '';
+    if (isPhone && !parcelPhone) {
+      return finish('contactFailed', 'The new phone could not be applied: not a Moroccan number.');
+    }
+
+    const checkByHand = (detail) => {
+      this.tellTeam(`ATTENTION: commande ${orderId}: ${isPhone ? 'nouveau numero' : 'nouvelle adresse'} (${request.value}) peut-etre appliquee a moitie. Verifier High Delivery ET WooCommerce. ${String(detail).slice(0, 160)}`);
+      return finish('contactChecking', `The new ${request.kind} may be half applied, check by hand: ${detail}`);
+    };
+    let result;
+    try {
+      result = await editParcelThen({
+        orderId,
+        hdAutoSend: this.hdAutoSend,
+        wooClient: this.wooClient,
+        patch: isPhone ? { recipient_phone: parcelPhone } : { address: request.value },
+        logger: this.logger,
+        apply: async (fresh) => {
+          // The parcel's address is one line: the second line must not keep an old half.
+          const change = isPhone ? { phone: request.value } : { address_1: request.value, address_2: '' };
+          const shippingHas = Boolean(isPhone ? fresh.shipping?.phone : fresh.shipping?.address_1);
+          const updated = await this.wooClient.updateOrder(orderId, {
+            billing: { ...fresh.billing, ...change },
+            ...(shippingHas ? { shipping: { ...fresh.shipping, ...change } } : {}),
+            meta_data: metaRows(fresh, {
+              [MANAGE_META.contact]: '',
+              [MANAGE_META.contactDone]: request.askedAt,
+              [MANAGE_META.numberChanged]: isPhone ? 'yes' : undefined
+            })
+          });
+          return { ...fresh, ...(updated || {}) };
+        }
+      });
+    } catch (error) {
+      this.logger.warn(`[manage] contact change failed orderId=${orderId}: ${error.message}`);
+      return checkByHand(error.message);
+    }
+    if (result.outcome === 'unsure') {
+      return checkByHand(result.detail);
+    }
+    if (result.outcome === 'too_late') {
+      return finish('contactTooLate', 'The new address or phone came too late: the courier has the parcel.');
+    }
+    if (result.outcome !== 'ok') {
+      this.tellTeam(`ATTENTION: le client veut ${isPhone ? 'un autre numero' : 'une autre adresse'} pour la commande ${orderId} (${request.value}) mais le colis High Delivery n'a pas pu etre modifie (${String(result.detail).slice(0, 160)}). A faire a la main.`);
+      return finish('contactFailed', `The new ${request.kind} could not be applied: ${result.detail}`);
+    }
+    this.forgetContactRequest(orderId);
+    const current = result.value;
+    const known = this.store.getOrder(orderId);
+    if (known) {
+      const normalized = normalizeWooOrder(current, this.messages);
+      this.store.upsertOrder({ ...known, rawOrder: current, phone: normalized.phone || known.phone, deliveryAddress: normalized.deliveryAddress, contactPhone: '', contactAskedAt: '' });
+    }
+    await this.safeAddOrderNote(orderId, `The customer confirmed a new ${request.kind} on WhatsApp${result.parcelEdited ? '; the HighDelivery parcel was updated' : ''}.`);
+    this.tellTeam(`Rhymat: commande ${orderId}: ${isPhone ? 'nouveau numero' : 'nouvelle adresse'} : ${request.value}${result.parcelEdited ? ' (colis High Delivery modifie)' : ''}.${result.check ? ` ATTENTION: ${result.check}, verifier le colis.` : ''}`);
+    await say(isPhone ? 'contactDonePhone' : 'contactDoneAddress');
+    return done;
   },
 
   // --- Replacement orders ---------------------------------------------------------------------------------------
